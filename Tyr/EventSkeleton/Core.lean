@@ -56,10 +56,7 @@ inductive SkeletonMoveKind where
   | markMarginalize
   | markScoreSample
   | branchAggregate
-  | belNoise
-  | itoPQ
   | learnedComplement
-  | dropSmallTimingTerm
   deriving Repr, BEq, Inhabited
 
 inductive MoveExactness where
@@ -74,9 +71,7 @@ namespace SkeletonMoveKind
 /-- Default exactness class for a move before any local approximation metadata. -/
 def defaultExactness : SkeletonMoveKind → MoveExactness
   | .markScoreSample => .unbiasedEstimator
-  | .belNoise => .unbiasedEstimator
   | .learnedComplement => .learnedApproximation
-  | .dropSmallTimingTerm => .controlledApproximation
   | _ => .exact
 
 end SkeletonMoveKind

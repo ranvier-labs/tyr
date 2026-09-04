@@ -1,5 +1,13 @@
 import Tyr.MctxDag.Tree
 
+/-!
+# Tyr.MctxDag.QTransforms
+
+Q-value transforms for `DagTree`, mirroring `Tyr.Mctx.QTransforms`:
+min/max and parent/siblings normalization, the completed-Q transform, and
+the Gumbel MuZero mixed value.
+-/
+
 namespace torch.mctxdag
 
 private def completeQvalues (qvalues : Array Float) (visitCounts : Array UInt64) (value : Float) : Array Float :=

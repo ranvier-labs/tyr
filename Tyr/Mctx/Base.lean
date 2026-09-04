@@ -1,5 +1,13 @@
 import Std
 
+/-!
+# Tyr.Mctx.Base
+
+Core data model for Tyr's Monte Carlo tree search (Lean port of mctx):
+action/node-index aliases, root/recurrent function I/O, policy outputs, and
+search summaries shared by all `Tyr.Mctx` submodules.
+-/
+
 namespace torch.mctx
 
 abbrev Action := Nat

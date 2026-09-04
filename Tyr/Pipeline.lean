@@ -150,16 +150,15 @@ structure BackgroundTask (α : Type) where
   /-- IO action to get result (blocks until complete) -/
   await : IO α
 
-/-- Spawn a background task -/
+/-- Spawn a background task. The action starts running immediately on a
+    separate thread (`IO.asTask`); the wait is performed lazily by `await`. -/
 def spawnBackground (description : String) (action : IO α) : IO (BackgroundTask α) := do
-  -- In a real implementation, this would spawn a thread
-  -- For now, we use IO.asTask
   let task ← IO.asTask action
   let id := 0  -- Would be a real task ID
   return {
     id := id
     description := description
-    await := IO.ofExcept (← IO.wait task)
+    await := do IO.ofExcept (← IO.wait task)
   }
 
 /-- Await a background task -/

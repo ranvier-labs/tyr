@@ -1,5 +1,13 @@
 import Tyr.MctxDag.Search
 
+/-!
+# Tyr.MctxDag.Policies
+
+Unbatched DAG-backed policies, mirroring `Tyr.Mctx.Policies`:
+`muzeroPolicyDag`, `alphazeroPolicyDag` with optional graph persistence,
+and `gumbelMuZeroPolicyDag`.
+-/
+
 namespace torch.mctxdag
 
 private def addArrays (a b : Array Float) : Array Float :=

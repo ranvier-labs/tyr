@@ -2320,6 +2320,28 @@ lean_object* lean_torch_slice_scatter_along_dim(
   return fromTorchTensor(result_);
 }
 
+// In-place variant of `lean_torch_slice_scatter_along_dim`: writes `src` into
+// `input` directly instead of cloning. `input` must be uniquely owned by the
+// caller — the mutation is observable through any other alias of the tensor.
+// Same borrowed-in/inc-out contract as `lean_torch_zero_grad`.
+lean_object* lean_torch_slice_scatter_along_dim_inplace(
+  lean_obj_arg /*s*/,
+  lean_obj_arg /*src_shape*/,
+  b_lean_obj_arg input,
+  uint64_t dim,
+  uint64_t start,
+  b_lean_obj_arg src
+) {
+  auto input_ = borrowTensor(input);
+  auto src_ = borrowTensor(src);
+  auto dim_i = static_cast<int64_t>(dim);
+  auto start_i = static_cast<int64_t>(start);
+
+  input_.narrow(dim_i, start_i, src_.size(dim_i)).copy_(src_);
+  lean_inc(input);
+  return input;
+}
+
 // Slice a 2D tensor along dimension 0: data[start:start+len, :]
 lean_object* lean_torch_slice_2d(
   uint64_t /*n*/,
@@ -2630,6 +2652,170 @@ lean_object* lean_torch_sdpa_4d(
 
   return fromTorchTensor(result_);
 }
+
+// Fused SDPA with an explicit additive float bias [batch, n_head, seq, seq].
+// Replaces the manual matmul -> bias add -> masked_fill -> softmax -> matmul
+// pipeline (and its un-fused backward) for the molecule transformers.
+lean_object* lean_torch_sdpa_4d_bias(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*n_head*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  b_lean_obj_arg bias,
+  double dropout_p,
+  uint8_t is_causal
+) {
+  auto query_ = borrowTensor(query);
+  auto key_ = borrowTensor(key);
+  auto value_ = borrowTensor(value);
+  auto bias_ = borrowTensor(bias);
+
+  try {
+    auto result_ = torch::scaled_dot_product_attention(
+      query_,
+      key_,
+      value_,
+      bias_,  // attn_mask: additive float bias
+      dropout_p,
+      is_causal
+    );
+    return fromTorchTensor(result_);
+  } catch (const c10::Error& e) {
+    std::fprintf(stderr, "[tyr] sdpa_4d_bias libtorch error:\n%s\n", e.what());
+    std::fflush(stderr);
+    std::abort();
+  }
+}
+
+// In-place whole-tensor copy: `dst.copy_(src)` (converts dtype if needed).
+// Same ownership contract as the other in-place mutators (zero_grad etc.):
+// borrowed args, returns an inc'd reference to the mutated `dst`.
+// NoGradGuard: copying into requires-grad leaves (optimizer/state fold-back)
+// is only legal with autograd off.
+lean_object* lean_torch_copy_inplace(
+  lean_obj_arg /*s*/,
+  b_lean_obj_arg dst,
+  b_lean_obj_arg src
+) {
+  auto dst_ = borrowTensor(dst);
+  auto src_ = borrowTensor(src);
+  torch::NoGradGuard guard;
+  dst_.copy_(src_);
+  lean_inc(dst);
+  return dst;
+}
+
+// No-op that forces its tensor argument at the FFI boundary. Used to force
+// lazy Lean staging computations (static buffers, in-place copies) to run
+// eagerly *before* a CUDA graph capture/replay instead of inside it.
+lean_object* lean_torch_touch(lean_obj_arg /*s*/, b_lean_obj_arg /*t*/, lean_object* w) {
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+// Tensor × 0-dim tensor (broadcast scalar): lets a captured CUDA graph take a
+// scalar input (e.g. the learning rate) through a static buffer instead of a
+// baked-in Float.
+lean_object* lean_torch_mul_tensor_scalar(
+  lean_obj_arg /*s*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg scalar
+) {
+  auto input_ = borrowTensor(input);
+  auto scalar_ = borrowTensor(scalar);
+  return fromTorchTensor(input_ * scalar_);
+}
+
+// --- Generic CUDA graph capture/replay -------------------------------------
+// A single process-wide graph slot is enough for the training-step use case:
+// capture a static-shaped region once, replay it with fresh data copied into
+// the same input buffers. Errors surface as Lean IO errors so callers can
+// fall back to eager execution. CPU-only libtorch builds (which lack the CUDA
+// cmake macros header) get stubs that report unavailability.
+
+#if __has_include(<ATen/cuda/CUDAGraph.h>) && __has_include(<c10/cuda/impl/cuda_cmake_macros.h>)
+#define TYR_WITH_CUDA_GRAPH 1
+#include <ATen/cuda/CUDAGraph.h>
+#else
+#define TYR_WITH_CUDA_GRAPH 0
+#endif
+
+#if TYR_WITH_CUDA_GRAPH
+#include <c10/cuda/CUDAStream.h>
+namespace {
+std::unique_ptr<at::cuda::CUDAGraph> g_cuda_graph;
+}
+#endif
+
+namespace {
+lean_object* tyrNoCudaGraph() {
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA graphs not available in this libtorch build")));
+}
+
+lean_object* lean_torch_cuda_graph_capture_begin(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    // Capture is illegal on the legacy default stream; mirror
+    // torch.cuda.graph's side-stream dance: sync, switch to a pool stream,
+    // capture there, and let replay run on the caller's current stream.
+    c10::cuda::getCurrentCUDAStream().synchronize();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool(false));
+    g_cuda_graph = std::make_unique<at::cuda::CUDAGraph>();
+    g_cuda_graph->capture_begin();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    g_cuda_graph.reset();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph capture_begin failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_capture_end(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    g_cuda_graph->capture_end();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    g_cuda_graph.reset();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph capture_end failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_replay(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    g_cuda_graph->replay();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph replay failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_reset(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  g_cuda_graph.reset();
+#endif
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+} // anonymous namespace
 
 // Save tensor to a binary file
 lean_object* lean_torch_save_tensor(lean_obj_arg /*s*/, b_lean_obj_arg tensor, b_lean_obj_arg path_obj, lean_object* w) {

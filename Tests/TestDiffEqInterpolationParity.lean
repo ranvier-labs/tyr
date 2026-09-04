@@ -208,7 +208,3 @@ def run : IO Unit := do
   testLinearInterpolationKnotAndSlopeParity
 
 end Tests.DiffEqInterpolationParity
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqInterpolationParity.run
-  IO.println "TestDiffEqInterpolationParity: ok"

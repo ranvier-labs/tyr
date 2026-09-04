@@ -6,9 +6,13 @@ import Tyr.Typed
 import Tyr.SafeTensors
 import Tyr.TensorStruct
 import Tyr.Mctx
+import Tyr.MctxDag
 
 -- AutoGrad (JAX-style AD on IR)
 import Tyr.AD
+
+-- Event-skeleton representation for hybrid/stochastic differentiation
+import Tyr.EventSkeleton
 
 -- Neural network modules
 import Tyr.Module
@@ -34,6 +38,7 @@ import Tyr.Sharding
 import Tyr.Data
 import Tyr.DataLoader
 import Tyr.Tokenizer
+import Tyr.Text
 
 -- HuggingFace Hub utilities
 import Tyr.Hub
@@ -74,11 +79,14 @@ This root module re-exports the core, general-purpose surface area:
 - `Tyr.SafeTensors`: typed SafeTensors schema and loading support.
 - `Tyr.TensorStruct`: generic traversal/mapping over tensor-containing structures.
 - `Tyr.Mctx`: Monte Carlo tree search infrastructure.
+- `Tyr.MctxDag`: DAG-oriented counterpart to `Tyr.Mctx` with sharing semantics.
 - `Tyr.AutoGrad`: JAX-style automatic differentiation over Tyr IR.
+- `Tyr.EventSkeleton`: event-skeleton representation for hybrid/stochastic differentiation.
 - `Tyr.Module`: neural network module abstractions and layers.
 - `Tyr.Optim` (+ scheduler/dist variants): optimizers and learning-rate scheduling.
 - `Tyr.Distributed` and `Tyr.Sharding`: distributed training and partitioning utilities.
 - `Tyr.Data`, `Tyr.DataLoader`, `Tyr.Tokenizer`: data ingestion, batching, and tokenization.
+- `Tyr.Text`: streaming text consensus and voice-activity (VAD) providers.
 - `Tyr.Checkpoint`: model/optimizer checkpoint save and restore.
 - `Tyr.Pipeline`: training/inference orchestration helpers.
 - `Tyr.GPU` (+ `Tyr.GPU.AD`, `Tyr.GPU.AutoGrad`): GPU kernel abstractions and AD support.

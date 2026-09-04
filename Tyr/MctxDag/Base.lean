@@ -1,6 +1,13 @@
 import Tyr.Mctx.Base
 import Tyr.Mctx.Math
 
+/-!
+# Tyr.MctxDag.Base
+
+Shared aliases re-exporting the `torch.mctx` core types (actions, model
+I/O, summaries, recurrent functions) for the DAG search namespace.
+-/
+
 namespace torch.mctxdag
 
 abbrev Action := torch.mctx.Action

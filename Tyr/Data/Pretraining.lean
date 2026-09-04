@@ -21,8 +21,10 @@ open torch.Log
 
 /-! ## Parquet FFI Declarations
 
-These are placeholder FFI declarations for parquet file operations.
-Actual implementation would use Apache Arrow via C++ bindings.
+FFI declarations for parquet file operations. These are implemented in
+`cc/src/tyr_parquet.cpp` using Apache Arrow. When Arrow/Parquet development
+headers are unavailable at build time, the C++ side falls back to stubs that
+fail with an IO error ("Parquet support unavailable").
 -/
 
 /-- Parquet file metadata -/

@@ -17,11 +17,6 @@ inductive DispatchRoute where
   | portable
   deriving Repr, Inhabited, BEq
 
-private def scaleMatchesKernel (scale : Option Float) : Bool :=
-  match scale with
-  | none => true
-  | some s => Float.abs (s - 0.125) <= 1.0e-6
-
 /-- Reusable runtime problem descriptor for the typed FlashAttention surface. -/
 def attentionProblem
     {batch nHead nKvHead qSeq kvSeq headDim : UInt64}
@@ -63,7 +58,6 @@ def supportsTkMhaKernel
     (scale : Option Float := none)
     (enableGqa : Bool := false)
     : Bool :=
-  let _ := scaleMatchesKernel scale
   (currentSpecialization q k v attnMask dropoutP isCausal scale enableGqa).isNative
 
 /-- Typed dispatch route (kernel vs portable) for observability/debugging. -/

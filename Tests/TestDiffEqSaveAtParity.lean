@@ -296,8 +296,8 @@ private def solveStepTo (ts : Array Time) (saveat : SaveAt) :
       (Args := Unit)
       (Controller := ConstantStepSize)
       term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := saveat)
-  LeanTest.assertTrue (sol.result == Result.internalError)
-    "Empty SubSaveAt leaf should be rejected with internalError"
+  LeanTest.assertTrue (sol.result == Result.invalidInput)
+    "Empty SubSaveAt leaf should be rejected with invalidInput"
   LeanTest.assertTrue (sol.ts.isNone && sol.ys.isNone)
     "Empty SubSaveAt leaf rejection should not produce saved ts/ys"
 

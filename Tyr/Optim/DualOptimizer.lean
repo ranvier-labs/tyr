@@ -341,6 +341,13 @@ def MatrixParamState.step {m n : UInt64} (st : MatrixParamState m n) : Nat :=
   | .manifoldMuon s => s.step
   | .genericManifold s => s.step
 
+/-- Backend tag name for a matrix state (used in error messages). -/
+def MatrixParamState.backendName {m n : UInt64} (st : MatrixParamState m n) : String :=
+  match st with
+  | .norMuon _ => "norMuon"
+  | .manifoldMuon _ => "manifoldMuon"
+  | .genericManifold _ => "genericManifold"
+
 private def stepOnManifoldFamily {m n : UInt64}
     (family : MatrixManifoldFamily)
     (param : T #[m, n])
@@ -398,7 +405,13 @@ def stepGenericManifoldSingle {m n : UInt64}
   }
   return (newParam, newState)
 
-/-- Single matrix step that dispatches to the configured matrix backend. -/
+/-- Single matrix step that dispatches to the configured matrix backend.
+
+    The state constructor must match the configured backend. A mismatch means the
+    state was built under a different config (e.g. a mid-run backend change) and
+    stepping with it would silently drop the accumulated momentum state, so this
+    throws `IO.userError` instead of re-initializing. Fresh state for a first step
+    should be built with `initMatrixParamState cfg`. -/
 def stepMatrixSingle {m n : UInt64}
     (param : T #[m, n])
     (grad : T #[m, n])
@@ -410,24 +423,24 @@ def stepMatrixSingle {m n : UInt64}
     : IO (T #[m, n] × MatrixParamState m n) := do
   match cfg.matrixOptimizer with
   | .norMuon =>
-    let st := match state with
-      | .norMuon s => s
-      | _ => NorMuon.initParamState param
+    let st ← match state with
+      | .norMuon s => pure s
+      | _ => throw <| IO.userError s!"stepMatrixSingle: state backend '{state.backendName}' does not match configured backend 'norMuon'; refusing to silently reset optimizer state"
     let muonCfg := getMuonConfigAtStep cfg step
     let (p', st') ← NorMuon.stepSingle param grad st muonCfg lrMul wdMul
     return (p', .norMuon st')
   | .manifoldMuon =>
     if usesSpecializedStiefelPath cfg then
-      let st := match state with
-        | .manifoldMuon s => s
-        | _ => torch.Optim.ManifoldMuon.initParamState param
+      let st ← match state with
+        | .manifoldMuon s => pure s
+        | _ => throw <| IO.userError s!"stepMatrixSingle: state backend '{state.backendName}' does not match configured backend 'manifoldMuon' (specialized Stiefel path); refusing to silently reset optimizer state"
       let manifoldCfg := getManifoldMuonConfigAtStep cfg step
       let (p', st') ← torch.Optim.ManifoldMuon.stepSingle param grad st manifoldCfg lrMul
       return (p', .manifoldMuon st')
     else
-      let st := match state with
-        | .genericManifold s => s
-        | _ => initGenericManifoldState param
+      let st ← match state with
+        | .genericManifold s => pure s
+        | _ => throw <| IO.userError s!"stepMatrixSingle: state backend '{state.backendName}' does not match configured generic manifold path; refusing to silently reset optimizer state"
       let (p', st') ← stepGenericManifoldSingle param grad st cfg step lrMul
       return (p', .genericManifold st')
 

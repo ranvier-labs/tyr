@@ -19,6 +19,8 @@ import Tyr.Model.Flowfusion
 
 namespace torch.branching
 
+universe u
+
 /-! ## RNG utilities (deterministic LCG) -/
 
 structure Rng where
@@ -704,16 +706,16 @@ def sampleForest
     match sel with
     | none => break
     | some (i, j) =>
-        let i := if i < j then i else j
-        let j := if i < j then j else i
-        let left := nodesAcc[i]!
-        let right := nodesAcc[j]!
+        let lo := min i j
+        let hi := max i j
+        let left := nodesAcc[lo]!
+        let right := nodesAcc[hi]!
         let mergedData := merger left.data right.data left.weight right.weight
         let merged := FlowNode.merge 0.0 mergedData left right
-        -- replace i, remove j
-        nodesAcc := nodesAcc.set! i merged
-        nodesAcc := eraseIdx nodesAcc j
-        rng := policy.update nodesAcc i j i rng
+        -- replace lo, remove hi
+        nodesAcc := nodesAcc.set! lo merged
+        nodesAcc := eraseIdx nodesAcc hi
+        rng := policy.update nodesAcc lo hi lo rng
   nodesAcc := policy.reorder nodesAcc
   -- sample split times for each root
   let mut allTimes : Array Float := #[]
@@ -985,6 +987,143 @@ structure BranchingGenerateResult (α : Type) where
   times : Array Float
   deriving Repr, Inhabited
 
+/-!
+## Runtime lineage reconstruction
+
+`BranchingState.ids` identifies conditional-tree anchors and is therefore not a
+unique particle identity after a forward split.  The structures below assign
+separate runtime identities to generated particles without changing the state
+representation used by training.
+-/
+
+structure LineageParticle where
+  particleId : Nat
+  parentId? : Option Nat := none
+  birthEventId? : Option Nat := none
+  deriving Repr, Inhabited, BEq
+
+inductive LineageEventKind where
+  | split
+  | delete
+  deriving Repr, Inhabited, BEq
+
+structure LineageEvent where
+  eventId : Nat
+  kind : LineageEventKind
+  t0 : Float
+  t1 : Float
+  parentId : Nat
+  childIds : Array Nat := #[]
+  deriving Repr, Inhabited
+
+structure LineageFrame where
+  step : Nat
+  time : Float
+  particles : Array LineageParticle
+  deriving Repr, Inhabited
+
+structure BranchingLineageTrace where
+  frames : Array LineageFrame
+  events : Array LineageEvent
+  deriving Repr, Inhabited
+
+/--
+Assign stable runtime particle identities to an already generated trajectory.
+
+At a split the source identity terminates and `splitCount + 1` child identities
+are created.  `appendOnSplit` must match the coalescence policy used for the
+forward pass so that lineage entries stay aligned with state-array entries.
+-/
+def reconstructLineage
+    (result : BranchingGenerateResult α)
+    (appendOnSplit : Bool := false) :
+    Except String BranchingLineageTrace := do
+  if result.trajectory.isEmpty then
+    throw "cannot reconstruct lineage for an empty trajectory"
+  if result.times.size != result.trajectory.size then
+    throw s!"lineage time/frame count mismatch: times={result.times.size}, frames={result.trajectory.size}"
+  if result.events.size + 1 != result.trajectory.size then
+    throw s!"lineage event/frame count mismatch: event_steps={result.events.size}, frames={result.trajectory.size}"
+  let finalFrameSize := result.trajectory[result.trajectory.size - 1]!.state.size
+  if result.finalState.state.size != finalFrameSize then
+    throw s!"lineage final-state mismatch: final={result.finalState.state.size}, last_frame={finalFrameSize}"
+  let initialSize := result.trajectory[0]!.state.size
+  let initialParticles := (Array.range initialSize).map (fun i => { particleId := i + 1 })
+  let mut current := initialParticles
+  let mut frames : Array LineageFrame := #[{
+    step := 0
+    time := result.times.getD 0 0.0
+    particles := initialParticles
+  }]
+  let mut lineageEvents : Array LineageEvent := #[]
+  let mut nextParticleId := initialSize + 1
+  let mut nextEventId := 1
+  for step in [:result.trajectory.size - 1] do
+    let stepEvents := result.events.getD step #[]
+    let mut seenSources : Array Nat := #[]
+    for event in stepEvents do
+      if event.sourceIndex >= current.size then
+        throw s!"lineage event source index {event.sourceIndex} is outside frame {step} of size {current.size}"
+      if seenSources.contains event.sourceIndex then
+        throw s!"multiple lineage events target source index {event.sourceIndex} at step {step}"
+      if event.deleted && event.splitCount > 0 then
+        throw s!"lineage event at step {step} cannot both delete and split source index {event.sourceIndex}"
+      seenSources := seenSources.push event.sourceIndex
+    let mut primary : Array LineageParticle := #[]
+    let mut appended : Array LineageParticle := #[]
+    for i in [:current.size] do
+      let particle := current[i]!
+      let event? := stepEvents.find? (fun event => event.sourceIndex == i)
+      match event? with
+      | none => primary := primary.push particle
+      | some event =>
+          let eventId := nextEventId
+          nextEventId := nextEventId + 1
+          if event.deleted then
+            lineageEvents := lineageEvents.push {
+              eventId
+              kind := .delete
+              t0 := event.t0
+              t1 := event.t1
+              parentId := particle.particleId
+            }
+          else if event.splitCount > 0 then
+            let mut children : Array LineageParticle := #[]
+            for _ in [:(event.splitCount + 1)] do
+              children := children.push {
+                particleId := nextParticleId
+                parentId? := some particle.particleId
+                birthEventId? := some eventId
+              }
+              nextParticleId := nextParticleId + 1
+            primary := primary.push children[0]!
+            for child in children.extract 1 children.size do
+              if appendOnSplit then
+                appended := appended.push child
+              else
+                primary := primary.push child
+            lineageEvents := lineageEvents.push {
+              eventId
+              kind := .split
+              t0 := event.t0
+              t1 := event.t1
+              parentId := particle.particleId
+              childIds := children.map (fun child => child.particleId)
+            }
+          else
+            primary := primary.push particle
+    let nextParticles := primary ++ appended
+    let expectedSize := result.trajectory[step + 1]!.state.size
+    if nextParticles.size != expectedSize then
+      throw s!"lineage/state size mismatch at step {step + 1}: lineage={nextParticles.size}, state={expectedSize}"
+    current := nextParticles
+    frames := frames.push {
+      step := step + 1
+      time := result.times.getD (step + 1) 0.0
+      particles := current
+    }
+  return { frames, events := lineageEvents }
+
 private def maskBaseStep (x : BranchingState α) (stepped : Array α) [Inhabited α] : Array α := Id.run do
   let mut out : Array α := #[]
   for i in [:x.state.size] do
@@ -1159,14 +1298,15 @@ def branchingGenerate
     events := events.push result.events
   ({ finalState := state, trajectory, events, times := schedule }, rng)
 
-partial def treeBridge
+partial def treeBridge {P : Type u}
     (bridge : P → α → α → Float → Float → α)
-    (P : P)
+    (base : P)
     (node : FlowNode α)
     (x0 : α)
     (targetT currentT : Float)
     (deletionDist : TimeDist)
     (rng : Rng)
+    (sampleBridge? : Option (P → α → α → Float → Float → Rng → α × Rng) := none)
     : Array (Segment α) × Rng := Id.run do
   if !node.flowable then
     let seg : Segment α :=
@@ -1186,7 +1326,11 @@ partial def treeBridge
       rng := rng'
       survive := u >= (1.0 - survRatio)
     if survive then
-      let Xt := bridge P x0 node.data currentT targetT
+      let (Xt, rng') :=
+        match sampleBridge? with
+        | some sampleBridge => sampleBridge base x0 node.data currentT targetT rng
+        | none => (bridge base x0 node.data currentT targetT, rng)
+      rng := rng'
       let seg : Segment α :=
         { Xt, t := targetT, anchor := node.data, descendants := node.weight,
           del := node.del, branchable := node.branchable, flowable := true, group := node.group,
@@ -1195,18 +1339,24 @@ partial def treeBridge
     else
       return (#[], rng)
   else
-    let nextX := bridge P x0 node.data currentT node.time
     let mut out : Array (Segment α) := #[]
     let mut rng := rng
+    let (nextX, rng') :=
+      match sampleBridge? with
+      | some sampleBridge => sampleBridge base x0 node.data currentT node.time rng
+      | none => (bridge base x0 node.data currentT node.time, rng)
+    rng := rng'
     for child in node.children do
-      let (segs, rng') := treeBridge bridge P child nextX targetT node.time deletionDist rng
+      let (segs, rng') :=
+        treeBridge bridge base child nextX targetT node.time deletionDist rng
+          (sampleBridge? := sampleBridge?)
       rng := rng'
       out := out ++ segs
     return (out, rng)
 
-def forestBridge
+def forestBridge {P : Type u}
     (bridge : P → α → α → Float → Float → α)
-    (P : P)
+    (base : P)
     (x0Sampler : FlowNode α → α)
     (x1 : Array α)
     (t : Float)
@@ -1224,6 +1374,8 @@ def forestBridge
     (maxLen : Option Nat := none)
     (maxResamples : Nat := 8)
     (rng : Rng := { state := 0 })
+    (sampleBridge? : Option (P → α → α → Float → Float → Rng → α × Rng) := none)
+    (sampleX0? : Option (FlowNode α → Rng → α × Rng) := none)
     : Array (Segment α) × Float × Rng := Id.run do
   let mut rng := rng
   let mut forest : Array (FlowNode α) := #[]
@@ -1258,8 +1410,14 @@ def forestBridge
       attempts := attempts + 1
   let mut out : Array (Segment α) := #[]
   for root in forest do
-    let x0 := x0Sampler root
-    let (segs, rng') := treeBridge bridge P root x0 tUsed 0.0 deletionTime rng
+    let (x0, rng') :=
+      match sampleX0? with
+      | some sampleX0 => sampleX0 root rng
+      | none => (x0Sampler root, rng)
+    rng := rng'
+    let (segs, rng') :=
+      treeBridge bridge base root x0 tUsed 0.0 deletionTime rng
+        (sampleBridge? := sampleBridge?)
     rng := rng'
     out := out ++ segs
   (out, tUsed, rng)
@@ -1275,9 +1433,9 @@ structure BranchingBridgeResult (α : Type) where
   prevCoalescence : Array (Array Float)
   deriving Repr
 
-def branchingBridge
+def branchingBridge {P : Type u}
     (bridge : P → α → α → Float → Float → α)
-    (P : P)
+    (base : P)
     (x0Sampler : FlowNode α → α)
     (x1s : Array (BranchingState α))
     (times : Array Float)
@@ -1295,6 +1453,8 @@ def branchingBridge
     (deletionPad : Float := 0.0)
     (x1Modifier : BranchingState α → BranchingState α := id)
     (rng : Rng := { state := 0 })
+    (sampleBridge? : Option (P → α → α → Float → Float → Rng → α × Rng) := none)
+    (sampleX0? : Option (FlowNode α → Rng → α × Rng) := none)
     : BranchingBridgeResult α × Rng := Id.run do
   let mut rng := rng
   let groupings := x1s.map (fun x => x.groupings)
@@ -1342,9 +1502,10 @@ def branchingBridge
     let x1 := x1s[i]!
     let t := times[i]!
     let (segs, tUsed, rng') :=
-      forestBridge bridge P x0Sampler x1.state t x1.groupings x1.branchmask x1.flowmask x1.del
+      forestBridge bridge base x0Sampler x1.state t x1.groupings x1.branchmask x1.flowmask x1.del
         branchTime deletionTime policy merger (some (resolvedMins[i]!)) coalescenceFactor
         useBranchingTimeProb maxLen maxResamples rng
+        (sampleBridge? := sampleBridge?) (sampleX0? := sampleX0?)
     rng := rng'
     out := out.push segs
     usedTimes := usedTimes.push tUsed

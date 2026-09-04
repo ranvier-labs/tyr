@@ -21,6 +21,10 @@ structure BranchingTrainConfig where
   padToken : Int64 := 0
   timeScale : Float := 1.0e6
   anchorWeight : Float := 1.0
+  /-- Molecule-coordinate multiplier within the anchor objective. -/
+  coordWeight : Float := 1.0
+  /-- Molecule-label multiplier within the anchor objective. -/
+  labelWeight : Float := 1.0
   splitsWeight : Float := 1.0
   delWeight : Float := 1.0
   weightDecay : Float := 0.0

@@ -18,11 +18,6 @@ namespace Examples.BranchingFlows
 open torch
 open torch.branching
 
-private def noEventTimeDist : TimeDist :=
-  { cdf := fun _ => 0.0,
-    pdf := fun _ => 0.0,
-    quantile := fun _ => 0.0 }
-
 private def defaultJsonl : String :=
   "{\"name\":\"water\",\"smiles\":\"O\",\"atoms\":[{\"label\":8,\"coord\":[0.0,0.0,0.0]},{\"label\":1,\"coord\":[0.95,0.0,0.0]},{\"label\":1,\"coord\":[-0.24,0.93,0.0]}]}\n" ++
   "{\"name\":\"ammonia\",\"smiles\":\"N\",\"atoms\":[{\"label\":7,\"coord\":[0.0,0.0,0.0]},{\"label\":1,\"coord\":[0.94,0.0,0.0]},{\"label\":1,\"coord\":[-0.31,0.89,0.0]},{\"label\":1,\"coord\":[-0.31,-0.89,0.0]}]}\n" ++
@@ -35,6 +30,7 @@ structure RunOptions where
   outputPrefix : String := "examples_branching_molecule_trained"
   checkpointDir : String := "checkpoints/branchingflows_molecule_train_generate"
   resumeCheckpoint? : Option String := none
+  generateOnly : Bool := false
   saveCheckpoint : Bool := true
   saveOptimizer : Bool := true
   resumeOptimizer : Bool := true
@@ -45,6 +41,7 @@ structure RunOptions where
   batchSize : Nat := 4
   vocabSize : Nat := 10
   maskToken : Nat := 0
+  fixedLabels : Bool := false
   maxLen : UInt64 := 16
   fullArchitecture : Bool := false
   hiddenDim : UInt64 := 16
@@ -56,26 +53,38 @@ structure RunOptions where
   coordUpdateLayers : Nat := 1
   lr : Float := 8.0e-3
   lrEnd : Float := 0.0
-  weightDecay : Float := 1.0e-4
+  weightDecay : Float := 0.01
   gradClip : Float := 0.0
-  splitsWeight : Float := 0.25
-  delWeight : Float := 0.25
+  coordWeight : Float := 10.0
+  labelWeight : Float := 0.3333333333333333
+  splitsWeight : Float := 1.0
+  delWeight : Float := 1.0
+  useBranchingTimeProb : Float := 0.5
   deletionPad : Float := 1.2
   logEvery : Nat := 50
   sampleSteps : Nat := 7
   sampleCount : Nat := 1
   generate : Bool := true
-  splitLogitCap : Float := 1.25
+  device : Device := Device.CPU
+  bf16 : Bool := false
+  cudaGraph : Bool := true
+  timePhases : Bool := false
+  parallelSampling : Nat := 1
+  splitLogitCap? : Option Float := none
+  coordTargetCap? : Option Float := none
   seed : UInt64 := 20260618
   deriving Repr
 
 private def usage : String :=
   "usage: lake exe BranchingFlowsMoleculeTrainGenerate [--data molecules.jsonl|json] " ++
   "[--profile smoke|paper-qm9-main|paper-qm9-appendix] [--out-prefix prefix] " ++
-  "[--checkpoint-dir dir] [--resume-checkpoint dir] [--no-checkpoint] " ++
+  "[--checkpoint-dir dir] [--resume-checkpoint dir] [--generate-only] [--no-checkpoint] " ++
   "[--steps n] [--total-steps n] [--batch-size n] [--max-len n] " ++
   "[--architecture compact|full] [--hidden-dim n] [--heads n] [--head-dim n] " ++
-  "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--lr x] [--seed n]"
+  "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--coord-target-cap x] " ++
+  "[--coord-weight x] [--label-weight x] [--splits-weight x] [--del-weight x] " ++
+  "[--branching-time-prob x] [--split-logit-cap x] " ++
+  "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n] [--time-phases] [--parallel-sampling n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
@@ -186,6 +195,8 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with checkpointDir := value }
   | "--resume-checkpoint" :: value :: rest =>
       parseArgsLoop rest { opts with resumeCheckpoint? := some value }
+  | "--generate-only" :: rest =>
+      parseArgsLoop rest { opts with generateOnly := true }
   | "--no-checkpoint" :: rest =>
       parseArgsLoop rest { opts with saveCheckpoint := false }
   | "--no-optimizer-checkpoint" :: rest =>
@@ -206,6 +217,8 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with vocabSize := (← parseNatArg "--vocab-size" value) }
   | "--mask-token" :: value :: rest =>
       parseArgsLoop rest { opts with maskToken := (← parseNatArg "--mask-token" value) }
+  | "--fixed-labels" :: rest =>
+      parseArgsLoop rest { opts with fixedLabels := true }
   | "--max-len" :: value :: rest =>
       parseArgsLoop rest { opts with maxLen := (← parseUInt64Arg "--max-len" value) }
   | "--architecture" :: value :: rest =>
@@ -239,10 +252,16 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with weightDecay := (← parseFloatArg "--weight-decay" value) }
   | "--grad-clip" :: value :: rest =>
       parseArgsLoop rest { opts with gradClip := (← parseFloatArg "--grad-clip" value) }
+  | "--coord-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with coordWeight := (← parseFloatArg "--coord-weight" value) }
+  | "--label-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with labelWeight := (← parseFloatArg "--label-weight" value) }
   | "--splits-weight" :: value :: rest =>
       parseArgsLoop rest { opts with splitsWeight := (← parseFloatArg "--splits-weight" value) }
   | "--del-weight" :: value :: rest =>
       parseArgsLoop rest { opts with delWeight := (← parseFloatArg "--del-weight" value) }
+  | "--branching-time-prob" :: value :: rest =>
+      parseArgsLoop rest { opts with useBranchingTimeProb := (← parseFloatArg "--branching-time-prob" value) }
   | "--deletion-pad" :: value :: rest =>
       parseArgsLoop rest { opts with deletionPad := (← parseFloatArg "--deletion-pad" value) }
   | "--log-every" :: value :: rest =>
@@ -251,10 +270,32 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with sampleSteps := (← parseNatArg "--sample-steps" value) }
   | "--sample-count" :: value :: rest =>
       parseArgsLoop rest { opts with sampleCount := (← parseNatArg "--sample-count" value) }
+  | "--device" :: value :: rest =>
+      match value with
+      | "cpu" => parseArgsLoop rest { opts with device := Device.CPU }
+      | "cuda" | "cuda:0" => parseArgsLoop rest { opts with device := Device.CUDA 0 }
+      | _ => throw (IO.userError s!"--device expects cpu or cuda, got '{value}'")
+  | "--dtype" :: value :: rest =>
+      match value with
+      | "fp32" => parseArgsLoop rest { opts with bf16 := false }
+      | "bf16" => parseArgsLoop rest { opts with bf16 := true }
+      | _ => throw (IO.userError s!"--dtype expects fp32 or bf16, got '{value}'")
   | "--no-generate" :: rest =>
       parseArgsLoop rest { opts with generate := false }
+  | "--time-phases" :: rest =>
+      parseArgsLoop rest { opts with timePhases := true }
+  | "--cuda-graph" :: rest =>
+      parseArgsLoop rest { opts with cudaGraph := true }
+  | "--no-cuda-graph" :: rest =>
+      parseArgsLoop rest { opts with cudaGraph := false }
+  | "--parallel-sampling" :: value :: rest =>
+      parseArgsLoop rest { opts with parallelSampling := (← parseNatArg "--parallel-sampling" value) }
   | "--split-logit-cap" :: value :: rest =>
-      parseArgsLoop rest { opts with splitLogitCap := (← parseFloatArg "--split-logit-cap" value) }
+      parseArgsLoop rest { opts with splitLogitCap? := some (← parseFloatArg "--split-logit-cap" value) }
+  | "--no-split-logit-cap" :: rest =>
+      parseArgsLoop rest { opts with splitLogitCap? := none }
+  | "--coord-target-cap" :: value :: rest =>
+      parseArgsLoop rest { opts with coordTargetCap? := some (← parseFloatArg "--coord-target-cap" value) }
   | "--seed" :: value :: rest =>
       parseArgsLoop rest { opts with seed := (← parseSeedArg value) }
   | flag :: rest =>
@@ -293,13 +334,33 @@ private def loadRecords (opts : RunOptions) : IO (Array QM9MoleculeRecord) := do
       let raw ← IO.FS.readFile ⟨path⟩
       exceptToIO s!"parse molecule dataset {path}" (parseDatasetRaw raw)
 
-private def splitTrainEval (states : Array (BranchingState MoleculeAtom)) :
+private def shuffleStates
+    (states : Array (BranchingState MoleculeAtom))
+    (seed : UInt64) : Array (BranchingState MoleculeAtom) := Id.run do
+  let mut shuffled := states
+  let mut rng : Rng := { state := seed }
+  for offset in [:states.size] do
+    let i := states.size - 1 - offset
+    if i > 0 then
+      let (j, rng') := randNat rng (i + 1)
+      rng := rng'
+      let left := shuffled[i]!
+      let right := shuffled[j]!
+      shuffled := shuffled.set! i right
+      shuffled := shuffled.set! j left
+  return shuffled
+
+private def splitTrainEval
+    (states : Array (BranchingState MoleculeAtom))
+    (seed : UInt64) :
     Array (BranchingState MoleculeAtom) × Array (BranchingState MoleculeAtom) :=
   if states.size <= 1 then
     (states, states)
   else
-    let split := states.size - 1
-    (states.extract 0 split, states.extract split states.size)
+    let shuffled := shuffleStates states seed
+    let evalCount := Nat.max 1 (states.size / 10)
+    let split := states.size - evalCount
+    (shuffled.extract 0 split, shuffled.extract split shuffled.size)
 
 private def countSplits (events : Array (Array BranchingStepEvent)) : Nat :=
   events.foldl (init := 0) (fun acc step =>
@@ -340,19 +401,58 @@ private def generatedPath (outPrefix : String) (sampleCount i : Nat) : String :=
   else
     outPrefix ++ "_generated_" ++ toString i ++ ".xyz"
 
+private def trajectoryPath (outPrefix : String) (sampleCount sample step : Nat) : String :=
+  if sampleCount == 1 then
+    s!"{outPrefix}_step_{step}.xyz"
+  else
+    s!"{outPrefix}_sample_{sample}_step_{step}.xyz"
+
+private def lineagePath (outPrefix : String) (sampleCount sample : Nat) : String :=
+  if sampleCount == 1 then
+    s!"{outPrefix}_trajectory.jsonl"
+  else
+    s!"{outPrefix}_sample_{sample}_trajectory.jsonl"
+
 private def architectureName (opts : RunOptions) : String :=
   if opts.fullArchitecture then "full" else "compact"
+
+private def deviceName : Device → String
+  | .CPU => "cpu"
+  | .MPS => "mps"
+  | .CUDA i => s!"cuda:{i}"
+
+private def muonCountPath (dir : String) : String :=
+  dir ++ "/optim_muon_count.txt"
+
+private def muonOptimStateExists (dir : String) : IO Bool :=
+  data.fileExists (muonCountPath dir)
+
+private def saveMuonOptimState [TensorStruct Params]
+    (state : MoleculeMuonState Params) (dir : String) : IO Unit := do
+  _root_.torch.checkpoint.saveParams state.momentum dir "optim_muon_momentum"
+  IO.FS.writeFile (muonCountPath dir) (toString state.step)
+
+private def loadMuonOptimState [TensorStruct Params]
+    (template : Params) (dir : String) : IO (MoleculeMuonState Params) := do
+  let momentum ←
+    _root_.torch.checkpoint.loadParams template dir "optim_muon_momentum"
+  let countRaw ← IO.FS.readFile (muonCountPath dir)
+  let count ← match countRaw.trimAscii.toString.toNat? with
+    | some n => pure n
+    | none => throw (IO.userError s!"invalid Muon optimizer count in {muonCountPath dir}")
+  pure { momentum := TensorStruct.map autograd.detach momentum, step := count }
 
 private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : UInt64}
     (opts : RunOptions)
     (recordsCount usableCount : Nat)
     (trainStates evalStates : Array (BranchingState MoleculeAtom))
     (bridgeCfg : MoleculeBridgeConfig)
-    (labelDFM : DistNoisyDiscreteConfig)
+    (labelDFM : Option DistNoisyDiscreteConfig)
     (trainCfg : BranchingTrainConfig)
     (model : BranchingMoleculeModel maxLen vocab Params)
     (initParams : Params)
-    (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction) :
+    (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
+    (graphModel? : Option (BranchingMoleculeModel maxLen vocab Params) := none) :
     IO Unit := do
   let (initParams, startIteration, resumedMeta?) ←
     match opts.resumeCheckpoint? with
@@ -362,80 +462,186 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
           _root_.torch.checkpoint.loadCheckpoint initParams checkpointDir "param"
         IO.println s!"loaded molecule checkpoint from {checkpointDir} at iteration={checkpointMeta.iteration} trainLoss={checkpointMeta.trainLoss}"
         pure (loadedParams, checkpointMeta.iteration, some checkpointMeta)
-  let opt := Optim.adamw (lr := opts.lr) (weight_decay := trainCfg.weightDecay)
-  let initOptState := opt.init initParams
-  let initOptState ←
-    match opts.resumeCheckpoint? with
-    | some checkpointDir =>
-        if opts.resumeOptimizer then
-          let hasOptim ← _root_.torch.checkpoint.optimStateExists checkpointDir
-          if hasOptim then
-            let (mu, nu, count) ← _root_.torch.checkpoint.loadOptimizerState initParams checkpointDir
-            IO.println s!"loaded molecule optimizer checkpoint from {checkpointDir} at count={count}"
-            pure { initOptState with fst := { count, mu, nu } }
-          else
-            IO.eprintln s!"warning: no optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
-            pure initOptState
-        else
-          pure initOptState
-    | none => pure initOptState
+  let initParams := TensorStruct.map (fun t => t.to opts.device) initParams
+  let initParams := if opts.bf16 then TensorStruct.map torch.toBFloat16' initParams else initParams
   let mut params := initParams
-  let mut optState := initOptState
   let mut rng : Rng := { state := opts.seed + 17 }
 
   let (fixedTrainBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
-      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+      (useBranchingTimeProb := opts.useBranchingTimeProb)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
   rng := rng'
   let initTrain ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
-      (some labelDFM)
+      labelDFM opts.device (bf16 := opts.bf16)
+  let mut finalTrain := initTrain
   let mut lastReport := initTrain
 
-  for step in [:opts.steps] do
-    let globalStep := startIteration + step
-    let lr := scheduledLr opts globalStep
-    let (bridgeBatch, rng') ←
-      sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
+  if !opts.generateOnly then
+    let initOptState := initMoleculeMuonState params
+    let initOptState ←
+      match opts.resumeCheckpoint? with
+      | some checkpointDir =>
+          if opts.resumeOptimizer then
+            let hasOptim ← muonOptimStateExists checkpointDir
+            if hasOptim then
+              let loaded ← loadMuonOptimState params checkpointDir
+              IO.println s!"loaded molecule Muon optimizer checkpoint from {checkpointDir} at count={loaded.step}"
+              pure loaded
+            else
+              IO.eprintln s!"warning: no Muon optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
+              pure initOptState
+          else
+            pure initOptState
+      | none => pure initOptState
+    let mut optState := initOptState
+    let mut sampleMs : Nat := 0
+    let mut trainMs : Nat := 0
+
+    -- Pipelined sampling: the next batch is sampled on a worker thread while
+    -- the current step trains. `sampleMoleculeBridgeBatchPure` is
+    -- deterministic given its rng, and rng chaining preserves the sequential
+    -- draw order, so results are identical to the non-pipelined loop.
+    let sampleNext := fun (rng : Rng) =>
+      sampleMoleculeBridgeBatchPure bridgeCfg trainStates opts.batchSize rng
+        (useBranchingTimeProb := opts.useBranchingTimeProb)
         (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
-    rng := rng'
-    let (params', optState', report) ←
-      trainStepMolecule (maxLen := maxLen) (vocab := vocab) trainCfg model
-        params optState bridgeBatch lr (some labelDFM)
-    params := params'
-    optState := optState'
-    lastReport := report
-    if opts.logEvery > 0 && step % opts.logEvery == 0 then
-      IO.println s!"molecule_train step={globalStep} lr={lr} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
+        (parallelism := opts.parallelSampling)
+    let mut pendingSample := Task.spawn (fun () => sampleNext rng)
 
-  let finalTrain ←
-    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
-      (some labelDFM)
-  if !(Float.isFinite finalTrain.total) then
-    throw (IO.userError "final train loss is not finite")
-  if !(finalTrain.total < initTrain.total) then
-    match resumedMeta? with
-    | some _ =>
-        IO.eprintln s!"warning: resumed training did not reduce fixed train loss over this short run: initial={initTrain.total}, final={finalTrain.total}"
-    | none =>
-        throw (IO.userError s!"training did not reduce fixed train loss: initial={initTrain.total}, final={finalTrain.total}")
+    -- CUDA-graph training: step 0 runs eagerly (warmup + canonical buffers);
+    -- at step 1 the step is captured once into a CUDA graph over static
+    -- buffers (packed batch, lr scalar, canonical params/momentum), later
+    -- steps replay it. Any capture failure falls back to the eager loop.
+    let isCuda := match opts.device with | .CUDA _ => true | _ => false
+    let batchU := opts.batchSize.toUInt64
+    let mut graphAttempted := false
+    let mut graphed := false
+    let mut staticBatch? : Option (BranchingMoleculeBatch batchU maxLen) := none
+    let mut lrBuf? : Option (T #[]) := none
+    let mut graphOut? : Option
+      (Params × MoleculeMuonState Params × (T #[] × T #[] × T #[] × T #[] × T #[])) := none
 
-  if opts.saveCheckpoint then
-    let checkpointIteration := startIteration + opts.steps
-    _root_.torch.checkpoint.saveCheckpoint params checkpointIteration finalTrain.total finalTrain.total
-      opts.checkpointDir "param"
-    if opts.saveOptimizer then
-      _root_.torch.checkpoint.saveOptimizerState optState.fst.mu optState.fst.nu
-        optState.fst.count opts.checkpointDir
-    IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
+    for step in [:opts.steps] do
+      let globalStep := startIteration + step
+      let lr := scheduledLr opts globalStep
+      let t0 ← IO.monoMsNow
+      let (bridgeBatch, rng') := pendingSample.get
+      rng := rng'
+      pendingSample := Task.spawn (fun () => sampleNext rng)
+      let t1 ← IO.monoMsNow
+      if opts.cudaGraph && isCuda && !graphAttempted && step >= 1 then
+        graphAttempted := true
+        try
+          let ⟨_batch, packedCpu⟩ ← packBranchingMolecule trainCfg bridgeBatch labelDFM
+          let sb : BranchingMoleculeBatch batchU maxLen :=
+            BranchingMoleculeBatch.zeros batchU maxLen opts.device opts.bf16
+          -- Force the lazy staging (alloc + in-place copies) to run *before*
+          -- capture begins; pure lets would otherwise evaluate inside it.
+          let sb ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
+          let lrT : T #[] := torch.full #[] lr false opts.device
+          torch.touch lrT
+          torch.cudaGraphCaptureBegin
+          let (outP, outM, losses) ←
+            trainStepMoleculeMuonCoreT (batch := batchU) (maxLen := maxLen) (vocab := vocab) trainCfg
+              (graphModel?.getD model)
+              params optState sb lrT labelDFM
+          torch.cudaGraphCaptureEnd
+          staticBatch? := some sb
+          lrBuf? := some lrT
+          graphOut? := some (outP, outM, losses)
+          graphed := true
+          -- The capture executed this step's compute; fold outputs back into
+          -- the canonical buffers (their storage must not change), forcing
+          -- the copies before the next replay reads the canonical storage.
+          -- no_grad: the canonical params are requires-grad leaves, and
+          -- in-place copy_ into them is only legal with autograd off.
+          params ← torch.autograd.no_grad do
+            TensorStruct.mapM (fun t => do torch.touch t; pure t)
+              (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
+          let momentum' ← torch.autograd.no_grad do
+            TensorStruct.mapM (fun t => do torch.touch t; pure t)
+              (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
+          optState := { momentum := momentum', step := outM.step }
+          let (tl, cl, ll, sl, dl) := losses
+          lastReport := moleculeLossReport tl cl ll sl dl
+          if step == 0 || step % opts.logEvery == 0 then
+            IO.println "molecule_train cuda graph captured"
+        catch e =>
+          IO.eprintln s!"cuda graph capture failed at step {globalStep}; continuing eagerly: {e}"
+          torch.cudaGraphReset
+          staticBatch? := none
+          lrBuf? := none
+          graphOut? := none
+          let (params', optState', report) ←
+            trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
+              params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
+          params := params'
+          optState := optState'
+          lastReport := report
+      else if graphed then
+        let some sb := staticBatch? | panic! "graphed without static batch"
+        let some lrT := lrBuf? | panic! "graphed without lr buffer"
+        let some (outP, outM, losses) := graphOut? | panic! "graphed without outputs"
+        let ⟨_batch, packedCpu⟩ ← packBranchingMolecule trainCfg bridgeBatch labelDFM
+        -- Force input staging before the replay launches, and the fold-back
+        -- copies before the next replay reads the canonical storage.
+        let _ ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
+        torch.touch (copyInplace lrT (torch.full #[] lr))
+        torch.cudaGraphReplay
+        params ← torch.autograd.no_grad do
+          TensorStruct.mapM (fun t => do torch.touch t; pure t)
+            (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
+        let momentum' ← torch.autograd.no_grad do
+          TensorStruct.mapM (fun t => do torch.touch t; pure t)
+            (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
+        optState := { momentum := momentum', step := outM.step }
+                let (tl, cl, ll, sl, dl) := losses
+        lastReport := moleculeLossReport tl cl ll sl dl
+      else
+        let (params', optState', report) ←
+          trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
+            params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
+        params := params'
+        optState := optState'
+        lastReport := report
+      let t2 ← IO.monoMsNow
+      sampleMs := sampleMs + (t1 - t0)
+      trainMs := trainMs + (t2 - t1)
+      if opts.logEvery > 0 && step % opts.logEvery == 0 then
+        IO.println s!"molecule_train step={globalStep} lr={lr} total={lastReport.total} coord={lastReport.coord} label={lastReport.label} splits={lastReport.splits} del={lastReport.del}"
+        if opts.timePhases && step > 0 then
+          IO.println s!"molecule_phases step={globalStep} sample_ms_avg={(sampleMs / (step + 1))} train_ms_avg={(trainMs / (step + 1))}"
+
+    finalTrain ←
+      evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
+        labelDFM opts.device (bf16 := opts.bf16)
+    if !(Float.isFinite finalTrain.total) then
+      throw (IO.userError "final train loss is not finite")
+    if !(finalTrain.total < initTrain.total) then
+      match resumedMeta? with
+      | some _ =>
+          IO.eprintln s!"warning: resumed training did not reduce fixed train loss over this short run: initial={initTrain.total}, final={finalTrain.total}"
+      | none =>
+          throw (IO.userError s!"training did not reduce fixed train loss: initial={initTrain.total}, final={finalTrain.total}")
+
+    if opts.saveCheckpoint then
+      let checkpointIteration := startIteration + opts.steps
+      _root_.torch.checkpoint.saveCheckpoint params checkpointIteration finalTrain.total finalTrain.total
+        opts.checkpointDir "param"
+      if opts.saveOptimizer then
+        saveMuonOptimState optState opts.checkpointDir
+      IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
 
   let (evalBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg evalStates opts.batchSize rng
-      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+      (useBranchingTimeProb := opts.useBranchingTimeProb)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
   rng := rng'
   let evalReport ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params evalBridge
-      (some labelDFM)
+      labelDFM opts.device (bf16 := opts.bf16)
 
   let target := evalStates[0]!
   writeMoleculeXYZ ⟨opts.outputPrefix ++ "_target.xyz"⟩ target
@@ -447,7 +653,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   let mut lastGeneratedAtoms := 0
   if opts.generate then
     let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
-      CoalescentFlow.mkDefault bridgeCfg TimeDist.betaOneThreeHalves noEventTimeDist
+      CoalescentFlow.mkDefault bridgeCfg TimeDist.betaOneThreeHalves TimeDist.uniform
     let learnedModel := makeLearnedModel params
     let schedule := cosineGenerationSchedule opts.sampleSteps
     for i in [:opts.sampleCount] do
@@ -469,13 +675,29 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       lastGeneratedAtoms := generated.finalState.state.size
       writeMoleculeXYZ ⟨generatedPath opts.outputPrefix opts.sampleCount i⟩ generated.finalState
         s!"learned BranchingFlows molecule generation sample={i}" (labelSymbol opts.maskToken)
+      writeMoleculeTrajectoryJsonl ⟨lineagePath opts.outputPrefix opts.sampleCount i⟩ generated
+      for step in [:generated.trajectory.size] do
+        let state := generated.trajectory[step]!
+        let time := generated.times.getD step 0.0
+        writeMoleculeXYZ ⟨trajectoryPath opts.outputPrefix opts.sampleCount i step⟩ state
+          s!"learned branching sample={i} step={step} t={time}" (labelSymbol opts.maskToken)
+        if i == 0 then
+          IO.println s!"molecule_trajectory step={step} t={time} atoms={state.state.size}"
+          if step > 0 then
+            for event in generated.events.getD (step - 1) #[] do
+              IO.println s!"molecule_event step={step} source_id={event.sourceId} splits={event.splitCount} deleted={event.deleted} interval=[{event.t0}, {event.t1}]"
 
   IO.println s!"molecule_dataset records={recordsCount} usable={usableCount} train={trainStates.size} eval={evalStates.size}"
-  IO.println s!"molecule_config architecture={architectureName opts} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps}"
-  IO.println s!"molecule_train fixed_initial_total={initTrain.total} fixed_final_total={finalTrain.total}"
-  IO.println s!"molecule_train last_batch_total={lastReport.total} eval_total={evalReport.total}"
-  if opts.saveCheckpoint then
-    IO.println s!"molecule_train checkpoint_dir={opts.checkpointDir}"
+  let labelProcess := if opts.fixedLabels then "fixed" else "dfm"
+  let splitCap := match opts.splitLogitCap? with | some cap => toString cap | none => "none"
+  IO.println s!"molecule_config architecture={architectureName opts} optimizer=muon device={deviceName opts.device} dtype={if opts.bf16 then "bf16" else "fp32"} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} label_process={labelProcess} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps} coord_weight={opts.coordWeight} label_weight={opts.labelWeight} splits_weight={opts.splitsWeight} del_weight={opts.delWeight} branching_time_prob={opts.useBranchingTimeProb} split_logit_cap={splitCap}"
+  if opts.generateOnly then
+    IO.println s!"molecule_eval checkpoint_train_total={finalTrain.total} heldout_total={evalReport.total}"
+  else
+    IO.println s!"molecule_train fixed_initial_total={initTrain.total} fixed_final_total={finalTrain.total}"
+    IO.println s!"molecule_train last_batch_total={lastReport.total} eval_total={evalReport.total}"
+    if opts.saveCheckpoint then
+      IO.println s!"molecule_train checkpoint_dir={opts.checkpointDir}"
   if opts.generate then
     IO.println s!"molecule_generate samples={opts.sampleCount} sample_steps={opts.sampleSteps} target_atoms={target.state.size} last_source_atoms={lastSourceAtoms} last_generated_atoms={lastGeneratedAtoms}"
     IO.println s!"molecule_generate splits={totalGeneratedSplits} deletes={totalGeneratedDeletes}"
@@ -483,9 +705,15 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   if opts.generate then
     IO.println s!"wrote {opts.outputPrefix}_source.xyz"
     IO.println s!"wrote generated samples under {opts.outputPrefix}_generated*.xyz"
+    IO.println s!"wrote lineage-aware raw trajectories under {opts.outputPrefix}_*trajectory.jsonl"
+    IO.println s!"wrote learned branching trajectory frames under {opts.outputPrefix}_*step*.xyz"
 
 def run (opts : RunOptions) : IO Unit := do
-  if opts.steps == 0 then
+  if opts.generateOnly && opts.resumeCheckpoint?.isNone then
+    throw (IO.userError "--generate-only requires --resume-checkpoint")
+  if opts.generateOnly && !opts.generate then
+    throw (IO.userError "--generate-only cannot be combined with --no-generate")
+  if !opts.generateOnly && opts.steps == 0 then
     throw (IO.userError "training steps must be positive")
   if opts.batchSize == 0 then
     throw (IO.userError "batch size must be positive")
@@ -499,6 +727,23 @@ def run (opts : RunOptions) : IO Unit := do
     throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
   if opts.maxLen == 0 then
     throw (IO.userError "max length must be positive")
+  match opts.coordTargetCap? with
+  | some cap =>
+      if cap <= 0.0 then
+        throw (IO.userError "--coord-target-cap must be positive")
+  | none => pure ()
+  if opts.useBranchingTimeProb < 0.0 || opts.useBranchingTimeProb > 1.0 then
+    throw (IO.userError "--branching-time-prob must be between 0 and 1")
+  if opts.coordWeight < 0.0 || opts.labelWeight < 0.0 ||
+      opts.splitsWeight < 0.0 || opts.delWeight < 0.0 then
+    throw (IO.userError "molecule loss weights must be nonnegative")
+  if opts.weightDecay < 0.0 then
+    throw (IO.userError "--weight-decay must be nonnegative")
+  match opts.splitLogitCap? with
+  | some cap =>
+      if cap > 11.0 then
+        throw (IO.userError "--split-logit-cap cannot exceed the core Julia-compatible cap of 11")
+  | none => pure ()
   if opts.heads == 0 || opts.headDim == 0 || opts.mlp == 0 then
     throw (IO.userError "heads, head-dim, and mlp must be positive")
   if opts.fullArchitecture then
@@ -517,21 +762,26 @@ def run (opts : RunOptions) : IO Unit := do
         throw (IO.userError "--require-data requires --data")
 
   let vocab : UInt64 := opts.vocabSize.toUInt64
-  let bridgeCfg := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
-  let labelDFM := DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken
+  let bridgeCfgBase := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
+  let labelDFM :=
+    if opts.fixedLabels then none
+    else some (DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken)
+  let bridgeCfg := { bridgeCfgBase with labelDFM }
   let records ← loadRecords opts
   let allStates ← exceptToIO "convert molecule records"
     (qm9RecordsToBranchingStates records { vocabSize? := some opts.vocabSize, maskToken? := some opts.maskToken })
   let states := allStates.filter (fun state => state.state.size <= opts.maxLen.toNat)
   if states.isEmpty then
     throw (IO.userError s!"no molecules fit maxLen={opts.maxLen}")
-  let (trainStates, evalStates) := splitTrainEval states
+  let (trainStates, evalStates) := splitTrainEval states opts.seed
   let evalStates := if evalStates.isEmpty then trainStates else evalStates
 
   let trainCfg : BranchingTrainConfig := {
     maxLen := opts.maxLen
     padToken := 0
     anchorWeight := 1.0
+    coordWeight := opts.coordWeight
+    labelWeight := opts.labelWeight
     splitsWeight := opts.splitsWeight
     delWeight := opts.delWeight
     weightDecay := opts.weightDecay
@@ -545,6 +795,7 @@ def run (opts : RunOptions) : IO Unit := do
         (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
         (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
         (coordUpdateLayers := opts.coordUpdateLayers)
+        (coordTargetCap? := opts.coordTargetCap?)
     let initParams ←
       FullMoleculeTransformerParams.init vocab opts.hiddenDim opts.heads opts.headDim
         opts.mlp opts.rffDim opts.layers
@@ -553,19 +804,37 @@ def run (opts : RunOptions) : IO Unit := do
         (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
         (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
         trainCfg.padToken params (coordUpdateLayers := opts.coordUpdateLayers)
-        (splitLogitCap? := some opts.splitLogitCap)
+        (splitLogitCap? := opts.splitLogitCap?)
+        (coordTargetCap? := opts.coordTargetCap?)
+        (device := opts.device)
+    -- Graph-safe model: rotary frequencies precomputed on-device outside the
+    -- capture region (`forward` recomputes them per call with a host→device
+    -- copy, which is illegal during CUDA stream capture).
+    let (ropeCos, ropeSin) :=
+      rotary.computeFreqsOnDevicePure opts.maxLen opts.headDim 10000.0 opts.device
+    let graphModel : BranchingMoleculeModel opts.maxLen vocab
+        (FullMoleculeTransformerParams vocab opts.hiddenDim opts.heads opts.headDim
+          opts.mlp opts.rffDim opts.layers) :=
+      { forward := fun {batch} params coord label t padmask =>
+          FullMoleculeTransformerParams.forwardFreqs (batch := batch) params coord label t
+            padmask ropeCos ropeSin
+            (coordUpdateLayers := opts.coordUpdateLayers)
+            (coordTargetCap? := opts.coordTargetCap?) }
     runWithModel (maxLen := opts.maxLen) (vocab := vocab)
       opts records.size states.size trainStates evalStates bridgeCfg labelDFM trainCfg
-      model initParams makeLearnedModel
+      model initParams makeLearnedModel (graphModel? := some graphModel)
   else
     let model :=
       moleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)
         (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
+        (coordTargetCap? := opts.coordTargetCap?)
     let initParams ← MoleculeTransformerParams.init vocab opts.heads opts.headDim opts.mlp
     let makeLearnedModel := fun params =>
       moleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
         (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
-        trainCfg.padToken params (splitLogitCap? := some opts.splitLogitCap)
+        trainCfg.padToken params (splitLogitCap? := opts.splitLogitCap?)
+        (coordTargetCap? := opts.coordTargetCap?)
+        (device := opts.device)
     runWithModel (maxLen := opts.maxLen) (vocab := vocab)
       opts records.size states.size trainStates evalStates bridgeCfg labelDFM trainCfg
       model initParams makeLearnedModel

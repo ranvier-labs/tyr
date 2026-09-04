@@ -1,7 +1,8 @@
 namespace Tyr.Audio.AppleOutput
 
 /-- Play a sine tone at the given frequency for `durationMs` milliseconds.
-    Uses AudioQueue on macOS; no-op on other platforms. Blocks until done. -/
+    Uses AudioQueue on macOS; raises an IO error on other platforms.
+    Blocks until done. -/
 @[extern "lean_tyr_audio_output_beep"]
 opaque beep (freqHz : Float) (durationMs : UInt64 := 120) (sampleRate : UInt64 := 44100) : IO Unit
 

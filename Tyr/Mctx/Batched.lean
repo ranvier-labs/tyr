@@ -1,5 +1,13 @@
 import Tyr.Mctx.Policies
 
+/-!
+# Tyr.Mctx.Batched
+
+Batched MCTS API: `BatchedTree` holds one `Tree` per batch element, with
+batched search, tree reset and subtree extraction, and batched
+MuZero/AlphaZero/Gumbel-MuZero policies.
+-/
+
 namespace torch.mctx
 
 structure BatchedTree (S E : Type) where

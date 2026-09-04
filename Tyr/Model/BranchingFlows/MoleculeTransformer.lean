@@ -49,6 +49,15 @@ structure MoleculeTransformerParams (vocab heads headDim mlp : UInt64) where
 
 namespace MoleculeTransformerParams
 
+private def boundCoordTarget {s : Shape} (coord : T s) (cap? : Option Float) : T s :=
+  match cap? with
+  | some cap =>
+      if cap > 0.0 then
+        (nn.tanh (coord / cap)) * cap
+      else
+        coord
+  | none => coord
+
 private def randnScaled (shape : Shape) (scale : Float) : IO (T shape) := do
   let x ← torch.randn shape
   pure (x * scale)
@@ -124,23 +133,20 @@ private def spatialAttention {batch maxLen vocab heads headDim mlp : UInt64}
     nn.transpose_for_attention (reshape k0 #[batch, maxLen, heads, headDim])
   let v : T #[batch, heads, maxLen, headDim] :=
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
-  let kt : T #[batch, heads, headDim, maxLen] := nn.transpose k 2 3
-  let scores0 : T #[batch, heads, maxLen, maxLen] :=
-    (nn.bmm4d q kt) / (Float.sqrt headDim.toFloat)
   let dist : T #[batch, maxLen, maxLen] := pairwiseDistanceSq coord
-  let dist4 : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand (reshape dist #[batch, 1, maxLen, maxLen]) #[batch, heads, maxLen, maxLen]
   let slope : T #[heads] := nn.softplus params.pairDistSlope
-  let slope4 : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand (reshape slope #[1, heads, 1, 1]) #[batch, heads, maxLen, maxLen]
-  let scores1 := scores0 - (slope4 * dist4)
+  let distBias : T #[batch, heads, maxLen, maxLen] :=
+    nn.expand (reshape slope #[1, heads, 1, 1]) #[batch, heads, maxLen, maxLen] *
+      nn.expand (reshape dist #[batch, 1, maxLen, maxLen]) #[batch, heads, maxLen, maxLen]
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let keyMask : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand keyMask0 #[batch, heads, maxLen, maxLen]
-  let invalid : T #[batch, heads, maxLen, maxLen] := torch.lt_scalar keyMask 0.5
-  let scores := nn.masked_fill scores1 invalid (-1.0e9)
-  let attn : T #[batch, heads, maxLen, maxLen] := nn.softmax_dim scores 3
-  let ctx : T #[batch, heads, maxLen, headDim] := nn.bmm4d attn v
+  -- (1 - keyMask) · -1e9, computed on-device (a `torch.zeros`-based masked_fill
+  -- would be CPU-resident and crash on CUDA inputs).
+  let maskTerm : T #[batch, 1, 1, maxLen] :=
+    torch.mul_scalar (torch.add_scalar (torch.mul_scalar keyMask0 (-1.0)) 1.0) (-1.0e9)
+  let bias : T #[batch, heads, maxLen, maxLen] :=
+    nn.expand maskTerm #[batch, heads, maxLen, maxLen] - distBias
+  let ctx : T #[batch, heads, maxLen, headDim] :=
+    nn.scaled_dot_product_attention_bias q k v bias
   let out4 : T #[batch, maxLen, heads, headDim] := nn.transpose_from_attention ctx
   let out3 : T #[batch, maxLen, heads * headDim] := reshape out4 #[batch, maxLen, heads * headDim]
   torch.affine3d out3 params.oW params.oB
@@ -150,7 +156,8 @@ def forward {batch maxLen vocab heads headDim mlp : UInt64}
     (coord : T #[batch, maxLen, 3])
     (label : T #[batch, maxLen])
     (t : T #[batch])
-    (padmask : T #[batch, maxLen]) :
+    (padmask : T #[batch, maxLen])
+    (coordTargetCap? : Option Float := none) :
     IO (T #[batch, maxLen, 3] × T #[batch, maxLen, vocab] × T #[batch, maxLen] × T #[batch, maxLen]) := do
   let coordEmb : T #[batch, maxLen, heads * headDim] := torch.affine3d coord params.coordW params.coordB
   let labelEmb : T #[batch, maxLen, heads * headDim] :=
@@ -167,7 +174,8 @@ def forward {batch maxLen vocab heads headDim mlp : UInt64}
   let mlp1 := nn.gelu (torch.affine3d h2n params.fc1W params.fc1B)
   let mlp2 := torch.affine3d mlp1 params.fc2W params.fc2B
   let h := h1 + mlp2
-  let coordPred : T #[batch, maxLen, 3] := torch.affine3d h params.coordHeadW params.coordHeadB
+  let coordRaw : T #[batch, maxLen, 3] := torch.affine3d h params.coordHeadW params.coordHeadB
+  let coordPred := boundCoordTarget coordRaw coordTargetCap?
   let labelLogits : T #[batch, maxLen, vocab] := torch.affine3d h params.labelHeadW params.labelHeadB
   let split3 : T #[batch, maxLen, 1] := torch.affine3d h params.splitHeadW params.splitHeadB
   let del3 : T #[batch, maxLen, 1] := torch.affine3d h params.delHeadW params.delHeadB
@@ -177,10 +185,11 @@ def forward {batch maxLen vocab heads headDim mlp : UInt64}
 
 end MoleculeTransformerParams
 
-def moleculeTransformerModel {maxLen vocab heads headDim mlp : UInt64} :
+def moleculeTransformerModel {maxLen vocab heads headDim mlp : UInt64}
+    (coordTargetCap? : Option Float := none) :
     BranchingMoleculeModel maxLen vocab (MoleculeTransformerParams vocab heads headDim mlp) :=
   { forward := fun {batch} params coord label t padmask =>
-      MoleculeTransformerParams.forward (batch := batch) params coord label t padmask }
+      MoleculeTransformerParams.forward (batch := batch) params coord label t padmask coordTargetCap? }
 
 structure FullMoleculeTransformerLayerParams
     (hidden heads headDim mlp rff : UInt64) where
@@ -278,6 +287,15 @@ end FullMoleculeTransformerLayerParams
 
 namespace FullMoleculeTransformerParams
 
+private def boundCoordTarget {s : Shape} (coord : T s) (cap? : Option Float) : T s :=
+  match cap? with
+  | some cap =>
+      if cap > 0.0 then
+        (nn.tanh (coord / cap)) * cap
+      else
+        coord
+  | none => coord
+
 private def randnScaled (shape : Shape) (scale : Float) : IO (T shape) := do
   let x ← torch.randn shape
   pure (x * scale)
@@ -339,15 +357,18 @@ private def coordRffEmbedding {batch maxLen vocab hidden heads headDim mlp rff l
   let features : T #[batch, maxLen, rff * 2] := reshape featFlat #[batch, maxLen, rff * 2]
   torch.affine3d features params.coordProjW params.coordProjB
 
-private def pairAttentionBias {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+private def pairRffFeatures {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
-    (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
-    (coord : T #[batch, maxLen, 3]) : T #[batch, heads, maxLen, maxLen] :=
+    (coord : T #[batch, maxLen, 3]) : T #[batch * maxLen * maxLen, rff * 2] :=
   let dist : T #[batch, maxLen, maxLen] := pairwiseDistanceSq coord
   let distFlat : T #[batch * maxLen * maxLen, 1] := reshape dist #[batch * maxLen * maxLen, 1]
   let phase : T #[batch * maxLen * maxLen, rff] := torch.affine distFlat params.pairRffW params.pairRffB
-  let featFlat : T #[batch * maxLen * maxLen, rff * 2] := nn.cat (nn.sin phase) (nn.cos phase) 1
-  let biasFlat : T #[batch * maxLen * maxLen, heads] := torch.affine featFlat layer.pairW layer.pairB
+  nn.cat (nn.sin phase) (nn.cos phase) 1
+
+private def pairAttentionBiasFrom {batch maxLen hidden heads headDim mlp rff : UInt64}
+    (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
+    (features : T #[batch * maxLen * maxLen, rff * 2]) : T #[batch, heads, maxLen, maxLen] :=
+  let biasFlat : T #[batch * maxLen * maxLen, heads] := torch.affine features layer.pairW layer.pairB
   let bias0 : T #[batch, maxLen, maxLen, heads] := reshape biasFlat #[batch, maxLen, maxLen, heads]
   let bias1 : T #[batch, maxLen, heads, maxLen] := nn.transpose bias0 2 3
   nn.transpose bias1 1 2
@@ -355,7 +376,7 @@ private def pairAttentionBias {batch maxLen vocab hidden heads headDim mlp rff l
 private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
-    (coord : T #[batch, maxLen, 3])
+    (pairFeatures : T #[batch * maxLen * maxLen, rff * 2])
     (padmask : T #[batch, maxLen])
     (ropeCos : T #[maxLen, headDim / 2])
     (ropeSin : T #[maxLen, headDim / 2])
@@ -364,24 +385,25 @@ private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff la
   let k0 : T #[batch, maxLen, heads * headDim] := torch.affine3d h layer.kW layer.kB
   let v0 : T #[batch, maxLen, heads * headDim] := torch.affine3d h layer.vW layer.vB
   let qR : T #[batch, maxLen, heads, headDim] :=
-    rotary.applyRotaryEmb (reshape q0 #[batch, maxLen, heads, headDim]) ropeCos ropeSin
+    rotary.applyRotaryEmb (reshape q0 #[batch, maxLen, heads, headDim])
+      (castLike q0 ropeCos) (castLike q0 ropeSin)
   let kR : T #[batch, maxLen, heads, headDim] :=
-    rotary.applyRotaryEmb (reshape k0 #[batch, maxLen, heads, headDim]) ropeCos ropeSin
+    rotary.applyRotaryEmb (reshape k0 #[batch, maxLen, heads, headDim])
+      (castLike k0 ropeCos) (castLike k0 ropeSin)
   let q : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention qR
   let k : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention kR
   let v : T #[batch, heads, maxLen, headDim] :=
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
-  let kt : T #[batch, heads, headDim, maxLen] := nn.transpose k 2 3
-  let scores0 : T #[batch, heads, maxLen, maxLen] :=
-    (nn.bmm4d q kt) / (Float.sqrt headDim.toFloat)
-  let scores1 := scores0 + pairAttentionBias params layer coord
+  let pairBias : T #[batch, heads, maxLen, maxLen] := pairAttentionBiasFrom layer pairFeatures
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let keyMask : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand keyMask0 #[batch, heads, maxLen, maxLen]
-  let invalid : T #[batch, heads, maxLen, maxLen] := torch.lt_scalar keyMask 0.5
-  let scores := nn.masked_fill scores1 invalid (-1.0e9)
-  let attn : T #[batch, heads, maxLen, maxLen] := nn.softmax_dim scores 3
-  let ctx : T #[batch, heads, maxLen, headDim] := nn.bmm4d attn v
+  -- (1 - keyMask) · -1e9, computed on-device (a `torch.zeros`-based masked_fill
+  -- would be CPU-resident and crash on CUDA inputs).
+  let maskTerm : T #[batch, 1, 1, maxLen] :=
+    torch.mul_scalar (torch.add_scalar (torch.mul_scalar keyMask0 (-1.0)) 1.0) (-1.0e9)
+  let bias : T #[batch, heads, maxLen, maxLen] :=
+    pairBias + nn.expand maskTerm #[batch, heads, maxLen, maxLen]
+  let ctx : T #[batch, heads, maxLen, headDim] :=
+    nn.scaled_dot_product_attention_bias q k v bias
   let out4 : T #[batch, maxLen, heads, headDim] := nn.transpose_from_attention ctx
   let out3 : T #[batch, maxLen, heads * headDim] := reshape out4 #[batch, maxLen, heads * headDim]
   torch.affine3d out3 layer.oW layer.oB
@@ -390,6 +412,7 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
     (applyCoordUpdate : Bool)
+    (pairFeatures : T #[batch * maxLen * maxLen, rff * 2])
     (ropeCos : T #[maxLen, headDim / 2])
     (ropeSin : T #[maxLen, headDim / 2])
     (padmask : T #[batch, maxLen])
@@ -397,7 +420,7 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
     (coord : T #[batch, maxLen, 3]) :
     T #[batch, maxLen, hidden] × T #[batch, maxLen, 3] :=
   let h1n := nn.layer_norm h layer.attnLnWeight layer.attnLnBias 1.0e-5
-  let attnOut := spatialAttention params layer coord padmask ropeCos ropeSin h1n
+  let attnOut := spatialAttention params layer pairFeatures padmask ropeCos ropeSin h1n
   let h1 := h + attnOut
   let h2n := nn.layer_norm h1 layer.mlpLnWeight layer.mlpLnBias 1.0e-5
   let mlp1 := nn.gelu (torch.affine3d h2n layer.fc1W layer.fc1B)
@@ -410,13 +433,19 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
   else
     (h2, coord)
 
-def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+/-- Forward with precomputed rotary frequencies. Split out so CUDA-graph
+    capture can hoist `rotary.computeFreqs` (which does a host→device copy,
+    illegal during stream capture) out of the captured region. -/
+def forwardFreqs {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (coord : T #[batch, maxLen, 3])
     (label : T #[batch, maxLen])
     (t : T #[batch])
     (padmask : T #[batch, maxLen])
-    (coordUpdateLayers : Nat := 6) :
+    (ropeCos : T #[maxLen, headDim / 2])
+    (ropeSin : T #[maxLen, headDim / 2])
+    (coordUpdateLayers : Nat := 6)
+    (coordTargetCap? : Option Float := none) :
     IO (T #[batch, maxLen, 3] × T #[batch, maxLen, vocab] × T #[batch, maxLen] × T #[batch, maxLen]) := do
   let coordEmb : T #[batch, maxLen, hidden] := coordRffEmbedding params coord
   let labelEmb : T #[batch, maxLen, hidden] :=
@@ -425,20 +454,25 @@ def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
   let time0 : T #[batch, 1, 1] := nn.unsqueeze (nn.unsqueeze t 1) 1
   let timeIn : T #[batch, maxLen, 1] := nn.expand time0 #[batch, maxLen, 1]
   let timeEmb : T #[batch, maxLen, hidden] := torch.affine3d timeIn params.timeW params.timeB
-  let (ropeCos, ropeSin) ← rotary.computeFreqs maxLen headDim 10000.0
   let mut h := coordEmb + labelEmb + timeEmb
   let mut runningCoord := coord
   let updateStart := if params.blocks.size > coordUpdateLayers then params.blocks.size - coordUpdateLayers else 0
+  -- RFF pair features depend only on the running coordinates: shared by all
+  -- layers until the next coordinate update, so recompute only then
+  -- (7 computations instead of 12 at layers=12, coordUpdateLayers=6).
+  let mut pairFeatures := pairRffFeatures params runningCoord
   let mut i := 0
   for block in params.blocks do
+    if i > updateStart then
+      pairFeatures := pairRffFeatures params runningCoord
     let (h', coord') :=
-      forwardLayer params block (i >= updateStart) ropeCos ropeSin padmask h runningCoord
+      forwardLayer params block (i >= updateStart) pairFeatures ropeCos ropeSin padmask h runningCoord
     h := h'
     runningCoord := coord'
     i := i + 1
   let hFinal := nn.layer_norm h params.finalLnWeight params.finalLnBias 1.0e-5
   let coordDelta : T #[batch, maxLen, 3] := torch.affine3d hFinal params.coordHeadW params.coordHeadB
-  let coordPred := runningCoord + coordDelta
+  let coordPred := boundCoordTarget (runningCoord + coordDelta) coordTargetCap?
   let labelLogits : T #[batch, maxLen, vocab] := torch.affine3d hFinal params.labelHeadW params.labelHeadB
   let split3 : T #[batch, maxLen, 1] := torch.affine3d hFinal params.splitHeadW params.splitHeadB
   let del3 : T #[batch, maxLen, 1] := torch.affine3d hFinal params.delHeadW params.delHeadB
@@ -446,15 +480,31 @@ def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
   let delLogits : T #[batch, maxLen] := reshape del3 #[batch, maxLen]
   pure (coordPred, labelLogits, splitLogits, delLogits)
 
+/-- Forward computing rotary frequencies on the fly (one host→device copy per
+    call); see `forwardFreqs` for the graph-safe variant. -/
+def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+    (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
+    (coord : T #[batch, maxLen, 3])
+    (label : T #[batch, maxLen])
+    (t : T #[batch])
+    (padmask : T #[batch, maxLen])
+    (coordUpdateLayers : Nat := 6)
+    (coordTargetCap? : Option Float := none) :
+    IO (T #[batch, maxLen, 3] × T #[batch, maxLen, vocab] × T #[batch, maxLen] × T #[batch, maxLen]) := do
+  let (ropeCos, ropeSin) ← rotary.computeFreqs maxLen headDim 10000.0
+  forwardFreqs params coord label t padmask ropeCos ropeSin
+    (coordUpdateLayers := coordUpdateLayers) (coordTargetCap? := coordTargetCap?)
+
 end FullMoleculeTransformerParams
 
 def fullMoleculeTransformerModel {maxLen vocab hidden heads headDim mlp rff layers : UInt64}
-    (coordUpdateLayers : Nat := 6) :
+    (coordUpdateLayers : Nat := 6)
+    (coordTargetCap? : Option Float := none) :
     BranchingMoleculeModel maxLen vocab
       (FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers) :=
   { forward := fun {batch} params coord label t padmask =>
       FullMoleculeTransformerParams.forward (batch := batch) params coord label t padmask
-        (coordUpdateLayers := coordUpdateLayers) }
+        (coordUpdateLayers := coordUpdateLayers) (coordTargetCap? := coordTargetCap?) }
 
 private def clampUpper? (cap? : Option Float) (x : Float) : Float :=
   match cap? with
@@ -475,7 +525,8 @@ private def scalar2d {maxLen : UInt64}
 private def packMoleculeStateForTransformer {maxLen vocab : UInt64}
     (padToken : Int64)
     (t : Float)
-    (state : BranchingState MoleculeAtom) :
+    (state : BranchingState MoleculeAtom)
+    (device : Device := Device.CPU) :
     IO (T #[1, maxLen, 3] × T #[1, maxLen] × T #[1] × T #[1, maxLen]) := do
   if state.state.size > maxLen.toNat then
     throw (IO.userError s!"molecule state length {state.state.size} exceeds transformer maxLen {maxLen}")
@@ -497,7 +548,7 @@ private def packMoleculeStateForTransformer {maxLen vocab : UInt64}
   let label := reshape (data.fromInt64Array labelArr) #[1, maxLen]
   let time := reshape (data.fromFloatArray #[t]) #[1]
   let padmask := toFloat' (reshape (data.fromInt64Array padArr) #[1, maxLen])
-  pure (coord, label, time, padmask)
+  pure (coord.to device, label.to device, time.to device, padmask.to device)
 
 private def tensorVec3 {maxLen : UInt64}
     (coordPred : T #[1, maxLen, 3]) (j : Nat) : Vec3 :=
@@ -517,13 +568,15 @@ def moleculeTransformerPrediction {maxLen vocab heads headDim mlp : UInt64}
     (params : MoleculeTransformerParams vocab heads headDim mlp)
     (t : Float)
     (state : BranchingState MoleculeAtom)
-    (splitLogitCap? : Option Float := none) :
+    (splitLogitCap? : Option Float := none)
+    (coordTargetCap? : Option Float := none)
+    (device : Device := Device.CPU) :
     IO MoleculeModelPrediction := do
   torch.autograd.no_grad do
     let (coord, label, time, padmask) ←
-      packMoleculeStateForTransformer (maxLen := maxLen) (vocab := vocab) padToken t state
+      packMoleculeStateForTransformer (maxLen := maxLen) (vocab := vocab) padToken t state device
     let (coordPred, labelLogits, splitLogits, delLogits) ←
-      MoleculeTransformerParams.forward (batch := 1) params coord label time padmask
+      MoleculeTransformerParams.forward (batch := 1) params coord label time padmask coordTargetCap?
     let n := state.state.size
     let canSplit := n < maxLen.toNat
     let coordTargets := (Array.range n).map (fun j => tensorVec3 coordPred j)
@@ -541,12 +594,15 @@ def moleculeTransformerPrediction {maxLen vocab heads headDim mlp : UInt64}
 def moleculeTransformerIOModel {maxLen vocab heads headDim mlp : UInt64}
     (padToken : Int64)
     (params : MoleculeTransformerParams vocab heads headDim mlp)
-    (splitLogitCap? : Option Float := none) :
+    (splitLogitCap? : Option Float := none)
+    (coordTargetCap? : Option Float := none)
+    (device : Device := Device.CPU) :
     Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction :=
   fun t state =>
     moleculeTransformerPrediction (maxLen := maxLen) (vocab := vocab)
       (heads := heads) (headDim := headDim) (mlp := mlp)
       padToken params t state (splitLogitCap? := splitLogitCap?)
+      (coordTargetCap? := coordTargetCap?) (device := device)
 
 def fullMoleculeTransformerPrediction
     {maxLen vocab hidden heads headDim mlp rff layers : UInt64}
@@ -555,14 +611,16 @@ def fullMoleculeTransformerPrediction
     (t : Float)
     (state : BranchingState MoleculeAtom)
     (coordUpdateLayers : Nat := 6)
-    (splitLogitCap? : Option Float := none) :
+    (splitLogitCap? : Option Float := none)
+    (coordTargetCap? : Option Float := none)
+    (device : Device := Device.CPU) :
     IO MoleculeModelPrediction := do
   torch.autograd.no_grad do
     let (coord, label, time, padmask) ←
-      packMoleculeStateForTransformer (maxLen := maxLen) (vocab := vocab) padToken t state
+      packMoleculeStateForTransformer (maxLen := maxLen) (vocab := vocab) padToken t state device
     let (coordPred, labelLogits, splitLogits, delLogits) ←
       FullMoleculeTransformerParams.forward (batch := 1) params coord label time padmask
-        (coordUpdateLayers := coordUpdateLayers)
+        (coordUpdateLayers := coordUpdateLayers) (coordTargetCap? := coordTargetCap?)
     let n := state.state.size
     let canSplit := n < maxLen.toNat
     let coordTargets := (Array.range n).map (fun j => tensorVec3 coordPred j)
@@ -582,13 +640,16 @@ def fullMoleculeTransformerIOModel
     (padToken : Int64)
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (coordUpdateLayers : Nat := 6)
-    (splitLogitCap? : Option Float := none) :
+    (splitLogitCap? : Option Float := none)
+    (coordTargetCap? : Option Float := none)
+    (device : Device := Device.CPU) :
     Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction :=
   fun t state =>
     fullMoleculeTransformerPrediction (maxLen := maxLen) (vocab := vocab)
       (hidden := hidden) (heads := heads) (headDim := headDim) (mlp := mlp)
       (rff := rff) (layers := layers)
       padToken params t state (coordUpdateLayers := coordUpdateLayers)
-      (splitLogitCap? := splitLogitCap?)
+      (splitLogitCap? := splitLogitCap?) (coordTargetCap? := coordTargetCap?)
+      (device := device)
 
 end torch.branching

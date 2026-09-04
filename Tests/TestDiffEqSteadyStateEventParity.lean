@@ -96,6 +96,3 @@ def run : IO Unit := do
   testSteadyStateEventNonTriggeringSolveSuccessful
 
 end Tests.DiffEqSteadyStateEventParity
-
-unsafe def main : IO Unit :=
-  Tests.DiffEqSteadyStateEventParity.run

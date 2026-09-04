@@ -1,6 +1,14 @@
 import Tyr.MctxDag.QTransforms
 import Tyr.Mctx.SeqHalving
 
+/-!
+# Tyr.MctxDag.ActionSelection
+
+Action selection for DAG search over `DagTree`, mirroring
+`Tyr.Mctx.ActionSelection`: PUCT (`muzeroActionSelection`) and Gumbel
+MuZero root/interior selectors via sequential halving.
+-/
+
 namespace torch.mctxdag
 
 /-- Q-transform function type. -/

@@ -1,6 +1,14 @@
 import Tyr.Mctx.Tree
 import Tyr.Mctx.Math
 
+/-!
+# Tyr.Mctx.QTransforms
+
+Q-value transforms applied before action selection: min/max and
+parent/siblings normalization, the completed-Q transform, and the Gumbel
+MuZero mixed value (Appendix D).
+-/
+
 namespace torch.mctx
 
 private def completeQvalues (qvalues : Array Float) (visitCounts : Array UInt64) (value : Float) : Array Float :=

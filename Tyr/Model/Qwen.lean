@@ -1,7 +1,12 @@
 /-
   Tyr/Model/Qwen.lean
 
-  Qwen3 model implementation for Flux text encoding.
+  Qwen3 transformer building blocks (config, RoPE, attention, MLP, layers,
+  full model, text embedder, weight loading).
+
+  This is the shared substrate for the Qwen3 and Qwen2.5-Omni causal LMs
+  (and is also reused by Qwen3-ASR, Qwen3.5, Qwen3-TTS, and Gemma4
+  components). The Flux examples use only the embedder for text encoding.
   Re-exports all Qwen components.
 -/
 

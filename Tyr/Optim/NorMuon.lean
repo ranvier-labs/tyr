@@ -6,7 +6,7 @@
   NorMuon is an advanced optimizer combining:
   - Muon's orthogonalized momentum (via Polar Express)
   - Low-rank variance reduction (Adafactor-style)
-  - Cautious weight decay (only when gradient and param have same sign)
+  - Decoupled weight decay (AdamW-style: `p ← p - lr_eff * wd * p`)
   - Distributed training with reduce-scatter/all-gather
 
   Based on modded-nanogpt's NorMuon implementation.
@@ -48,7 +48,8 @@ structure LabeledParam (s : Shape) where
 structure Config where
   /-- Base learning rate -/
   lr : Float := 0.023
-  /-- Weight decay -/
+  /-- Weight decay (decoupled, AdamW-style; per-step decay is
+      `effectiveLr * weightDecay * wdMul`, 0.0 disables) -/
   weightDecay : Float := 1.2
   /-- Momentum coefficient -/
   momentum : Float := 0.95
@@ -217,11 +218,11 @@ def aspectRatioScale (shape : Shape) : Float :=
     2. Update momentum buffer
     3. Apply Nesterov-style blended update
     4. Apply aspect-ratio learning-rate scaling
+    5. Apply decoupled weight decay (AdamW-style, matching DistAdam):
+       `param ← param - effectiveLr * weightDecay * wdMul * param`
 -/
 def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     (cfg : Config) (lrMul wdMul : Float) : IO (T s × ParamState s) := do
-  -- Keep signature compatibility; Muon does not use per-parameter wd multipliers.
-  let _ := wdMul
   -- Match nanochat ordering:
   -- 1) momentum buffer update on raw gradients
   -- 2) Nesterov blend
@@ -240,8 +241,15 @@ def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
   let g := autograd.detach orthGrad
   let aspectScale := aspectRatioScale s
   let effectiveLr := cfg.lr * lrMul * aspectScale
+  let wd := cfg.weightDecay * wdMul
+  -- Apply weight decay (decoupled, AdamW-style), matching DistAdam.
+  let paramDecayed := if wd > 0.0 then
+      let decay := mul_scalar (autograd.detach param) (effectiveLr * wd)
+      autograd.detach param - decay
+    else
+      autograd.detach param
   let update := mul_scalar g effectiveLr
-  let newParam := param - update
+  let newParam := paramDecayed - update
   let newParam := autograd.set_requires_grad (autograd.detach newParam) true
 
   let newState : ParamState s := {
@@ -406,6 +414,13 @@ def stepDistributedGroup {s : Shape}
 
     Used for embeddings, scalars, and other non-matrix parameters where
     orthogonalization doesn't apply.
+
+    Note: weight decay here is coupled L2-style (`grad + wd * param`, so the
+    decay is scaled by the learning rate through the momentum update), while
+    `stepSingle` uses decoupled AdamW-style decay
+    (`param ← param - effectiveLr * weightDecay * wdMul * param`). The two
+    paths therefore apply `weightDecay` inconsistently; the coupled form also
+    interacts with momentum, unlike true AdamW.
 -/
 def stepAdamLike {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     (cfg : Config) (lrMul wdMul : Float) : IO (T s × ParamState s) := do

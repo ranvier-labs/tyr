@@ -29,6 +29,13 @@ curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf 
 The correct Lean nightly is pinned in `lean-toolchain` and will be installed
 automatically on first `lake build`.
 
+### Sibling Lean checkout (required)
+
+`lakefile.lean` declares a path dependency
+(`require LeanUrdfTypeProvider from "../lean-urdf-typeprovider"`), so a fresh
+clone also needs the `lean-urdf-typeprovider` repository checked out as a
+sibling directory next to this one before `lake build` will work.
+
 ### LibTorch (required)
 
 **macOS:**
@@ -151,6 +158,13 @@ lake build test_runner_experimental
 .lake/build/bin/test_runner_experimental
 ```
 
+## Documentation
+
+Per-component guides live in [docs/](docs/README.md) — covering the core
+tensor/FFI layer, training stack, model families, GPU kernel DSL, scientific
+computing, and the C++/build internals. An exhaustive API reference can be
+generated with doc-gen4 (see `docbuild/`).
+
 ## Examples
 
 See [Examples/README.md](Examples/README.md) for detailed per-example documentation.
@@ -199,16 +213,19 @@ RANDOMIZED_MHA_TRIALS=10 ./scripts/gpu/test_parity_suite.sh
 ```
 
 Notes:
-- The suite currently covers `copy`, `rotary`, `layernorm`, `flashattn`, and
-  `mha_h100` entrypoints through the executables declared in `lakefile.lean`.
-- PyTorch is the default numerical oracle for fixture generation and parity.
-- If you have a local vendored ThunderKittens reference runner, set
-  `TYR_GPU_VENDORED_REF_RUNNER=/path/to/runner`. It will be called as
+- The suite runs three deterministic checks: the LeanTest GPU executable
+  (`TestGPUE2E`) covering `copy`, `rotary`, `layernorm` (f32/bf16), `rmsnorm`
+  (f32/bf16), `flashattn`, and `mha_h100`; the deterministic `mha_h100_768`
+  end-to-end run; and the `b200_bf16_gemm` end-to-end run (Blackwell-only, it
+  skips itself on other GPUs). `RANDOMIZED_MHA_TRIALS=N` adds N randomized
+  `mha_h100` trials with freshly regenerated fixtures.
+- PyTorch (via the libtorch FFI) is the default numerical oracle for fixture
+  generation and parity.
+- A vendored ThunderKittens reference runner is called as
   `runner <suite-name> <fixture-dir>` after each suite and should exit nonzero
-  on mismatch.
-- This checkout may have an empty `thirdparty/ThunderKittens` directory; the
-  vendored hook is optional and exists so parity can start paying off before the
-  submodule/runtime reference path is fully wired.
+  on mismatch. It defaults to `scripts/gpu/run_vendored_reference.sh` (needs a
+  Python env; see `./scripts/gpu/setup_libtorch_uv.sh`) and can be overridden
+  with `TYR_GPU_VENDORED_REF_RUNNER=/path/to/runner`.
 
 ## Key Concepts
 

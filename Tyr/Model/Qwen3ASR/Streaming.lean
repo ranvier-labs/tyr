@@ -561,7 +561,11 @@ def detectAndFixRepetitions (text : String) (threshold : Nat := 20) : String :=
 def parseAsrOutput (raw : String) (userLanguage : Option String := none) : String × String :=
   let s0 := raw.trimAscii.toString
   if s0.isEmpty then
-    ("", "")
+    match userLanguage with
+    | some forced =>
+      let f := forced.trimAscii.toString
+      (f, "")
+    | none => ("", "")
   else
     let s := detectAndFixRepetitions s0
     match userLanguage with

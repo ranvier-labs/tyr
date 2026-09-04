@@ -797,7 +797,4 @@ elab_rules : command
       logInfo m!"=== {r.name} ==="
       logInfo m!"kernel constant: {r.kernelConst}"
 
-/-- Command to print a specific kernel's C++ code -/
-syntax "#print_gpu_kernel" ident : command
-
 end Tyr.GPU.Codegen

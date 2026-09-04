@@ -64,15 +64,15 @@ def principalAngles (X₁ X₂ : Grassmann n p) : T #[p] :=
   let product := torch.nn.mm (torch.nn.transpose2d X₁.matrix) X₂.matrix
   torch.linalg.svdvals product
 
-/-- Geodesic distance between two subspaces.
-    d(X₁, X₂) = ||θ||₂ where θ are principal angles -/
+/-- Chordal distance between two subspaces.
+    d(X₁, X₂) = ||P₁ - P₂||_F / √2 = (Σᵢ sin²θᵢ)ᐟ², where P₁, P₂ are the
+    orthogonal projectors and θᵢ the principal angles.
+    Note: this is not the geodesic distance ||θ||₂ = (Σᵢ θᵢ²)ᐟ². -/
 def distance (X₁ X₂ : Grassmann n p) : Float :=
-  -- d² = Σᵢ θᵢ² = Σᵢ arccos²(σᵢ)
-  -- Approximation using Frobenius norm of difference of projectors
   let P₁ := projectionMatrix X₁
   let P₂ := projectionMatrix X₂
   let diff := torch.sub P₁ P₂
-  -- ||P₁ - P₂||_F / √2 is related to chordal distance
+  -- ||P₁ - P₂||_F / √2 is the chordal (projection-Frobenius) distance
   let frobSq := torch.nn.sumAll (torch.mul diff diff)
   Float.sqrt (torch.nn.item frobSq) / Float.sqrt 2.0
 

@@ -7,6 +7,7 @@ import Tyr.Model.BranchingFlows.Discrete
 import Tyr.Model.BranchingFlows.Molecule
 import Tyr.Model.BranchingFlows.QM9
 import Tyr.Model.BranchingFlows.MoleculeTrain
+import Tyr.Model.BranchingFlows.MoleculeTransformer
 import Tyr.Model.BranchingFlowsTrain
 import LeanTest
 
@@ -547,6 +548,125 @@ def testBranchingMoleculeModelPredictionUsesDFMStep : IO Unit := do
     "Molecule model prediction should DFM-step labels from model logits"
 
 @[test]
+def testBranchingMoleculeFixedLabelStepBypassesDFM : IO Unit := do
+  let fixedCfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 0
+    labelDFM := none
+  }
+  let logits := #[-10.0, 10.0]
+  let initialRng : Rng := { state := 20260709 }
+  let (label, finalRng) :=
+    fixedCfg.sampleStepLabelFromLogits 0 logits 0.2 0.3 initialRng
+  LeanTest.assertEqual label 1
+    "A fixed-label generation step should use the model mode directly"
+  LeanTest.assertEqual finalRng.state initialRng.state
+    "A fixed-label generation step should not consume DFM randomness"
+
+  let ordinaryCfg := MoleculeBridgeConfig.qm9 2 0
+  LeanTest.assertTrue ordinaryCfg.labelDFM.isSome
+    "The ordinary molecule configuration should retain its QM9 DFM default"
+
+@[test]
+def testBranchingMoleculeSampledStepSeparatesIdenticalParticles : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 9
+  }
+  let atom := MoleculeBridgeConfig.maskedAtom cfg { x := 0.0, y := 0.0, z := 0.0 }
+  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom, atom] #[0, 0]
+  let prediction : MoleculeModelPrediction := {
+    coordTargets := #[
+      { x := 1.0, y := 0.0, z := 0.0 },
+      { x := 1.0, y := 0.0, z := 0.0 }
+    ]
+    labelLogits := #[#[], #[]]
+    splitLogits := #[-100.0, -100.0]
+    delLogits := #[-100.0, -100.0]
+  }
+  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+    CoalescentFlow.mkDefault cfg noEventTimeDist noEventTimeDist (fun _ => 0.0)
+  let (result, _rng) :=
+    moleculeBranchingStepSampled flow x0 prediction 0.1 0.2 (rng := { state := 20260709 })
+  LeanTest.assertEqual result.state.state.size 2
+    "Sampled molecule step should preserve both particles when event hazards are disabled"
+  let first := result.state.state[0]!.coord
+  let second := result.state.state[1]!.coord
+  let separation :=
+    Float.abs (first.x - second.x) + Float.abs (first.y - second.y) + Float.abs (first.z - second.z)
+  LeanTest.assertTrue (separation > 1.0e-8)
+    s!"Independent OU samples should separate identical descendants, got separation={separation}"
+
+@[test]
+def testBranchingMoleculeSuppressesSplitWhenLabelChanges : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 0
+    labelDFM := none
+  }
+  let atom : MoleculeAtom := { coord := default, label := 0 }
+  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom] #[0]
+  let prediction : MoleculeModelPrediction := {
+    coordTargets := #[default]
+    labelLogits := #[#[-20.0, 20.0]]
+    splitLogits := #[8.0]
+    delLogits := #[-100.0]
+  }
+  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+    CoalescentFlow.mkDefault cfg uniformTimeDist noEventTimeDist
+  let seed : Rng := { state := 20260718 }
+  let (suppressed, _) := moleculeBranchingStep flow x0 prediction 0.0 0.5 (rng := seed)
+  let (allowed, _) := moleculeBranchingStep flow x0 prediction 0.0 0.5
+    (splitAllowedAfterBaseStep := fun _ _ => true) (rng := seed)
+  LeanTest.assertEqual suppressed.state.state.size 1
+    "A molecule label change should suppress a split in the same interval"
+  LeanTest.assertTrue (allowed.state.state.size > 1)
+    "The test fixture should generate splits when the Julia compatibility predicate is bypassed"
+
+@[test]
+def testMoleculeTrainingBridgeSamplesGaussianRoots : IO Unit := do
+  let cfg := MoleculeBridgeConfig.qm9 10 9
+  let targetAtom : MoleculeAtom := {
+    coord := { x := 0.0, y := 0.0, z := 0.0 }
+    label := 8
+  }
+  let target : BranchingState MoleculeAtom := BranchingState.mkDefault #[targetAtom] #[0]
+  let (result, _rng) ←
+    sampleMoleculeBridgeBatch cfg #[target] 2 { state := 20260709 }
+      (branchTime := noEventTimeDist) (deletionTime := noEventTimeDist)
+      (coalescenceFactor := 0.0) (deletionPad := 0.0)
+  LeanTest.assertEqual result.Xt.size 2 "Expected two sampled molecule bridge items"
+  let first := result.Xt[0]!.state[0]!.coord
+  let second := result.Xt[1]!.state[0]!.coord
+  let magnitude :=
+    Float.abs first.x + Float.abs first.y + Float.abs first.z +
+    Float.abs second.x + Float.abs second.y + Float.abs second.z
+  let separation :=
+    Float.abs (first.x - second.x) + Float.abs (first.y - second.y) + Float.abs (first.z - second.z)
+  LeanTest.assertTrue (magnitude > 1.0e-8)
+    "Molecule training bridge should no longer start every item at coordinate zero"
+  LeanTest.assertTrue (separation > 1.0e-8)
+    "Molecule training bridge should draw independent base-process samples"
+
+@[test]
+def testMoleculeTrainingBridgeCanOversampleBranchTimes : IO Unit := do
+  let cfg := MoleculeBridgeConfig.qm9 10 9
+  let atoms : Array MoleculeAtom := #[
+    { coord := { x := 0.0, y := 0.0, z := 0.0 }, label := 6 },
+    { coord := { x := 1.0, y := 0.0, z := 0.0 }, label := 8 }
+  ]
+  let target : BranchingState MoleculeAtom := BranchingState.mkDefault atoms #[0, 0]
+  let seed : Rng := { state := 20260718 }
+  let (ordinary, _) ← sampleMoleculeBridgeBatch cfg #[target] 1 seed
+    (branchTime := uniformTimeDist) (deletionTime := noEventTimeDist)
+    (coalescenceFactor := 1.0) (useBranchingTimeProb := 0.0) (deletionPad := 0.0)
+  let (atBranch, _) ← sampleMoleculeBridgeBatch cfg #[target] 1 seed
+    (branchTime := uniformTimeDist) (deletionTime := noEventTimeDist)
+    (coalescenceFactor := 1.0) (useBranchingTimeProb := 1.0) (deletionPad := 0.0)
+  LeanTest.assertTrue (Float.abs (ordinary.t[0]! - atBranch.t[0]!) > 1.0e-8)
+    "Branch-time oversampling should replace the initially sampled uniform training time"
+
+@[test]
 def testBranchingMoleculeGenerateUsesPredictionIntervals : IO Unit := do
   let cfg : MoleculeBridgeConfig := {
     coordOU := OUBridgeConfig.constantVariance 0.0 1.0
@@ -759,7 +879,7 @@ def testBranchingMoleculePackingAndLosses : IO Unit := do
   let ⟨batchDfm, packedDfm⟩ ← packBranchingMoleculeWithDFM cfg labelDFM result
   LeanTest.assertEqual batchDfm (1 : UInt64) "DFM-packed molecule batch should preserve batch size"
   let scaleSum := nn.item (nn.sumAll packedDfm.labelLossScale)
-  LeanTest.assertTrue (scaleSum > 1.2 && scaleSum < 1.3)
+  LeanTest.assertTrue (Float.abs (scaleSum - (1.0 / 0.95)) < 1.0e-5)
     s!"DFM-packed molecule batch should carry Flowfusion label scale at t=0.25, got {scaleSum}"
   let totalDfmLogits := batchDfm.toNat * cfg.maxLen.toNat * 10
   let labelLogitsDfm : T #[batchDfm, cfg.maxLen, 10] :=
@@ -773,6 +893,126 @@ def testBranchingMoleculePackingAndLosses : IO Unit := do
     moleculeLosses cfg packedDfm packedDfm.coordAnchor labelLogitsDfm splitLogitsDfm delLogitsDfm
   LeanTest.assertTrue (dfmReport.label > report.label)
     s!"DFM label loss should apply the time scale, unscaled={report.label}, scaled={dfmReport.label}"
+
+private def singleAtomMoleculeLossFixture (t : Float) : BranchingBridgeResult MoleculeAtom :=
+  let atom : MoleculeAtom := { coord := default, label := 0 }
+  let anchor : MoleculeAtom := { coord := { x := 1.0, y := 0.0, z := 0.0 }, label := 0 }
+  let state : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom] #[0]
+  {
+    t := #[t]
+    segments := #[#[]]
+    Xt := #[state]
+    X1anchor := #[#[anchor]]
+    descendants := #[#[1]]
+    del := #[#[false]]
+    splitsTarget := #[#[0]]
+    prevCoalescence := #[#[0.0]]
+  }
+
+@[test]
+def testMoleculeLossUsesJuliaTimeScalingAndIndependentWeights : IO Unit := do
+  let dfm := DistNoisyDiscreteConfig.qm9 10 0
+  let labelScaleRatio := dfm.lossScale 0.9 1.0 0.2 / dfm.lossScale 0.0 1.0 0.2
+  LeanTest.assertTrue (Float.abs (labelScaleRatio - 4.0) < 1.0e-8)
+    s!"Discrete labels should use the Julia demo's linear 0.2-epsilon scale, ratio={labelScaleRatio}"
+  let cfg : BranchingTrainConfig := {
+    maxLen := 1
+    padToken := 0
+    coordWeight := 2.0
+    labelWeight := 0.0
+    splitsWeight := 1.0
+    delWeight := 1.0
+  }
+  let ⟨batchEarly, early⟩ ← packBranchingMolecule cfg (singleAtomMoleculeLossFixture 0.0)
+  let ⟨batchLate, late⟩ ← packBranchingMolecule cfg (singleAtomMoleculeLossFixture 0.9)
+  let labelEarly : T #[batchEarly, cfg.maxLen, 1] := torch.zeros #[batchEarly, cfg.maxLen, 1]
+  let splitEarly : T #[batchEarly, cfg.maxLen] := torch.zeros #[batchEarly, cfg.maxLen]
+  let delEarly : T #[batchEarly, cfg.maxLen] := torch.zeros #[batchEarly, cfg.maxLen]
+  let (totalEarly, reportEarly) :=
+    moleculeLosses cfg early early.coord labelEarly splitEarly delEarly
+  let labelLate : T #[batchLate, cfg.maxLen, 1] := torch.zeros #[batchLate, cfg.maxLen, 1]
+  let splitLate : T #[batchLate, cfg.maxLen] := torch.zeros #[batchLate, cfg.maxLen]
+  let delLate : T #[batchLate, cfg.maxLen] := torch.zeros #[batchLate, cfg.maxLen]
+  let (_, reportLate) :=
+    moleculeLosses cfg late late.coord labelLate splitLate delLate
+  LeanTest.assertTrue (Float.abs (reportLate.coord / reportEarly.coord - 4.0) < 1.0e-4)
+    s!"Late coordinate supervision should receive Julia scalefloss amplification, early={reportEarly.coord}, late={reportLate.coord}"
+  LeanTest.assertTrue (Float.abs (reportLate.splits / reportEarly.splits - 4.0) < 1.0e-4)
+    s!"Late split supervision should receive Julia scalefloss amplification, early={reportEarly.splits}, late={reportLate.splits}"
+  LeanTest.assertTrue (Float.abs (reportLate.del / reportEarly.del - 4.0) < 1.0e-4)
+    s!"Late deletion supervision should receive Julia scalefloss amplification, early={reportEarly.del}, late={reportLate.del}"
+  let expectedTotal := reportEarly.coord * 2.0 + reportEarly.splits + reportEarly.del
+  LeanTest.assertTrue (Float.abs (nn.item totalEarly - expectedTotal) < 1.0e-5)
+    s!"Independent molecule loss weights should determine total loss, expected={expectedTotal}, got={nn.item totalEarly}"
+
+@[test]
+def testMoleculeMuonUpdatesMatrixAndVectorLeaves : IO Unit := do
+  let matrix : T #[2, 2] := reshape (data.fromFloatArray #[1.0, 2.0, 3.0, 4.0]) #[2, 2]
+  let vector : T #[2] := data.fromFloatArray #[1.0, -1.0]
+  let grads : T #[2, 2] × T #[2] := (torch.ones #[2, 2], torch.ones #[2])
+  let params : T #[2, 2] × T #[2] := (matrix, vector)
+  let state := initMoleculeMuonState params
+  let (updated, state') ← moleculeMuonStep params grads state 0.01 0.0 0.95 5
+  let matrixDelta := nn.item (nn.sumAll (nn.abs (updated.1 - params.1)))
+  let vectorDelta := nn.item (nn.sumAll (nn.abs (updated.2 - params.2)))
+  LeanTest.assertTrue (Float.isFinite matrixDelta && matrixDelta > 0.0)
+    s!"Muon should update matrix leaves, delta={matrixDelta}"
+  LeanTest.assertTrue (Float.isFinite vectorDelta && vectorDelta > 0.0)
+    s!"Muon should flatten and update vector leaves like the Julia rule, delta={vectorDelta}"
+  LeanTest.assertEqual state'.step 1 "Muon optimizer state should advance one step"
+
+private def moleculeCoordCell {maxLen : UInt64}
+    (coord : T #[1, maxLen, 3]) (j k : Nat) : Float :=
+  let row : T #[1, 1, 3] := data.slice coord 1 j.toUInt64 1
+  let cell : T #[1, 1, 1] := data.slice row 2 k.toUInt64 1
+  nn.item cell
+
+@[test]
+def testMoleculeTransformerCoordTargetCapAppliesInTrainingAndInference : IO Unit := do
+  let maxLen : UInt64 := 1
+  let vocab : UInt64 := 2
+  let heads : UInt64 := 1
+  let headDim : UInt64 := 2
+  let mlp : UInt64 := 2
+  let cap := 2.0
+  torch.manualSeed 20260709
+  let initialized ← MoleculeTransformerParams.init vocab heads headDim mlp
+  let params := { initialized with
+    coordHeadW := torch.zeros #[3, heads * headDim]
+    coordHeadB := data.fromFloatArray #[100.0, -100.0, 4.0]
+  }
+
+  let coord : T #[1, maxLen, 3] := torch.zeros #[1, maxLen, 3]
+  let label : T #[1, maxLen] := reshape (data.fromInt64Array #[0]) #[1, maxLen]
+  let time : T #[1] := torch.zeros #[1]
+  let padmask : T #[1, maxLen] := torch.ones #[1, maxLen]
+  let trainingModel :=
+    moleculeTransformerModel (maxLen := maxLen) (vocab := vocab)
+      (heads := heads) (headDim := headDim) (mlp := mlp)
+      (coordTargetCap? := some cap)
+  let (bounded, _, _, _) ← trainingModel.forward params coord label time padmask
+  for k in [:3] do
+    let got := moleculeCoordCell bounded 0 k
+    LeanTest.assertTrue (Float.abs got <= cap + 1.0e-5)
+      s!"Training model coordinate {k} should be bounded by {cap}, got {got}"
+  LeanTest.assertTrue (moleculeCoordCell bounded 0 0 > 1.99)
+    s!"Positive oversized training target should approach +cap, got {moleculeCoordCell bounded 0 0}"
+  LeanTest.assertTrue (moleculeCoordCell bounded 0 1 < -1.99)
+    s!"Negative oversized training target should approach -cap, got {moleculeCoordCell bounded 0 1}"
+
+  let atom : MoleculeAtom := { coord := default, label := 0 }
+  let state : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom] #[0]
+  let inferenceModel :=
+    moleculeTransformerIOModel (maxLen := maxLen) (vocab := vocab)
+      (heads := heads) (headDim := headDim) (mlp := mlp)
+      0 params (coordTargetCap? := some cap)
+  let prediction ← inferenceModel 0.0 state
+  let target := prediction.coordTargets[0]!
+  for got in #[target.x, target.y, target.z] do
+    LeanTest.assertTrue (Float.abs got <= cap + 1.0e-5)
+      s!"Inference coordinate target should be bounded by {cap}, got {got}"
+  LeanTest.assertTrue (target.x > 1.99 && target.y < -1.99)
+    s!"Inference should use the same signed cap as training, got {reprStr target}"
 
 @[test]
 def testBranchingSegmentsProjectToEventSkeleton : IO Unit := do
@@ -805,6 +1045,89 @@ def testBranchingSegmentsProjectToEventSkeleton : IO Unit := do
     "Projected graph should include checkpoint boundaries by default"
   LeanTest.assertTrue (graph.containsMoveKind .branchAggregate)
     "Projected graph should include branch aggregation for descendant-count segments"
+
+@[test]
+def testReconstructLineageAssignsStableParentChildIds : IO Unit := do
+  let split0 : BranchingStepEvent := {
+    sourceIndex := 0
+    sourceId := 1
+    group := 0
+    splitCount := 1
+    deleted := false
+    t0 := 0.0
+    t1 := 0.25
+  }
+  let split1 : BranchingStepEvent := {
+    sourceIndex := 0
+    sourceId := 1
+    group := 0
+    splitCount := 1
+    deleted := false
+    t0 := 0.25
+    t1 := 0.5
+  }
+  let generated : BranchingGenerateResult Nat := {
+    finalState := mkState #[20, 21, 10] #[0, 0, 0]
+    trajectory := #[
+      mkState #[0] #[0],
+      mkState #[10, 11] #[0, 0],
+      mkState #[20, 21, 10] #[0, 0, 0]
+    ]
+    events := #[#[split0], #[split1]]
+    times := #[0.0, 0.25, 0.5]
+  }
+  let trace ←
+    match reconstructLineage generated with
+    | .ok trace => pure trace
+    | .error message => throw (IO.userError message)
+  LeanTest.assertEqual trace.frames.size 3 "Expected one lineage frame per generated state"
+  LeanTest.assertEqual trace.events.size 2 "Expected both split events in the lineage trace"
+  LeanTest.assertEqual (trace.frames[0]!.particles.map (fun particle => particle.particleId)) #[1]
+    "Initial particle should receive the first runtime id"
+  LeanTest.assertEqual (trace.frames[1]!.particles.map (fun particle => particle.particleId)) #[2, 3]
+    "First split should terminate the root and create two child ids"
+  LeanTest.assertEqual (trace.frames[2]!.particles.map (fun particle => particle.particleId)) #[4, 5, 3]
+    "Second split should replace its parent while preserving the unaffected sibling"
+  LeanTest.assertEqual trace.events[0]!.parentId 1 "First split should reference the root"
+  LeanTest.assertEqual trace.events[0]!.childIds #[2, 3] "First split should record both children"
+  LeanTest.assertEqual trace.events[1]!.parentId 2 "Second split should reference the first child"
+  LeanTest.assertEqual trace.events[1]!.childIds #[4, 5] "Second split should record new child ids"
+
+@[test]
+def testReconstructLineageRejectsMalformedFrameCounts : IO Unit := do
+  let malformed : BranchingGenerateResult Nat := {
+    finalState := mkState #[1] #[0]
+    trajectory := #[mkState #[0] #[0], mkState #[1] #[0]]
+    events := #[]
+    times := #[0.0, 1.0]
+  }
+  let rejected :=
+    match reconstructLineage malformed with
+    | .error _ => true
+    | .ok _ => false
+  LeanTest.assertTrue rejected
+    "Lineage reconstruction must reject a trajectory with a missing event step"
+
+@[test]
+def testMoleculeTrajectoryJsonlRejectsNonfiniteCoordinates : IO Unit := do
+  let badAtom : MoleculeAtom := {
+    coord := { x := 0.0 / 0.0, y := 0.0, z := 0.0 }
+    label := 8
+  }
+  let badState : BranchingState MoleculeAtom :=
+    BranchingState.mkDefault #[badAtom] #[0]
+  let generated : BranchingGenerateResult MoleculeAtom := {
+    finalState := badState
+    trajectory := #[badState]
+    events := #[]
+    times := #[0.0]
+  }
+  let rejected :=
+    match moleculeTrajectoryJsonl generated with
+    | .error _ => true
+    | .ok _ => false
+  LeanTest.assertTrue rejected
+    "Trajectory JSONL must reject NaN/Inf coordinates rather than emitting invalid JSON"
 
 @[test]
 def testBranchingStepEventsProjectToEventSkeleton : IO Unit := do

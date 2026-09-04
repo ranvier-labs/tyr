@@ -495,7 +495,7 @@ structure Kernel where
   name : String
   /-- Target GPU architecture (SM80/SM90/SM100/...). -/
   arch : GpuArch
-  /-- Target GPU family (e.g. Hopper, Blackwell, GB10). -/
+  /-- Target GPU family (Ampere, Hopper, or Blackwell). -/
   family : GpuFamily
   /-- Ordered kernel signature parameters (pointers and scalars). -/
   params : Array KParam

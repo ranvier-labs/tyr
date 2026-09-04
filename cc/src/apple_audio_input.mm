@@ -240,23 +240,30 @@ lean_object* lean_tyr_audio_rms(b_lean_obj_arg arr, lean_object* /*w*/) {
 
 #else
 
+namespace {
+
+static lean_object* mk_io_error(const char* msg) {
+  return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg)));
+}
+
+} // namespace
+
 extern "C" {
 
 lean_object* lean_tyr_audio_input_start(uint64_t, uint64_t, uint64_t, lean_object* /*w*/) {
-  return lean_io_result_mk_error(lean_mk_io_user_error(
-      lean_mk_string("audio input is only supported on macOS")));
+  return mk_io_error("audio input is only supported on macOS");
 }
 
 lean_object* lean_tyr_audio_input_read(uint64_t, uint64_t, lean_object* /*w*/) {
-  return lean_io_result_mk_ok(lean_mk_empty_array());
+  return mk_io_error("audio input is only supported on macOS");
 }
 
 lean_object* lean_tyr_audio_input_read_buffer(uint64_t, uint64_t, lean_object* /*w*/) {
-  return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+  return mk_io_error("audio input is only supported on macOS");
 }
 
 lean_object* lean_tyr_audio_input_stop(lean_object* /*w*/) {
-  return lean_io_result_mk_ok(lean_box(0));
+  return mk_io_error("audio input is only supported on macOS");
 }
 
 lean_object* lean_tyr_audio_rms(b_lean_obj_arg arr, lean_object* /*w*/) {

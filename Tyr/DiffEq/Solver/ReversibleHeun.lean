@@ -56,6 +56,7 @@ def ReversibleHeun.solver {Term Y VF Control Args : Type}
 instance : ExplicitSolver ReversibleHeun := ⟨True.intro⟩
 instance : StratonovichSolver ReversibleHeun := ⟨True.intro⟩
 instance : AdaptiveSolver ReversibleHeun := ⟨True.intro⟩
+instance : ReversibleSolver ReversibleHeun := ⟨True.intro⟩
 
 end DiffEq
 end torch

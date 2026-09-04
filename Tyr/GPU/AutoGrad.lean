@@ -1,6 +1,19 @@
 import Tyr.AutoGrad
 import Tyr.GPU.Codegen.IR
 
+/-!
+# Tyr.GPU.AutoGrad
+
+Symbolic AD over the GPU kernel IR (`Tyr.GPU.Codegen`): linearizes `KStmt`
+programs into a linear trace (`LinearInst`) and transposes that trace into
+VJP kernel statements. Custom op rules can be supplied through the GPU VJP
+registry (`registerGpuVJPRule`/`getGpuVJPRule` in `Tyr.AutoGrad`).
+
+Note: the GPU VJP registry currently has no registered rules anywhere in
+the repository, so `getGpuVJPRule` lookups always fall back to the built-in
+rules below.
+-/
+
 namespace Tyr.GPU.AD
 
 open Tyr.AD

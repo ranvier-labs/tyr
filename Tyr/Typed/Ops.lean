@@ -21,6 +21,9 @@
     for literal dtypes; integer tensors must be cast explicitly first.
   - Matmul-family ops require both operands to share dtype AND device
     policy — PyTorch throws on mixed operands; here it cannot compile.
+    Generic `matmul` also requires `TensorSpec.matmulShape?` to accept
+    the shape pair (auto-param, `rfl` for concrete shapes), so inner-dim
+    mismatches fail to compile instead of throwing inside libtorch.
 -/
 import Tyr.Torch
 import Tyr.Typed.Tensor
@@ -212,8 +215,16 @@ def softmax {σ : StaticSpec} (t : Tensor σ) (dim : Int32 := -1)
 
 /-! ## Matmul family (operands must share dtype and device policy) -/
 
+/-- Generic matmul (PyTorch semantics: 1D/2D special cases, batch dims
+    broadcast). The auto-param proof — discharged by `rfl` for concrete
+    shapes — guarantees the inner dims match and the batch dims broadcast
+    (`TensorSpec.matmulShape?`), so mismatched operands fail to compile
+    instead of throwing inside libtorch. Code generic over dimensions,
+    where the proof cannot reduce, should use the checked
+    `mm`/`linear`/`linear3d`/`matmul3d`/`bmm4d` family instead. -/
 def matmul {s1 s2 : Shape} {d : DType} {dev : DevicePolicy}
-    (a : Tensor ⟨s1, d, dev⟩) (b : Tensor ⟨s2, d, dev⟩) :
+    (a : Tensor ⟨s1, d, dev⟩) (b : Tensor ⟨s2, d, dev⟩)
+    (_h : (TensorSpec.matmulShape? s1 s2).isSome = true := by rfl) :
     Tensor ⟨matmulShape s1 s2, d, dev⟩ :=
   .assumeSpec (nn.matmul a.raw b.raw)
 

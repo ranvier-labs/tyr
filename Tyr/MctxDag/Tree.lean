@@ -1,6 +1,14 @@
 import Std
 import Tyr.MctxDag.Base
 
+/-!
+# Tyr.MctxDag.Tree
+
+`DagTree S K E`, the DAG search-tree state: like `Mctx.Tree` but with a
+`keyToNode` transposition map, so repeated states share nodes; includes
+capacity, Q-value, summary, reset, and reachable-subgraph helpers.
+-/
+
 namespace torch.mctxdag
 
 /-- Search tree state with transposition support through `keyToNode`. -/

@@ -4,6 +4,7 @@ import Tyr.Module.Linear
 import Tyr.Module.LayerNorm
 import Tyr.Module.Affine
 import Tyr.Module.Conv2d
+import Tyr.Module.RMSNorm
 
 /-!
 # Tyr.Module
@@ -15,7 +16,7 @@ It re-exports base module interfaces, deriving support, and common layer impleme
 
 - `Tyr.Module.Core`: base module abstractions and core contracts.
 - `Tyr.Module.Derive`: deriving support for module/tensor-structure ergonomics.
-- Common layers: `Linear`, `LayerNorm`, `Affine`, and `Conv2d`.
+- Common layers: `Linear`, `LayerNorm`, `Affine`, `Conv2d`, and `RMSNorm`.
 
 ## Scope
 

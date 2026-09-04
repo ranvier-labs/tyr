@@ -251,9 +251,9 @@ def stepLabelMode
     (t0 t1 : Float) : Nat :=
   cfg.modeOfDistribution (cfg.stepDistribution currentLabel targetLogits t0 t1) currentLabel
 
-def lossScale (cfg : DistNoisyDiscreteConfig) (t : Float)
+def lossScale (_cfg : DistNoisyDiscreteConfig) (t : Float)
     (pow : Float := 2.0) (eps : Float := 0.05) : Float :=
-  1.0 / Float.pow ((1.0 + eps) - cfg.k1 t) pow
+  1.0 / Float.pow ((1.0 + eps) - t) pow
 
 end DistNoisyDiscreteConfig
 

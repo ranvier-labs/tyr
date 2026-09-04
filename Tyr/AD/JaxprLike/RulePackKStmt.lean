@@ -1465,6 +1465,20 @@ private def padAliasRule (opName : OpName) : LocalJacRule :=
       }
     ]
 
+/-! ## Placeholder and hybrid rule packs (experimental scaffolding)
+
+WARNING: The `*PlaceholderRules` and `*HybridRules` registration functions
+in this section are experimental scaffolding, not sound differentiation.
+Any op without an explicit semantic rule falls back to
+`defaultPlaceholderRule`, which fabricates an identity-like Jacobian edge
+per input regardless of the op's actual math — so local Jacobians (and any
+cross-derivative/VJP quantities computed from them) produced under these
+packs are numerically meaningless for such ops. These packs currently have
+no call sites in the repository. For results built only from explicit
+semantic rules, use `registerKStmtAllSupportedSemanticsRules` (ops without
+a real rule then fail instead of silently producing placeholder values).
+-/
+
 /-- Register placeholder local-Jac rules for every KStmt unary and binary op. -/
 def registerKStmtUnaryBinaryPlaceholderRules : Lean.CoreM Unit := do
   for op in allKStmtUnaryOps do

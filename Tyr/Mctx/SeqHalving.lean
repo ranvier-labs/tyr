@@ -1,5 +1,13 @@
 import Tyr.Mctx.Math
 
+/-!
+# Tyr.Mctx.SeqHalving
+
+Sequential-halving visit schedules for Gumbel MuZero: how many simulations
+each considered action receives (`getSequenceOfConsideredVisits`), plus the
+considered-action scoring used by Gumbel root action selection.
+-/
+
 namespace torch.mctx
 
 private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=

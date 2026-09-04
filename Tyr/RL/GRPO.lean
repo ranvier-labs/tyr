@@ -19,6 +19,15 @@
   3. Compute advantages: A = r - mean(r) per batch
   4. Compute policy gradient: sum(log_p * A) / num_valid_tokens
   5. Loss = -pg_objective (negate to minimize)
+
+  Current limitations:
+  - `temperature`/`topK`/`topP` are plumbed through `GRPOConfig` and
+    `GenerationConfig` but never applied: token sampling is delegated
+    entirely to the `generateOneFn` callback, which receives no sampling
+    parameters.
+  - `grpoStepWithModelUpdate` requires batch size `b = 1` and throws
+    otherwise; gradients are accumulated sample-by-sample under that
+    constraint.
 -/
 import Tyr.Torch
 import Tyr.TensorStruct

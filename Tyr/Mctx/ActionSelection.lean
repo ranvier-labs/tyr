@@ -1,6 +1,14 @@
 import Tyr.Mctx.QTransforms
 import Tyr.Mctx.SeqHalving
 
+/-!
+# Tyr.Mctx.ActionSelection
+
+Action selection inside the search loop: PUCT (`muzeroActionSelection`),
+Gumbel MuZero root/interior selection via sequential halving, and the
+depth-switching wrapper.
+-/
+
 namespace torch.mctx
 
 /-- Q-transform function type. -/

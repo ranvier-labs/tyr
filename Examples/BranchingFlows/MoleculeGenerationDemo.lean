@@ -4,12 +4,14 @@ import Tyr.Model.BranchingFlows.QM9
 /-!
   Examples/BranchingFlows/MoleculeGenerationDemo.lean
 
-  Molecule-shaped BranchingFlows oracle generation demo.
+  Molecule-shaped BranchingFlows target-conditioned generation demo.
 
   It uses the preprocessed QM9 JSONL boundary, constructs native molecule
-  `BranchingState`s, samples a training bridge, runs an oracle-style forward
-  generation loop from the length-one masked source state, and writes XYZ point
-  clouds for downstream OpenBabel/RDKit checks.
+  `BranchingState`s, samples a training bridge, runs a target-conditioned
+  forward generation loop from the length-one masked source state, and writes
+  XYZ point clouds for downstream OpenBabel/RDKit checks. The target supplies
+  the coordinate and label predictions; this demonstrates the branching
+  mechanism rather than a learned molecular distribution.
 -/
 
 namespace Examples.BranchingFlows
@@ -45,7 +47,7 @@ private def targetAtom (target : BranchingState MoleculeAtom) (i : Nat) : Molecu
   else
     target.state.getD (i % target.state.size) target.state[0]!
 
-private def oracleModel
+private def targetConditionedModel
     (vocabSize : Nat)
     (target : BranchingState MoleculeAtom)
     (splitLogit : Float)
@@ -57,7 +59,7 @@ private def oracleModel
   let gap := target.state.size - n
   let activeSplitLogit :=
     if gap <= 1 then
-      min splitLogit 0.1
+      min splitLogit 3.0
     else
       splitLogit
   let indices := Array.range n
@@ -102,11 +104,22 @@ def runDemo (outputPrefix : String := "examples_branching_molecule") : IO Unit :
   let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x0Atom] #[0]
   let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
     CoalescentFlow.mkDefault cfg TimeDist.betaOneThreeHalves noEventTimeDist positiveIdentity
-  let model := oracleModel vocabSize target 0.75
+  let model := targetConditionedModel vocabSize target 4.0
+  let schedule := (Array.range 33).map (fun i => Float.ofNat i / 32.0)
   let (generated, _rng) :=
-    moleculeBranchingGenerate flow x0 model #[0.0, 0.5, 1.0] (rng := rng)
+    moleculeBranchingGenerate flow x0 model schedule (rng := rng)
+  for i in [:generated.trajectory.size] do
+    let state := generated.trajectory[i]!
+    let time := generated.times.getD i 0.0
+    writeMoleculeXYZ ⟨s!"{outputPrefix}_step_{i}.xyz"⟩ state
+      s!"branching trajectory step={i} t={time}" demoLabelSymbol
+    IO.println s!"trajectory step={i} t={time} atoms={state.state.size}"
+    if i > 0 then
+      for event in generated.events.getD (i - 1) #[] do
+        IO.println s!"  branch source_id={event.sourceId} splits={event.splitCount} deleted={event.deleted} interval=[{event.t0}, {event.t1}]"
   writeMoleculeXYZ ⟨outputPrefix ++ "_generated.xyz"⟩ generated.finalState
-    "oracle moleculeBranchingGenerate sample" demoLabelSymbol
+    "target-conditioned moleculeBranchingGenerate reference" demoLabelSymbol
+  writeMoleculeTrajectoryJsonl ⟨outputPrefix ++ "_trajectory.jsonl"⟩ generated
 
   IO.println s!"target atoms: {target.state.size}"
   IO.println s!"bridge atoms: {bridgeState.state.size}"
@@ -114,6 +127,8 @@ def runDemo (outputPrefix : String := "examples_branching_molecule") : IO Unit :
   IO.println s!"wrote {outputPrefix}_target.xyz"
   IO.println s!"wrote {outputPrefix}_bridge.xyz"
   IO.println s!"wrote {outputPrefix}_generated.xyz"
+  IO.println s!"wrote {outputPrefix}_trajectory.jsonl with stable runtime lineage"
+  IO.println s!"wrote {generated.trajectory.size} branching trajectory frames"
 
 def _root_.main (args : List String) : IO UInt32 := do
   let outputPrefix :=

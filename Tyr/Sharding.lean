@@ -41,6 +41,16 @@ inductive ShardDim where
   | dim (n : Nat) : ShardDim
   deriving Repr, BEq, Inhabited
 
+/-- Resolve a shard dimension to a concrete axis for a tensor of the given rank.
+    Returns `none` when the axis is out of range, in which case sharding
+    operations treat the tensor as replicated rather than sharded. -/
+def ShardDim.resolve? (sd : ShardDim) (rank : Nat) : Option Nat :=
+  let d := match sd with
+    | .first => 0
+    | .last => rank - 1
+    | .dim n => n
+  if d < rank then some d else none
+
 /-- Specification for how a tensor is sharded across ranks -/
 structure ShardSpec where
   /-- Which dimension to shard along -/
@@ -69,16 +79,17 @@ def shardOffset (fullSize numShards shardIdx : UInt64) : UInt64 :=
 
 /-! ## Type-level Shape Computation -/
 
-/-- Compute the sharded shape from full shape -/
+/-- Compute the sharded shape from full shape.
+
+    The axis selected by `spec.shardDim` is divided across `spec.numShards`
+    shards; when the axis size is not evenly divisible, `shardSize` distributes
+    the remainder over the first shards. If `spec.shardDim` does not resolve to
+    a valid axis of `s`, the shape is returned unchanged (replicated tensor).
+-/
 def shardedShape (s : Shape) (spec : ShardSpec) : Shape :=
-  match s, spec.shardDim with
-  | #[n], _ => #[shardSize n spec.numShards spec.shardIdx]
-  | #[n, m], .first => #[shardSize n spec.numShards spec.shardIdx, m]
-  | #[n, m], .last => #[n, shardSize m spec.numShards spec.shardIdx]
-  | #[n, m, k], .first => #[shardSize n spec.numShards spec.shardIdx, m, k]
-  | #[n, m, k], .last => #[n, m, shardSize k spec.numShards spec.shardIdx]
-  | #[n, m, k], .dim 1 => #[n, shardSize m spec.numShards spec.shardIdx, k]
-  | _, _ => s  -- Fallback: no sharding
+  match spec.shardDim.resolve? s.size with
+  | some d => replaceAtDim s d (shardSize (s.getD d 0) spec.numShards spec.shardIdx)
+  | none => s
 
 /-! ## Sharded Tensor -/
 
@@ -107,10 +118,11 @@ abbrev ValidShard (rank worldSize : UInt64) := rank < worldSize
 
 /-! ## Sharded Tensor Operations -/
 
-/-- Create a sharded tensor by slicing a full tensor.
+/-- Create a sharded tensor by slicing a full tensor along `shardDim`.
 
     This is used during initialization when one rank has the full tensor
-    and needs to extract its shard.
+    and needs to extract its shard. If `shardDim` does not resolve to a valid
+    axis of `s`, the full tensor is kept as the (replicated) shard.
 -/
 def ShardedTensor.fromFull {s : Shape} {rank worldSize : UInt64}
     (full : T s) (_h : ValidShard rank worldSize)
@@ -119,25 +131,40 @@ def ShardedTensor.fromFull {s : Shape} {rank worldSize : UInt64}
   let spec : ShardSpec := ⟨shardDim, worldSize, rank⟩
   let shardShape := shardedShape s spec
 
-  -- For sharding, we slice along the first dimension
-  -- Get the first dimension size
-  let firstDim := if h : s.size > 0 then s[0] else 1
-  let offset := shardOffset firstDim worldSize rank
-  let size := shardSize firstDim worldSize rank
-
-  -- Extract the shard using T.slice method
-  let sliced := full.slice 0 offset.toInt64 (offset + size).toInt64
-  let sharded := reshape sliced shardShape
+  -- Slice along the sharded dimension
+  let sharded := match shardDim.resolve? s.size with
+    | some d =>
+      let fullDim := s.getD d 0
+      let offset := shardOffset fullDim worldSize rank
+      let size := shardSize fullDim worldSize rank
+      reshape (full.slice d offset.toInt64 (offset + size).toInt64) shardShape
+    | none => reshape full shardShape
 
   { shard := sharded
     cachedFull := some full
     cacheIsStale := false
   }
 
+/-- Permutation that moves axis `d` of a `rank`-D tensor to the front. -/
+private def moveAxisToFrontPerm (rank d : Nat) : Array UInt64 :=
+  (List.range rank).toArray.map fun i =>
+    if i = 0 then d.toUInt64
+    else if i ≤ d then (i - 1).toUInt64
+    else i.toUInt64
+
+/-- Inverse of `moveAxisToFrontPerm`: moves the front axis back to position `d`. -/
+private def moveFrontToAxisPerm (rank d : Nat) : Array UInt64 :=
+  (List.range rank).toArray.map fun i =>
+    if i < d then (i + 1).toUInt64
+    else if i = d then 0
+    else i.toUInt64
+
 /-- Gather all shards to reconstruct the full tensor.
 
-    Uses all-gather collective operation.
-    The result is cached for repeated access.
+    Uses the all-gather collective operation, concatenating the per-rank shards
+    along the sharded dimension. All-gather requires equal-sized shards, so the
+    sharded dimension must be divisible by `worldSize`; otherwise an error is
+    thrown. The result is cached for repeated access.
 -/
 def ShardedTensor.gather {s : Shape} {rank worldSize : UInt64} {sd : ShardDim}
     (sharded : ShardedTensor s rank worldSize sd) : IO (T s × ShardedTensor s rank worldSize sd) := do
@@ -148,8 +175,27 @@ def ShardedTensor.gather {s : Shape} {rank worldSize : UInt64} {sd : ShardDim}
     | none => pure ()
 
   -- Need to gather
-  let full := zeros s  -- Allocate output
-  dist.allGather full sharded.shard
+  let full ← match sd.resolve? s.size with
+    | none =>
+      -- Not actually sharded: the shard is a full replica
+      pure (reshape sharded.shard s)
+    | some d =>
+      let fullDim := s.getD d 0
+      if fullDim % worldSize != 0 then
+        throw (IO.userError
+          s!"ShardedTensor.gather: sharded dimension of size {fullDim} is not divisible by worldSize {worldSize}")
+      if d = 0 then
+        -- allGather concatenates along dimension 0
+        let full := zeros s
+        dist.allGather full sharded.shard
+        pure full
+      else
+        -- Move the sharded axis to the front, gather, then move it back
+        let toFront := moveAxisToFrontPerm s.size d
+        let fromFront := moveFrontToAxisPerm s.size d
+        let fullPermuted := zeros (permuteShape s toFront)
+        dist.allGather fullPermuted (permute sharded.shard toFront)
+        pure (reshape (permute fullPermuted fromFront) s)
 
   let newSharded := { sharded with
     cachedFull := some full

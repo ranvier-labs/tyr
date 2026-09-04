@@ -210,9 +210,6 @@ def generateKernelFFI (name : Name) : IO (Option (String × String)) := do
   pure <| kernels.find? (·.name == name) |>.map fun k =>
     (generateLeanExternDecl k, generateCppLauncher k)
 
-/-- Command to print FFI for a specific kernel -/
-syntax "#print_kernel_ffi" ident : command
-
 /-! ## Non-Macro FFI Functions
 
 These functions can be called from `#eval` or Lake scripts without needing macros.

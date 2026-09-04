@@ -174,16 +174,24 @@ lean_object* lean_tyr_audio_output_beep_async(
 
 #else
 
+namespace {
+
+static lean_object* mk_io_error(const char* msg) {
+  return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg)));
+}
+
+} // namespace
+
 extern "C" {
 
 lean_object* lean_tyr_audio_output_beep(
     double, uint64_t, uint64_t, lean_object* /*w*/) {
-  return lean_io_result_mk_ok(lean_box(0));  // No-op on non-macOS.
+  return mk_io_error("audio output is only supported on macOS");
 }
 
 lean_object* lean_tyr_audio_output_beep_async(
     double, uint64_t, uint64_t, lean_object* /*w*/) {
-  return lean_io_result_mk_ok(lean_box(0));  // No-op on non-macOS.
+  return mk_io_error("audio output is only supported on macOS");
 }
 
 } // extern "C"

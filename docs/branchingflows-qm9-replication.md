@@ -101,16 +101,23 @@ Already close:
   through `branchingBridge`.
 - `Tyr/Model/BranchingFlows/MoleculeTrain.lean` packs molecule bridge results
   into one tensor batch with coordinates, coordinate anchors, labels,
-  label-anchor targets, DFM label-loss scales, masks, split targets, and
-  deletion targets.  `moleculeLosses` consumes those scales, so
-  `packBranchingMoleculeWithDFM` applies the Flowfusion label-loss time factor.
-- It also exposes `BranchingMoleculeModel` and `trainStepMolecule`, the
-  QM9-shaped autograd/AdamW training step over coordinate, label, split, and
-  deletion heads.
+  label-anchor targets, masks, split targets, and deletion targets.
+  `moleculeLosses` applies the Julia/Flowfusion time factors: the DFM label
+  scale for labels and `1 / (1.2 - t)` for coordinate, split, and deletion
+  losses. This is the demo's explicit `scalefloss(..., 1, 0.2)` override, not
+  Flowfusion's squared default. Coordinate and label weights remain
+  independently configurable.
+- It exposes both the compatibility `trainStepMolecule` AdamW path and
+  `trainStepMoleculeMuon`. The latter matches the Julia demo's momentum,
+  Nesterov blend, first-dimension matrix flattening, Newton--Schulz
+  orthogonalization, aspect scaling, and decoupled weight decay, including for
+  vector parameter leaves.
 - `Tyr/Model/BranchingFlows/Molecule.lean` also has `MoleculeModelPrediction`,
   `moleculeBranchingStep`, and `moleculeBranchingGenerate`, which adapt
   coordinate endpoint predictions plus atom-label logits into the generic
-  forward event path using OU coordinate stepping and DFM label stepping.
+  forward event path using OU coordinate stepping and DFM label stepping. By
+  default they suppress a split when the atom label changed in the same step,
+  matching Julia's discrete-state admissibility rule.
 - `Tyr/Model/BranchingFlows/QM9.lean` defines the preprocessing boundary for
   QM9 records.  It parses single JSON molecules, JSON molecule arrays, and
   JSONL batches; validates atom count, finite coordinates, label vocabulary,
@@ -135,16 +142,15 @@ Already close:
   Torch-backed molecule transformer with head-specific pairwise
   coordinate-distance attention bias and endpoint-coordinate, atom-label,
   split-count, and deletion heads.
-- It also contains `FullMoleculeTransformerParams`, the paper-scale architecture
-  used by `BranchingFlowsMoleculeTrainGenerate` paper profiles: stacked
-  transformer blocks, coordinate random Fourier features, per-layer/per-head
-  pairwise spatial attention bias, RoPE sequence encoding, additive coordinate
-  updates in the final layers, and endpoint coordinate/label/split/deletion
-  heads.
 - `Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean` trains that
   transformer on the same QM9-shaped bridge path, with nonzero split and
   deletion loss weights, and fails if any of the four head losses does not
   decrease.
+- `Examples/BranchingFlows/MoleculeTrainGenerate.lean` is the dataset-backed
+  end-to-end path. It uses Muon, samples half of training times directly from
+  branching events, applies Julia's `10 : 1/3 : 1 : 1` coordinate/label/split/
+  deletion loss balance, has no extra generation-only split cap by default,
+  and saves/restores Muon momentum together with the model checkpoint.
 
 Preprocessed molecule records should look like:
 
@@ -172,18 +178,6 @@ The generated file should contain a three-atom water-shaped sample from the
 oracle model. This is a shape and event-path check, not a trained molecular
 model.
 
-Convert QM9 `.xyz` coordinate files into Tyr's JSONL schema with:
-
-```bash
-python3 scripts/qm9_xyz_to_branching_jsonl.py /path/to/qm9_xyz_dir --out data/qm9_branching.jsonl
-```
-
-For a repository-local fixture smoke:
-
-```bash
-python3 scripts/qm9_xyz_to_branching_jsonl.py Examples/BranchingFlows/qm9_xyz --out /tmp/tyr_qm9_fixture.jsonl
-```
-
 Run the local molecule training smoke with:
 
 ```bash
@@ -204,124 +198,30 @@ This is still a small one-block overfit check, but it proves that the
 QM9-shaped transformer, pairwise spatial attention bias, and all four molecule
 heads train through `trainStepMolecule`.
 
-Missing for paper-faithful molecule generation:
+Remaining for a quantitative paper replication:
 
-- Full-dataset QM9 preprocessing validation against QM9PACK/RDKit metadata. The
-  repository-local `scripts/qm9_xyz_to_branching_jsonl.py` covers coordinate
-  parsing, heavy-atom order preservation, and nearest-heavy hydrogen insertion.
-- Bridge-variance or stochastic-coordinate training targets if stochastic OU
-  bridge samples are used rather than deterministic conditional means.
-- Muon optimizer parity. The paper profiles currently use the published LR and
-  cooldown schedule on Tyr's existing AdamW optimizer path.
-- OpenBabel/RDKit evaluation scripts for generated samples.
+- Run the full QM9 preprocessing/training pipeline at the chosen 500k or 800k
+  budget. `scripts/qm9_xyz_to_branching_jsonl.py` and
+  `scripts/branchingflows/run_qm9_paper.sh` provide the local path, but no
+  paper-scale GPU result is checked into the repository.
+- Decide whether deterministic conditional-mean coordinate targets are
+  sufficient or whether the intended experiment requires stochastic
+  bridge-variance targets.
+- Add the full OpenBabel/RDKit/PoseBusters evaluation suite and compare the
+  resulting validity, uniqueness, geometry, and descriptor distributions with
+  the paper's reported figures.
 
 ## Practical Replication Order
 
-1. Run `Examples/BranchingFlows/MoleculeGenerationDemo.lean` to validate the
-   local molecule state shape, bridge sampler, deletion-padding mask hook,
-   molecule forward sampler, and `.xyz` export path.
-2. Use `moleculeBranchingGenerate` for real molecule sampling. Its model sees
-   both `s1` and `s2`, so it can convert endpoint coordinate predictions and
-   atom-label logits into OU/DFM stepping over each schedule interval.
-3. Run `scripts/qm9_xyz_to_branching_jsonl.py` on QM9 `.xyz` files to emit the
-   `QM9.lean` JSON/JSONL schema. Test on the tiny fixture batch before training.
-4. Use `lake exe BranchingFlowsMoleculeTrain` to validate the molecule training
-   path on a fixed overfit target.
-5. Use `lake exe BranchingFlowsMoleculeTransformerTrain` to validate a
-   transformer model with pairwise spatial attention bias and all molecule
-   heads on a fixed overfit target, then scale to QM9.
-6. Train and generate with `lake exe BranchingFlowsMoleculeTrainGenerate`; keep
-   `--checkpoint-dir` enabled so the trained Tyr tensor parameters persist.
-7. Export generated `.xyz`, convert with OpenBabel, evaluate via
-   `../MoleculeFlow.jl`/RDKit.
+1. Run `lake exe BranchingFlowsMoleculeTrainGenerate --profile smoke` to check
+   sampled bridges, all four losses, Muon, checkpointing, forward events,
+   lineage, and `.xyz` export together.
+2. Convert a small QM9 shard with `scripts/qm9_xyz_to_branching_jsonl.py` and run
+   `scripts/branchingflows/run_qm9_paper.sh` with smoke-sized overrides.
+3. Launch the full architecture with either the 500k appendix profile or the
+   800k main-figure profile and retain its generated run manifest.
+4. Convert generated `.xyz` files with OpenBabel and evaluate them through
+   `../MoleculeFlow.jl`/RDKit plus PoseBusters.
 
-Dataset-backed Tyr training/generation with checkpoint output:
-
-```bash
-lake exe BranchingFlowsMoleculeTrainGenerate \
-  --data /tmp/tyr_qm9_fixture.jsonl \
-  --out-prefix /tmp/tyr_qm9_fixture \
-  --checkpoint-dir /tmp/tyr_qm9_checkpoint \
-  --steps 200 \
-  --batch-size 4
-```
-
-Resume from a saved Tyr checkpoint:
-
-```bash
-lake exe BranchingFlowsMoleculeTrainGenerate \
-  --data /tmp/tyr_qm9_fixture.jsonl \
-  --resume-checkpoint /tmp/tyr_qm9_checkpoint \
-  --checkpoint-dir /tmp/tyr_qm9_checkpoint_resumed \
-  --out-prefix /tmp/tyr_qm9_resumed
-```
-
-## Paper-Scale Run Setup
-
-The launcher below is the reproducible entry point for a full QM9 run.  It
-requires either raw QM9 `.xyz` coordinate files or an already converted Tyr
-JSONL dataset.  Generated data, logs, checkpoints, and sample `.xyz` files are
-written under `output/` by default, which is gitignored.
-
-Raw QM9 `.xyz` input:
-
-```bash
-TYR_QM9_XYZ_DIR=/path/to/qm9_xyz \
-  scripts/branchingflows/run_qm9_paper.sh
-```
-
-Already converted JSONL input:
-
-```bash
-TYR_QM9_JSONL=/path/to/qm9_branching.jsonl \
-  scripts/branchingflows/run_qm9_paper.sh
-```
-
-The default profile is `paper-qm9-main`, matching the main unconditional figure
-run scale described in the appendix variation note:
-
-- 800k training iterations.
-- batch size 128.
-- full molecule architecture: 12 layers, embedding dimension 384, 12 heads,
-  head dimension 64, RFF dimension 64, and coordinate updates in the final six
-  layers.
-- 10k generated samples.
-- cosine inference schedule with 1000 intervals.
-- checkpoint and optimizer-state persistence under the run root.
-
-Use `TYR_QM9_PROFILE=paper-qm9-appendix` for the 500k-batch appendix recipe.
-Use `scripts/branchingflows/qm9_paper.env.example` as the editable launch
-template.
-
-Dry-run the full launcher on a small subset:
-
-```bash
-TYR_QM9_XYZ_DIR=Examples/BranchingFlows/qm9_xyz \
-TYR_QM9_PROFILE=smoke \
-TYR_QM9_ARCHITECTURE=full \
-TYR_QM9_HIDDEN_DIM=16 \
-TYR_QM9_HEADS=2 \
-TYR_QM9_HEAD_DIM=8 \
-TYR_QM9_MLP=32 \
-TYR_QM9_RFF_DIM=4 \
-TYR_QM9_LAYERS=2 \
-TYR_QM9_COORD_UPDATE_LAYERS=1 \
-TYR_QM9_STEPS=20 \
-TYR_QM9_TOTAL_STEPS=20 \
-TYR_QM9_BATCH_SIZE=2 \
-TYR_QM9_SAMPLE_COUNT=2 \
-TYR_QM9_SAMPLE_STEPS=8 \
-  scripts/branchingflows/run_qm9_paper.sh
-```
-
-Current parity status:
-
-- The data order, full QM9 atom vocabulary including fluorine, OU coordinate
-  bridge, DFM label bridge, branching/deletion distributions, deletion padding,
-  1000-step cosine sampler, checkpointing, 10k-sample run shape, and paper-scale
-  transformer architecture are wired.
-- The remaining known paper-parity gap in the training loop is Muon optimizer
-  parity; the current launcher uses AdamW with the paper LR/cooldown schedule.
-
-The shortest useful local demo is step 1. The shortest paper-faithful QM9
-replication needs the full sequence above plus a substantial GPU training run.
+The shortest useful local integration check is step 1. A paper result still
+requires the full sequence above and a substantial GPU training run.

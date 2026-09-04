@@ -121,7 +121,3 @@ def run : IO Unit := do
   testBosh3OrderTrendDeterministic
 
 end Tests.DiffEqOrderParity2
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqOrderParity2.run
-  IO.println "TestDiffEqOrderParity2: ok"

@@ -64,9 +64,14 @@ def testCheckpointCreation : IO Unit := do
   }
 
   -- Test saveCheckpoint (functionality check)
-  -- This currently just logs to stdout, but we verify it runs without error
-  -- and computes statistics using TensorStruct
-  saveCheckpoint ckpt "dummy_path.ckpt"
+  -- Writes the checkpoint tree to a temp dir (never the repo root) and
+  -- removes it afterwards; we also verify TensorStruct statistics below.
+  let ts ← IO.monoMsNow
+  let ckptDir := s!"/tmp/tyr_checkpoint_test_{ts}.ckpt"
+  saveCheckpoint ckpt ckptDir
+  LeanTest.assertTrue (← System.FilePath.pathExists ckptDir)
+    s!"Checkpoint directory should be created at {ckptDir}"
+  IO.FS.removeDirAll ckptDir
 
   -- Verify TensorStruct on params directly
   let numParams := TensorStruct.fold (fun {s} _t acc => acc + s.foldl (· * ·) 1) 0 params

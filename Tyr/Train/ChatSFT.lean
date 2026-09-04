@@ -5,9 +5,15 @@
 
   Based on nanochat's chat_sft.py:
   - Task mixture training with masked loss
-  - Dual optimizer (Muon for matrices, Adam for embeddings)
   - Linear LR decay schedule
   - Evaluation of validation loss and chat metrics
+
+  Divergence from nanochat: `trainLoop` currently consumes only
+  `embeddingLr` (scaled by `initLrFrac` and the linear decay multiplier)
+  via a single AdamW optimizer applied to all parameters. The `matrixLr`,
+  `unembeddingLr`, `weightDecay`, and `gradClip` config fields are parsed
+  but unused: there is no Muon/Adam dual-optimizer split, no configurable
+  weight decay, and no gradient clipping yet.
 -/
 import Tyr.Torch
 import Tyr.TensorStruct

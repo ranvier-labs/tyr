@@ -36,6 +36,11 @@ Useful overrides:
   TYR_QM9_RFF_DIM=64
   TYR_QM9_LAYERS=12
   TYR_QM9_COORD_UPDATE_LAYERS=6
+  TYR_QM9_COORD_WEIGHT=10
+  TYR_QM9_LABEL_WEIGHT=0.3333333333333333
+  TYR_QM9_SPLITS_WEIGHT=1
+  TYR_QM9_DEL_WEIGHT=1
+  TYR_QM9_BRANCHING_TIME_PROB=0.5
   TYR_QM9_SAMPLE_COUNT=10000
   TYR_QM9_SAMPLE_STEPS=1000
   TYR_QM9_MAX_MOLECULES=1000       Cap preprocessing for small dry runs.
@@ -148,6 +153,27 @@ fi
 if [[ -n "${TYR_QM9_LR_END:-}" ]]; then
   run_cmd+=(--lr-end "${TYR_QM9_LR_END}")
 fi
+if [[ -n "${TYR_QM9_WEIGHT_DECAY:-}" ]]; then
+  run_cmd+=(--weight-decay "${TYR_QM9_WEIGHT_DECAY}")
+fi
+if [[ -n "${TYR_QM9_COORD_WEIGHT:-}" ]]; then
+  run_cmd+=(--coord-weight "${TYR_QM9_COORD_WEIGHT}")
+fi
+if [[ -n "${TYR_QM9_LABEL_WEIGHT:-}" ]]; then
+  run_cmd+=(--label-weight "${TYR_QM9_LABEL_WEIGHT}")
+fi
+if [[ -n "${TYR_QM9_SPLITS_WEIGHT:-}" ]]; then
+  run_cmd+=(--splits-weight "${TYR_QM9_SPLITS_WEIGHT}")
+fi
+if [[ -n "${TYR_QM9_DEL_WEIGHT:-}" ]]; then
+  run_cmd+=(--del-weight "${TYR_QM9_DEL_WEIGHT}")
+fi
+if [[ -n "${TYR_QM9_BRANCHING_TIME_PROB:-}" ]]; then
+  run_cmd+=(--branching-time-prob "${TYR_QM9_BRANCHING_TIME_PROB}")
+fi
+if [[ -n "${TYR_QM9_SPLIT_LOGIT_CAP:-}" ]]; then
+  run_cmd+=(--split-logit-cap "${TYR_QM9_SPLIT_LOGIT_CAP}")
+fi
 if [[ -n "${TYR_QM9_SAMPLE_COUNT:-}" ]]; then
   run_cmd+=(--sample-count "${TYR_QM9_SAMPLE_COUNT}")
 fi
@@ -176,6 +202,13 @@ manifest="${run_root}/run.env"
   echo "TYR_QM9_RFF_DIM=${TYR_QM9_RFF_DIM:-profile-default}"
   echo "TYR_QM9_LAYERS=${TYR_QM9_LAYERS:-profile-default}"
   echo "TYR_QM9_COORD_UPDATE_LAYERS=${TYR_QM9_COORD_UPDATE_LAYERS:-profile-default}"
+  echo "TYR_QM9_WEIGHT_DECAY=${TYR_QM9_WEIGHT_DECAY:-profile-default}"
+  echo "TYR_QM9_COORD_WEIGHT=${TYR_QM9_COORD_WEIGHT:-profile-default}"
+  echo "TYR_QM9_LABEL_WEIGHT=${TYR_QM9_LABEL_WEIGHT:-profile-default}"
+  echo "TYR_QM9_SPLITS_WEIGHT=${TYR_QM9_SPLITS_WEIGHT:-profile-default}"
+  echo "TYR_QM9_DEL_WEIGHT=${TYR_QM9_DEL_WEIGHT:-profile-default}"
+  echo "TYR_QM9_BRANCHING_TIME_PROB=${TYR_QM9_BRANCHING_TIME_PROB:-profile-default}"
+  echo "TYR_QM9_SPLIT_LOGIT_CAP=${TYR_QM9_SPLIT_LOGIT_CAP:-none}"
   echo "TYR_GIT_BRANCH=${git_branch}"
   echo "TYR_GIT_REV=${git_rev}"
   printf 'TYR_QM9_COMMAND='

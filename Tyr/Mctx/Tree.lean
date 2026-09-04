@@ -1,6 +1,14 @@
 import Tyr.Mctx.Base
 import Tyr.Mctx.Math
 
+/-!
+# Tyr.Mctx.Tree
+
+`Tree S E`, the unbatched search-tree state (Lean port of `mctx.Tree`):
+flat arrays of node and edge statistics, with Q-value, root-summary,
+reset, and subtree-extraction helpers.
+-/
+
 namespace torch.mctx
 
 /-- Search tree state (unbatched Lean port of mctx.Tree). -/

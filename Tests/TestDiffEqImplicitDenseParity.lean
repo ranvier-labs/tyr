@@ -206,9 +206,3 @@ private def diffraxHermiteDeriv
     s!"KenCarp3 default split dense should improve over Hermite fallback: {errDefault} vs {errHermite}"
 
 end Tests.DiffEqImplicitDenseParity
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqImplicitDenseParity.testKvaerno3DenseKindCanonicalizesToHermiteParity
-  Tests.DiffEqImplicitDenseParity.testLocalHermiteMatchesDiffraxThirdOrderFormParity
-  Tests.DiffEqImplicitDenseParity.testKencarp3DefaultDenseImprovesOverHermiteFallback
-  IO.println "TestDiffEqImplicitDenseParity: ok"

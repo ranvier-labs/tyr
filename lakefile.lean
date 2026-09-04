@@ -271,6 +271,7 @@ package tyr where
 require LeanTest from git "https://github.com/cpehle/lean_test.git" @ "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c"
 require LeanBenchmark from git "https://github.com/cpehle/lean-benchmark.git" @
   "9ab68a2e976aef3791b5b5630be8f5f1e8f79fe9"
+require LeanUrdfTypeProvider from "../lean-urdf-typeprovider"
 
 /-! ## Platform Detection
 
@@ -668,6 +669,12 @@ lean_exe BranchingFlowsMoleculeTrain where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Molecule-shaped oracle generation with branch-event trajectory export. -/
+lean_exe BranchingFlowsMoleculeGenerate where
+  root := `Examples.BranchingFlows.MoleculeGenerationDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- BranchingFlows molecule transformer overfit training check. -/
 lean_exe BranchingFlowsMoleculeTransformerTrain where
   root := `Examples.BranchingFlows.MoleculeTransformerTrainDemo
@@ -709,6 +716,12 @@ lean_exe RunRiemannianNanoGPT where
 /-- Diffusion training executable -/
 lean_exe TrainDiffusion where
   root := `Examples.TrainDiffusion
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- URDF-backed hybrid contact event-skeleton simulation demo. -/
+lean_exe RunUrdfContactExample where
+  root := `Examples.EventSkeleton.RunUrdfContactExample
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

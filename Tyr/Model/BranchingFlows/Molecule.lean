@@ -151,6 +151,16 @@ def stepLabelFromLogits
   | some dfm => dfm.stepLabelMode currentLabel targetLogits t0 t1
   | none => modeOfLogits targetLogits currentLabel
 
+def sampleStepLabelFromLogits
+    (cfg : MoleculeBridgeConfig)
+    (currentLabel : Nat)
+    (targetLogits : Array Float)
+    (t0 t1 : Float)
+    (rng : Rng) : Nat × Rng :=
+  match cfg.labelDFM with
+  | some dfm => dfm.stepLabel currentLabel targetLogits t0 t1 rng
+  | none => (modeOfLogits targetLogits currentLabel, rng)
+
 def stepAtomFromLogits
     (cfg : MoleculeBridgeConfig)
     (current : MoleculeAtom)
@@ -159,6 +169,17 @@ def stepAtomFromLogits
     (t0 t1 : Float) : MoleculeAtom :=
   { coord := Vec3.ouBridge cfg.coordOU current.coord coordTarget t0 t1,
     label := cfg.stepLabelFromLogits current.label labelLogits t0 t1 }
+
+def sampleStepAtomFromLogits
+    (cfg : MoleculeBridgeConfig)
+    (current : MoleculeAtom)
+    (coordTarget : Vec3)
+    (labelLogits : Array Float)
+    (t0 t1 : Float)
+    (rng : Rng) : MoleculeAtom × Rng :=
+  let (coord, rng) := Vec3.sampleOUBridge cfg.coordOU current.coord coordTarget t0 t1 rng
+  let (label, rng) := cfg.sampleStepLabelFromLogits current.label labelLogits t0 t1 rng
+  ({ coord, label }, rng)
 
 end MoleculeBridgeConfig
 
@@ -196,7 +217,39 @@ def toBranchingStepPrediction
     splitLogits := prediction.splitLogits,
     delLogits := prediction.delLogits }
 
+/-- Sample the continuous OU and discrete DFM base processes independently for
+each current particle before applying split and deletion events. -/
+def sampleBranchingStepPrediction
+    (prediction : MoleculeModelPrediction)
+    (cfg : MoleculeBridgeConfig)
+    (x : BranchingState MoleculeAtom)
+    (s1 s2 : Float)
+    (rng : Rng) : BranchingStepPrediction MoleculeAtom × Rng := Id.run do
+  let mut rng := rng
+  let mut targets : Array MoleculeAtom := #[]
+  for i in [:x.state.size] do
+    let current := x.state.getD i default
+    let coordTarget := prediction.coordTargets.getD i current.coord
+    let labelLogits := prediction.labelLogits.getD i #[]
+    let (target, rng') := cfg.sampleStepAtomFromLogits current coordTarget labelLogits s1 s2 rng
+    rng := rng'
+    targets := targets.push target
+  return ({
+    targets,
+    splitLogits := prediction.splitLogits,
+    delLogits := prediction.delLogits
+  }, rng)
+
 end MoleculeModelPrediction
+
+/--
+Julia's forward `CoalescentFlow` step suppresses a split whenever a discrete
+component changes in the same integration interval.  Molecule states carry the
+discrete component as `label`, so equality of the old/new labels is precisely
+the corresponding admissibility predicate.
+-/
+def moleculeSplitAllowedAfterBaseStep (old new : MoleculeAtom) : Bool :=
+  old.label == new.label
 
 /--
 Base-step adapter for `MoleculeModelPrediction.toBranchingStepPrediction`.
@@ -216,11 +269,24 @@ def moleculeBranchingStep
     (x : BranchingState MoleculeAtom)
     (prediction : MoleculeModelPrediction)
     (s1 s2 : Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (rng : Rng := { state := 0 }) :
     BranchingStepResult MoleculeAtom × Rng :=
   branchingStep moleculePredictedBaseStep flow x
     (prediction.toBranchingStepPrediction flow.base x s1 s2)
+    s1 s2 splitAllowedAfterBaseStep rng
+
+def moleculeBranchingStepSampled
+    (flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom)
+    (x : BranchingState MoleculeAtom)
+    (prediction : MoleculeModelPrediction)
+    (s1 s2 : Float)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
+    (rng : Rng := { state := 0 }) :
+    BranchingStepResult MoleculeAtom × Rng :=
+  let (sampledPrediction, rng) :=
+    prediction.sampleBranchingStepPrediction flow.base x s1 s2 rng
+  branchingStep moleculePredictedBaseStep flow x sampledPrediction
     s1 s2 splitAllowedAfterBaseStep rng
 
 def moleculeBranchingGenerate
@@ -228,7 +294,7 @@ def moleculeBranchingGenerate
     (x0 : BranchingState MoleculeAtom)
     (model : Float → BranchingState MoleculeAtom → MoleculeModelPrediction)
     (schedule : Array Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (rng : Rng := { state := 0 }) :
     BranchingGenerateResult MoleculeAtom × Rng := Id.run do
   if schedule.size <= 1 then
@@ -249,24 +315,12 @@ def moleculeBranchingGenerate
     events := events.push result.events
   ({ finalState := state, trajectory, events, times := schedule }, rng)
 
-private def truncateBranchingState (limit : Nat)
-    (state : BranchingState α) : BranchingState α :=
-  let n := Nat.min limit state.state.size
-  { state with
-    state := state.state.extract 0 n
-    groupings := state.groupings.extract 0 n
-    del := state.del.extract 0 n
-    ids := state.ids.extract 0 n
-    branchmask := state.branchmask.extract 0 n
-    flowmask := state.flowmask.extract 0 n
-    padmask := state.padmask.extract 0 n }
-
 def moleculeBranchingGenerateIO
     (flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom)
     (x0 : BranchingState MoleculeAtom)
     (model : Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
     (schedule : Array Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (maxStateLen? : Option Nat := none)
     (rng : Rng := { state := 0 }) :
     IO (BranchingGenerateResult MoleculeAtom × Rng) := do
@@ -281,14 +335,70 @@ def moleculeBranchingGenerateIO
     let s2 := schedule[i + 1]!
     let prediction ← model s1 state
     let (result, rng') :=
-      moleculeBranchingStep flow state prediction s1 s2 splitAllowedAfterBaseStep rng
+      moleculeBranchingStepSampled flow state prediction s1 s2 splitAllowedAfterBaseStep rng
     rng := rng'
-    state :=
-      match maxStateLen? with
-      | some limit => truncateBranchingState limit result.state
-      | none => result.state
+    match maxStateLen? with
+    | some limit =>
+        if result.state.state.size > limit then
+          throw (IO.userError s!"molecule generation exceeded maxStateLen={limit} at step {i + 1}: produced {result.state.state.size} particles")
+    | none => pure ()
+    state := result.state
     trajectory := trajectory.push state
     events := events.push result.events
   return ({ finalState := state, trajectory, events, times := schedule }, rng)
+
+private def lineageKindName : LineageEventKind → String
+  | .split => "split"
+  | .delete => "delete"
+
+private def jsonNatOption : Option Nat → String
+  | some value => toString value
+  | none => "null"
+
+/--
+Serialize raw molecule states together with reconstructed runtime lineage.
+
+Coordinates are written without display offsets or inferred correspondences.
+Every state row carries the stable particle id assigned by
+`reconstructLineage`; split/delete event rows carry the corresponding parent
+and child ids.
+-/
+def moleculeTrajectoryJsonl
+    (result : BranchingGenerateResult MoleculeAtom)
+    (appendOnSplit : Bool := false) : Except String String := do
+  let trace ← reconstructLineage result appendOnSplit
+  if trace.frames.size != result.trajectory.size then
+    throw s!"lineage frame count {trace.frames.size} does not match trajectory frame count {result.trajectory.size}"
+  let mut rows : Array String := #[
+    "{\"type\":\"metadata\",\"schema\":\"tyr.branching-trajectory.v1\",\"coordinates\":\"raw\"}"
+  ]
+  for frameIndex in [:trace.frames.size] do
+    let frame := trace.frames[frameIndex]!
+    let state := result.trajectory[frameIndex]!
+    if !Float.isFinite frame.time then
+      throw s!"non-finite trajectory time while serializing frame {frameIndex}"
+    if frame.particles.size != state.state.size then
+      throw s!"lineage/state size mismatch while serializing frame {frameIndex}"
+    for stateIndex in [:state.state.size] do
+      let particle := frame.particles[stateIndex]!
+      let atom := state.state[stateIndex]!
+      if !(Float.isFinite atom.coord.x && Float.isFinite atom.coord.y &&
+          Float.isFinite atom.coord.z) then
+        throw s!"non-finite molecule coordinate while serializing frame {frameIndex}, state index {stateIndex}"
+      rows := rows.push ("{" ++ s!"\"type\":\"state\",\"step\":{frame.step},\"t\":{frame.time},\"state_index\":{stateIndex},\"particle_id\":{particle.particleId},\"parent_id\":{jsonNatOption particle.parentId?},\"birth_event_id\":{jsonNatOption particle.birthEventId?},\"label\":{atom.label},\"x\":{atom.coord.x},\"y\":{atom.coord.y},\"z\":{atom.coord.z}" ++ "}")
+  for event in trace.events do
+    if !(Float.isFinite event.t0 && Float.isFinite event.t1) then
+      throw s!"non-finite trajectory interval while serializing event {event.eventId}"
+    let children := String.intercalate "," (event.childIds.map toString).toList
+    rows := rows.push ("{" ++ s!"\"type\":\"event\",\"event_id\":{event.eventId},\"kind\":\"{lineageKindName event.kind}\",\"t0\":{event.t0},\"t1\":{event.t1},\"parent_id\":{event.parentId},\"child_ids\":[{children}]" ++ "}")
+  return String.intercalate "\n" rows.toList ++ "\n"
+
+def writeMoleculeTrajectoryJsonl
+    (path : System.FilePath)
+    (result : BranchingGenerateResult MoleculeAtom)
+    (appendOnSplit : Bool := false) : IO Unit := do
+  match moleculeTrajectoryJsonl result appendOnSplit with
+  | .ok content => IO.FS.writeFile path content
+  | .error message => throw (IO.userError message)
 
 end torch.branching

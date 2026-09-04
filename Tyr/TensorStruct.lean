@@ -42,6 +42,15 @@ Wrapper behavior:
 - `Static α` is ignored by tensor transforms (passed through unchanged).
 - `Frozen s` still traverses as a tensor leaf, but can be treated specially by your logic.
 
+## Required Import for Deriving and Tensor Leaves
+
+This module defines the `TensorStruct` class and instances for containers
+(`Array`, `List`, `Vector`, `Option`), wrappers (`Static`, `Frozen`), and
+scalars — but **not** the `deriving TensorStruct` handler or the leaf
+instance for a bare tensor `T s`. Both live in `Tyr.Module.Derive`, so
+`import Tyr.Module.Derive` (directly or via `Tyr.Module`) wherever you derive
+instances or traverse raw tensor leaves.
+
 ## Examples
 
 ### 1) Define TensorStruct-aware model parameters

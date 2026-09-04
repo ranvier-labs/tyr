@@ -11,7 +11,10 @@ Provide an `AdjointBackend` instance to supply VJPs.
 Backsolve adjoints currently mirror Diffrax constraints:
 - Only ODE terms and single-term solvers.
 - No `SaveAt(steps := true)` or `SaveAt(dense := true)`.
-- No events; SDE adjoints are not yet supported (Stratonovich-only when added).
+- No events. SDE backsolve adjoints are supported only for single-noise
+  Stratonovich SDEs, via the dedicated `sdeBacksolveAdjointStratonovich`
+  path (the generic ODE backsolve still rejects multi-term drift+diffusion
+  structures); the diffusion control must be replayable.
 
 Direct/forward adjoints now differentiate the shared solver loop for
 supported explicit-RK solvers by replaying accepted primal steps from the

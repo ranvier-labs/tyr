@@ -103,7 +103,3 @@ private def denseValue {S C : Type}
     s!"KenCarp3 poly dense should improve over split-stage Hermite: {errPoly} vs {errSplit}"
 
 end Tests.DiffEqKencarpInterpolationParity
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqKencarpInterpolationParity.testKencarp3PolyDenseImprovesOverHermiteAndSplitFallbacks
-  IO.println "TestDiffEqKencarpInterpolationParity: ok"

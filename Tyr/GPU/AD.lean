@@ -1,6 +1,17 @@
 import Tyr.AutoGrad
 import Tyr.Torch
 
+/-!
+# Tyr.GPU.AD
+
+Handwritten Lean-IR JVP/VJP rules for a small set of `torch.*` ops
+(`add`/`sub`/`mul`/`matmul`), registered with the `Tyr.AD` rule registry
+by `init`.
+
+Note: `init` currently has no call sites in the repository, so these rules
+are inert unless downstream code invokes it explicitly.
+-/
+
 namespace Tyr.GPU.AD
 
 open Lean.IR

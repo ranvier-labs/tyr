@@ -3,6 +3,24 @@ set -euo pipefail
 
 source ./load_modules.sh
 
+# Noninteractive GPU hosts may have the CUDA toolkit installed without putting
+# nvcc on PATH. Prefer an explicit CUDA_HOME, then the conventional install
+# roots used by Spark/GB10 machines. This suite must not silently use CPU stubs.
+if ! command -v nvcc >/dev/null 2>&1; then
+  cuda_candidates=("${CUDA_HOME:-}" /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-12.6)
+  for cuda_dir in "${cuda_candidates[@]}"; do
+    if [[ -n "$cuda_dir" && -x "$cuda_dir/bin/nvcc" ]]; then
+      export CUDA_HOME="$cuda_dir"
+      export PATH="$CUDA_HOME/bin:$PATH"
+      break
+    fi
+  done
+fi
+if ! command -v nvcc >/dev/null 2>&1; then
+  echo "nvcc not found; the GB10 parity suite requires a CUDA toolkit" >&2
+  exit 127
+fi
+
 export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
 export LEAN_CC_FAST=1
 export TYR_GPU_FAMILY=BLACKWELL
@@ -57,8 +75,25 @@ detect_gpu_target() {
 }
 
 export TYR_GPU_TARGET="${TYR_GPU_TARGET:-$(detect_gpu_target)}"
-modules=(Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm)
-generator_targets=(+Tyr.GPU.Codegen.GenerateMain +Tyr.GPU.Kernels.MhaGB10 +Tyr.GPU.Kernels.FusedLayerNorm +Tyr.GPU.Kernels.FusedRMSNorm)
+modules=(
+  Tyr.GPU.Kernels.MhaGB10
+  Tyr.GPU.Kernels.FusedLayerNorm
+  Tyr.GPU.Kernels.FusedRMSNorm
+  Tyr.GPU.Kernels.RKCombine
+  Tyr.GPU.Kernels.BrownianSample
+)
+# Keep Lake's extern-lib rebuild on the same generated kernel set.  Without
+# this, building TestGPUGB10E2E regenerates/relinks libtyr with Lake's default
+# single MhaH100 module and drops the GB10/RK/Brownian symbols generated above.
+export TYR_GPU_CODEGEN_MODULE="${modules[*]}"
+generator_targets=(
+  +Tyr.GPU.Codegen.GenerateMain
+  +Tyr.GPU.Kernels.MhaGB10
+  +Tyr.GPU.Kernels.FusedLayerNorm
+  +Tyr.GPU.Kernels.FusedRMSNorm
+  +Tyr.GPU.Kernels.RKCombine
+  +Tyr.GPU.Kernels.BrownianSample
+)
 
 echo "[1/5] Build Lean kernel generator inputs"
 lake -R --quiet build "${generator_targets[@]}"

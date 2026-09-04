@@ -1,5 +1,13 @@
 import Tyr.Mctx.ActionSelection
 
+/-!
+# Tyr.Mctx.Search
+
+Core MCTS loop over `Tree`: root instantiation, simulation, edge expansion
+through the recurrent model, value backup, and the unbatched `search` /
+`searchWithTree` entry points.
+-/
+
 namespace torch.mctx
 
 private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=

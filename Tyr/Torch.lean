@@ -17,7 +17,7 @@ provides the low-level operations used by higher-level model, optimizer, and tra
 - `torch.nn`: neural network functional operators and loss primitives.
 - `torch.data` and `torch.signal`: data and signal-processing helpers.
 - `torch.safetensors`: tensor checkpoint loading/saving, including sharded loading.
-- Specialized helpers in submodules such as `torch.rotary`, `torch.nanoproof`, and `torch.linalg`.
+- Specialized helpers in submodules such as `torch.rotary` and `torch.linalg`.
 
 ## Scope
 
@@ -144,6 +144,46 @@ opaque cuda_event_elapsed_ms (start stop : CudaEvent) : IO Float
 
 @[extern "lean_torch_cuda_event_destroy"]
 opaque cuda_event_destroy (event : CudaEvent) : IO Unit
+
+/-- In-place whole-tensor copy (`dst.copy_(src)`, converting dtype if needed).
+    Mutates `dst`; only use on uniquely-owned tensors. Used by the CUDA-graph
+    static-buffer discipline. -/
+@[extern "lean_torch_copy_inplace"]
+opaque copyInplace {s : Shape} (dst : @& T s) (src : @& T s) : T s
+
+/-- No-op that forces its tensor argument at the FFI boundary. Lean `let`
+    bindings are lazy, so staging computations for CUDA graph capture/replay
+    (static buffers, in-place copies) would otherwise be evaluated *inside*
+    the captured region; `touch` forces them eagerly beforehand. -/
+@[extern "lean_torch_touch"]
+opaque touch {s : Shape} (t : @& T s) : IO Unit
+
+/-- Elementwise multiply by a 0-dim tensor (broadcast scalar). Lets captured
+    CUDA graphs take scalar inputs (e.g. the learning rate) through a static
+    buffer rather than a baked-in Float. -/
+@[extern "lean_torch_mul_tensor_scalar"]
+opaque mulTensorScalar {s : Shape} (input : @& T s) (scalar : @& T #[]) : T s
+
+/-- Begin CUDA graph capture into the process-wide graph slot. Subsequent
+    CUDA work (including autograd backward) is recorded until
+    `cudaGraphCaptureEnd`. Capture requires static shapes and stable buffer
+    addresses; copy fresh inputs into the captured buffers before each
+    `cudaGraphReplay`. Throws an IO error if capture is not possible
+    (e.g. an op synchronizes or allocates illegally inside the region). -/
+@[extern "lean_torch_cuda_graph_capture_begin"]
+opaque cudaGraphCaptureBegin : IO Unit
+
+/-- End the active CUDA graph capture. -/
+@[extern "lean_torch_cuda_graph_capture_end"]
+opaque cudaGraphCaptureEnd : IO Unit
+
+/-- Replay the captured CUDA graph. -/
+@[extern "lean_torch_cuda_graph_replay"]
+opaque cudaGraphReplay : IO Unit
+
+/-- Free the captured CUDA graph. -/
+@[extern "lean_torch_cuda_graph_reset"]
+opaque cudaGraphReset : IO Unit
 
 /-- Check if MPS (Metal Performance Shaders) is available -/
 @[extern "lean_torch_mps_is_available"]
@@ -713,6 +753,19 @@ opaque scaled_dot_product_attention {batch n_head seq head_dim : UInt64}
     (dropout_p : Float := 0.0)
     (is_causal : Bool := true) : T #[batch, n_head, seq, head_dim]
 
+/-- Fused scaled dot-product attention with an explicit additive float bias.
+    Q, K, V: [batch, n_head, seq, head_dim], bias: [batch, n_head, seq, seq]
+    -> output: [batch, n_head, seq, head_dim]. Replaces a manual
+    matmul/bias/masked_fill/softmax pipeline with one fused kernel. -/
+@[extern "lean_torch_sdpa_4d_bias"]
+opaque scaled_dot_product_attention_bias {batch n_head seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_head, seq, head_dim])
+    (value : @& T #[batch, n_head, seq, head_dim])
+    (bias : @& T #[batch, n_head, seq, seq])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := false) : T #[batch, n_head, seq, head_dim]
+
 -- Lower triangular (for manual causal masking)
 @[extern "lean_torch_tril"] opaque tril {s : Shape} (t : @& T s) (diagonal : Int := 0) : T s
 
@@ -880,6 +933,18 @@ opaque slice {s : Shape} (data : @& T s) (dim : UInt64 := 0) (start len : UInt64
     The length on `dim` is inferred from `src`. -/
 @[extern "lean_torch_slice_scatter_along_dim"]
 opaque sliceScatter {s src : Shape}
+    (data : @& T s)
+    (dim : UInt64 := 0)
+    (start : UInt64)
+    (src : @& T src)
+    : T s
+
+/-- Like `sliceScatter`, but writes `src` into `data` in place and returns the
+    same tensor, avoiding a full clone (e.g. for KV-cache append).
+    WARNING: mutates its argument — only use on uniquely-owned tensors; the
+    mutation is observable through any other reference to the same tensor. -/
+@[extern "lean_torch_slice_scatter_along_dim_inplace"]
+opaque sliceScatterInplace {s src : Shape}
     (data : @& T s)
     (dim : UInt64 := 0)
     (start : UInt64)
@@ -1459,7 +1524,7 @@ opaque topk_2d {d1 d2 : UInt64}
     Reference: Lin et al., "Focal Loss for Dense Object Detection" (2017)
 
     Note: This is a convenience wrapper. For precise shape tracking, use
-    nn.cross_entropy_loss directly and implement focal weighting manually. -/
+    nn.cross_entropy (or nn.cross_entropy_none) directly and implement focal weighting manually. -/
 def focal_loss {batch num_classes : UInt64}
     (logits : T #[batch, num_classes])
     (targets : T #[batch])

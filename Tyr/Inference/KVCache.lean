@@ -3,16 +3,28 @@
   Key-Value cache for autoregressive decode generation.
 
   Layout: each layer holds preallocated K, V buffers of shape
-  `[batch, numKvHeads, maxSeqLen, headDim]`. During generation we write the
-  new token's K, V at position `cache.currentLen` (in-place via `sliceScatter`)
-  and slice the cache to `[..., currentLen+1, ...]` for the attention call.
+  `[batch, numKvHeads, maxSeqLen, headDim]`, allocated fresh per layer in
+  `Cache.init` so no two layers share storage. During generation we write the
+  new token's K, V at position `cache.currentLen` via `sliceScatterInplace`
+  (the C++ op `lean_torch_slice_scatter_along_dim_inplace` in `cc/src/tyr.cpp`
+  does narrow + copy_ on the ORIGINAL buffer — no clone) and slice the cache
+  to `[..., currentLen+1, ...]` for the attention call.
+
+  Ownership contract: appends mutate the layer's buffers in place, so the
+  `Cache`/`LayerCache` value passed to `LayerCache.append`,
+  `Cache.appendLayer`, or `Cache.attendLayer` must not be reused after the
+  call — the pre-append and post-append values share the mutated tensors, and
+  the write is observable through the old value. The interface stays
+  pure-functional in shape: an updated cache is returned and the caller
+  threads it forward, discarding the old one. All in-tree consumers (the
+  decode parity harness `Examples/GPU/RunMhaH100Decode.lean`) satisfy this.
 
   The attention call goes through `nn.tyrFlashAttn4d`, which the C++
   `tyr::flash_attn` operator dispatches to the native TK decode kernel
-  (`tkMhaH100DecodeFwd`) when shape-eligible (BF16, qSeq=1, head_dim==128,
-  GQA-valid) and to PyTorch SDPA otherwise. The kernel handles non-multiple-
-  of-64 `kvSeq` via a runtime tail mask, so the cache view never has to be
-  padded.
+  (`tkMhaH100DecodeFwd`) when shape-eligible (BF16, qSeq=1,
+  head_dim ∈ {64, 128, 256}, GQA-valid) and to PyTorch SDPA otherwise. The
+  kernel handles non-multiple-of-64 `kvSeq` via a runtime tail mask, so the
+  cache view never has to be padded.
 
   This module is the canonical home for the cache abstraction. NanoChat,
   Qwen, and any other generation-loop code should import from here. (The
@@ -42,7 +54,7 @@ structure Cache (numLayers batch maxSeqLen numKvHeads headDim : UInt64) where
   seqLens : Array UInt64
   /-- Maximum sequence length this cache can hold -/
   maxLen : UInt64
-  deriving Repr
+  deriving Repr, Inhabited
 
 /-- Initialize empty KV cache for given dimensions.
     `device` defaults to CPU; pass `Device.CUDA n` (or a non-default value) so
@@ -51,13 +63,15 @@ structure Cache (numLayers batch maxSeqLen numKvHeads headDim : UInt64) where
 def Cache.init (numLayers batch maxSeqLen numKvHeads headDim : UInt64)
     (device : Device := Device.CPU)
     : Cache numLayers batch maxSeqLen numKvHeads headDim :=
-  let emptyLayer : LayerCache batch maxSeqLen numKvHeads headDim := {
-    keys := toBFloat16' (zeros #[batch, numKvHeads, maxSeqLen, headDim]
-              (requires_grad := false) (device := device))
-    values := toBFloat16' (zeros #[batch, numKvHeads, maxSeqLen, headDim]
-              (requires_grad := false) (device := device))
-  }
-  let layers := Array.mk (List.replicate numLayers.toNat emptyLayer)
+  -- Each layer gets freshly allocated buffers: appends mutate them in place
+  -- (`sliceScatterInplace`), so layers must never share storage — a
+  -- `List.replicate`d layer value would alias the same tensors in every layer.
+  let layers := Array.mk ((List.range numLayers.toNat).map fun _ =>
+    ({ keys := toBFloat16' (zeros #[batch, numKvHeads, maxSeqLen, headDim]
+                 (requires_grad := false) (device := device))
+       values := toBFloat16' (zeros #[batch, numKvHeads, maxSeqLen, headDim]
+                 (requires_grad := false) (device := device)) }
+      : LayerCache batch maxSeqLen numKvHeads headDim))
   let seqLens := Array.mk (List.replicate batch.toNat (0 : UInt64))
   { layers, seqLens, maxLen := maxSeqLen }
 
@@ -91,15 +105,19 @@ def Cache.setLayer (cache : Cache numLayers batch maxSeqLen numKvHeads headDim)
 /-- Append a single new K, V token at runtime position `pos`.
 
     The new K and V tensors have shape `[batch, numKvHeads, 1, headDim]` (one
-    token per batch row) and get written into the layer's cache at the
-    `pos`-th slot along the sequence dimension. The cache's `seqLens` is not
-    touched here — call `Cache.incrementSeqLens` after appending to all layers
-    of a step to advance position. -/
+    token per batch row) and are written IN PLACE into the layer's cache
+    buffers at the `pos`-th slot along the sequence dimension, via
+    `sliceScatterInplace` (narrow + copy_ on the original tensor, no clone).
+    The passed-in layer cache must not be reused after this call: old and new
+    values share the mutated tensors, so the write is observable through the
+    old value. The cache's `seqLens` is not touched here — call
+    `Cache.incrementSeqLens` after appending to all layers of a step to
+    advance position. -/
 def LayerCache.append (lc : LayerCache batch maxSeqLen numKvHeads headDim)
     (newK newV : T #[batch, numKvHeads, 1, headDim]) (pos : UInt64)
     : LayerCache batch maxSeqLen numKvHeads headDim :=
-  { keys := sliceScatter lc.keys 2 pos newK
-    values := sliceScatter lc.values 2 pos newV }
+  { keys := sliceScatterInplace lc.keys 2 pos newK
+    values := sliceScatterInplace lc.values 2 pos newV }
 
 /-- Slice the cache K and V tensors to cover positions `[0, validLen)`.
 
@@ -114,9 +132,10 @@ def LayerCache.attentionView (lc : LayerCache batch maxSeqLen numKvHeads headDim
   (slice lc.keys 2 0 validLen, slice lc.values 2 0 validLen)
 
 /-- Append a single new K, V token to the layer cache at `cache.currentLen` and
-    return the updated full cache (with that layer rewritten). Does NOT advance
-    seqLens — call `incrementSeqLens` once per generated token after appending
-    to every layer for the step. -/
+    return the updated full cache (with that layer rewritten). The write is in
+    place (see `LayerCache.append`): do not reuse the passed-in `cache` after
+    this call. Does NOT advance seqLens — call `incrementSeqLens` once per
+    generated token after appending to every layer for the step. -/
 def Cache.appendLayer (cache : Cache numLayers batch maxSeqLen numKvHeads headDim)
     (layerIdx : Nat) (newK newV : T #[batch, numKvHeads, 1, headDim])
     : Cache numLayers batch maxSeqLen numKvHeads headDim :=
@@ -134,9 +153,14 @@ def Cache.appendLayer (cache : Cache numLayers batch maxSeqLen numKvHeads headDi
     3. Call `tyrFlashAttn4d` on `(newQ, K_view, V_view)`.
 
     Returns the updated full cache and the attention output for the new query
-    token. The C++ `tyr::flash_attn` dispatcher routes to `tkMhaH100DecodeFwd`
-    when the shape is decode-eligible (head_dim==128, qSeq==1, BF16, GQA-valid),
+    token. The K/V append is in place (see `LayerCache.append`): do not reuse
+    the passed-in `cache` after this call. The C++ `tyr::flash_attn`
+    dispatcher routes to `tkMhaH100DecodeFwd` when the shape is
+    decode-eligible (head_dim ∈ {64, 128, 256}, qSeq==1, BF16, GQA-valid),
     and falls back to PyTorch SDPA otherwise.
+
+    Panics if `layerIdx` is out of range — an invalid index is a programming
+    error, not a condition to silently absorb.
 
     Does NOT advance `seqLens` — call `cache.incrementSeqLens` once per
     generated token after all layers have been processed for the step. -/
@@ -152,7 +176,8 @@ def Cache.attendLayer
   let cache' := cache.appendLayer layerIdx newK newV
   let validLen := cache.currentLen + 1
   match cache'.layers[layerIdx]? with
-  | none => (cache', newQ)
+  | none =>
+    panic! s!"Cache.attendLayer: layerIdx {layerIdx} out of range (cache has {cache'.layers.size} layers)"
   | some lc =>
     let (kView, vView) := lc.attentionView validLen
     let output := nn.tyrFlashAttn4d newQ kView vView none 0.0 false none enableGqa

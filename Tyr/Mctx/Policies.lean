@@ -1,5 +1,14 @@
 import Tyr.Mctx.Search
 
+/-!
+# Tyr.Mctx.Policies
+
+Unbatched search policies (Lean port of mctx policies): `muzeroPolicy`,
+`alphazeroPolicy` with optional subtree persistence, and
+`gumbelMuZeroPolicy`, plus invalid-action masking, temperature, and
+Dirichlet-noise helpers.
+-/
+
 namespace torch.mctx
 
 private def addArrays (a b : Array Float) : Array Float :=

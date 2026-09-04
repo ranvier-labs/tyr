@@ -1,5 +1,13 @@
 import Std
 
+/-!
+# Tyr.Mctx.Math
+
+Small numeric helpers shared by the `Tyr.Mctx` search modules: array
+reductions, argmax (with an invalid-action mask), numerically stable
+softmax, and guarded log/division.
+-/
+
 namespace torch.mctx
 
 /-- Sum of a float array. -/

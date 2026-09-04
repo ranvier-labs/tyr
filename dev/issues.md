@@ -2,6 +2,14 @@
 
 This document tracks architectural, performance, and correctness issues identified during deep semantic review.
 
+## Launch research preview
+
+Launch preparation notes, incomplete experiment results, and publication gates
+are tracked under [`dev/launch/`](launch/README.md). In particular, the
+BranchingFlows sampler audit and learned constellation/QM9 work live in
+[`dev/launch/branchingflows.md`](launch/branchingflows.md), rather than in the
+public launch article.
+
 ## 🚀 Performance Bottlenecks
 
 ### P01: Recursive KV-Cache Prefill

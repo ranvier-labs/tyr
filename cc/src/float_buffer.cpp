@@ -151,12 +151,6 @@ lean_object* lean_float_buffer_keep_last(lean_object* buf_obj, size_t n, lean_ob
   return lean_io_result_mk_ok(buf_obj);
 }
 
-// -- Inhabited instance (default value) -------------------------------------
-
-lean_object* lean_float_buffer_inhabited() {
-  return fb_wrap(fb_alloc(0));
-}
-
 // -- Bulk construction from raw float FIFO (used by audio input) ------------
 // This is exposed so audio_input_read_buffer can call it.
 

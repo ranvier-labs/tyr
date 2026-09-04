@@ -231,6 +231,10 @@ def testQwen3ASRParseAsrOutput : IO Unit := do
   LeanTest.assertEqual lang3 "English" "forced language should override parsed metadata"
   LeanTest.assertEqual txt3 "forced output body" "forced-language parse should treat raw as text-only"
 
+  let (lang4, txt4) := parseAsrOutput "" (userLanguage := some "English")
+  LeanTest.assertEqual lang4 "English" "forced language should survive an empty decoded output"
+  LeanTest.assertEqual txt4 "" "empty decoded output should remain empty under a forced language"
+
 @[test]
 def testQwen3ASRAudioInputAutoDetect : IO Unit := do
   let autoUrl := ASRAudioInput.ofStringAuto "https://example.com/demo.wav"
