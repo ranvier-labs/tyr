@@ -364,4 +364,4 @@ COMMIT_MSG_ENFORCE_FROM=<commit> ./scripts/check-commit-messages.sh HEAD~20..HEA
 
 ## License
 
-TBD.
+Licensed under the [Apache License, Version 2.0](LICENSE).
