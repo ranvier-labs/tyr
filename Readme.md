@@ -1,6 +1,6 @@
 # Tyr
 
-A dependently-typed deep learning framework for Lean 4, providing compile-time tensor shape verification. Very much WIP.
+A dependently-typed deep learning framework for Lean 4, providing compile-time tensor shape verification.
 
 ## Overview
 
