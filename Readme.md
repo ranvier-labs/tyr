@@ -29,12 +29,10 @@ curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf 
 The correct Lean nightly is pinned in `lean-toolchain` and will be installed
 automatically on first `lake build`.
 
-### Sibling Lean checkout (required)
+### Lean URDF type provider
 
-`lakefile.lean` declares a path dependency
-(`require LeanUrdfTypeProvider from "../lean-urdf-typeprovider"`), so a fresh
-clone also needs the `lean-urdf-typeprovider` repository checked out as a
-sibling directory next to this one before `lake build` will work.
+`LeanUrdfTypeProvider` is fetched from its pinned public Git repository through
+Lake, so no sibling checkout is required.
 
 ### LibTorch (required)
 
