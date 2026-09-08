@@ -2,6 +2,7 @@ import Tests.Test
 import Tests.TestDataLoader
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint
+import Tests.TestCheckpointPersistence
 import Tests.TestCoreSmoke
 import Tests.TestModelIO
 import Tests.TestPipeline

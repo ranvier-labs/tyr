@@ -217,21 +217,41 @@ structure CheckpointMeta where
 def saveParams [TensorStruct α] (params : α) (dir : String)
     (namePrefix : String := "param") (log : Handlers := {}) : IO Unit
 def loadParams [TensorStruct α] (template : α) (dir : String)
-    (namePrefix : String := "param") (log : Handlers := {}) : IO α
+    (namePrefix : String := "param") (log : Handlers := {})
+    (asParameters : Bool := true) : IO α
 ```
 
-A checkpoint directory contains:
+Checkpoint saves publish immutable directories under `.snapshots/` by atomically
+replacing a small `CURRENT` pointer after every tensor and metadata file has been
+written. Readers resolve that pointer once, so an interrupted overwrite cannot
+mix the previous and next checkpoint. Existing flat checkpoint directories remain
+readable. Old snapshots are retained for concurrent readers and may be pruned
+offline; this guarantees atomic visibility, not durability after power loss.
 
-- `{namePrefix}_{i}.pt` — one libtorch-pickle file per tensor, numbered by
-  `TensorStruct.fold` traversal order, written via `torch.data.saveTensor`
-  (`Tyr/Torch.lean:884`). **No tensor names, shapes, or dtypes are persisted**;
-  `loadParams` walks a template value and pulls shapes from it
-  (`Tyr/Checkpoint.lean:138-154`). Save and load must therefore traverse the same
-  structure in the same order.
-- `meta.txt` — flat `key=value` lines for `CheckpointMeta`
-  (`saveCheckpointMeta`/`loadCheckpointMeta`).
-- `optim_mu_{i}.pt`, `optim_nu_{i}.pt`, `optim_count.txt` — Adam-style mirrored
-  trees written by `saveOptimizerState` under separate prefixes.
+Within each snapshot:
+
+- `{namePrefix}_{i}.pt` contains one tensor in `TensorStruct` traversal order.
+  Tensor shapes and dtypes are stored by LibTorch; shapes are checked against the
+  template and stored dtypes are preserved (including bf16 resumes with a freshly
+  initialized fp32 template). Parameter names are positional: changing traversal order can still
+  invalidate an old checkpoint.
+- `{namePrefix}_count.txt` records the tensor count for new saves; loading into a
+  shorter, empty, or longer parameter tree fails instead of silently dropping state.
+- `meta.txt` contains version 2 JSON, with required iteration and optimizer count
+  fields and exact IEEE-754 bit encodings for losses. This preserves tiny values,
+  signed zero, and infinity. Valid legacy `key=value` files remain readable;
+  missing or duplicate required fields are rejected.
+- `saveTrainingCheckpoint` stores parameters, Adam moments, count, and metadata in
+  one snapshot. `loadTrainingCheckpoint` restores them from a single resolved
+  snapshot, suitable for an exact training resume.
+- The standalone `saveOptimizerState` helper publishes its own
+  `OPTIMIZER_CURRENT` snapshot. Use the combined training API when model and
+  optimizer state must become visible together.
+
+Training formats with heterogeneous optimizer state can use `publishSnapshot`
+to write all artifacts into one private directory, then call `resolveSnapshot`
+once when loading. These callbacks use the same publication protocol as the
+combined Adam helper.
 
 This is a Tyr-native format, not interchangeable with HF weights — note it is
 libtorch `.pt` pickle even though a safetensors writer (`safetensors.saveTensors`)
@@ -368,15 +388,15 @@ both files to restore optimizer state.
   `.schema.json` snapshot) must exist on the build machine, and introspection
   failures surface as a generic `safetensors_type_provider failed while
   introspecting source ...` error (`Tyr/SafeTensors/TypeProvider.lean:628-632`).
-  `introspect` reads each shard fully into memory to parse its header
-  (`Tyr/SafeTensors/Schema.lean:272-273`), so snapshots also save build time on
-  large checkpoints.
+  `introspect` reads only the eight-byte length prefix and JSON header of each
+  shard. Headers are limited to 100 MiB and checked against the file size before
+  allocation; tensor payloads are not read during schema discovery.
 - Generated `defaultSource` is the elaboration-time path string. Every generated
   loader takes `source := defaultSource`, so pass the runtime path explicitly
   when the weights live elsewhere (as KittenTTS does with `openHandle` +
   `loadFromHandle`).
-- Tyr checkpoint dirs are positional and template-driven: no names, shapes, or
-  dtypes on disk. Refactoring a parameter structure invalidates old checkpoints.
+- Tyr checkpoint trees are positional and template-driven. Shapes are checked,
+  but reordering same-shaped parameters requires an explicit migration.
 
 ## Related guides
 
