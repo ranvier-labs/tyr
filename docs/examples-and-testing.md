@@ -18,7 +18,7 @@ Everything is declared in `lakefile.lean`:
 
 - `lean_lib Tests` (`lakefile.lean:581`, roots `Tests`, no precompile),
   `lean_lib TestsExperimental` (`:586`), `lean_lib Examples` (`:591`).
-- 63 `lean_exe` targets. Test-side executables root under `Tests/`, example
+- Test-side `lean_exe` targets root under `Tests/`, example
   executables root under `Examples/`.
 - `@[test_driver] lean_exe test_runner` (`:598`) is Lake's test driver, so
   `lake test` builds and runs it.
@@ -98,6 +98,12 @@ config, tokenizer, NVFP4, MoE, model, reference parity, and rotary suites.
 These Laguna suites run CPU checks against tracked fixtures; their CUDA branches
 remain conditional. Diffusion and TileIR export-driver tests are in the main
 suite. Add new standalone CPU assertion suites to the same manifest.
+
+CI also builds `BranchingFlowsMoleculeTrainGenerate` and runs
+`scripts/test_branching_checkpoint_resume.py` on its embedded CPU dataset. That
+regression checks save/resume counts, retained snapshots, and rejection of
+missing or mismatched optimizer state. NanoChat checkpoint tests in the main
+suite compare the next optimizer update after restoring a snapshot.
 
 GPU suites run on self-hosted hardware via `.github/workflows/cuda-smoke.yml`.
 That workflow sets `TYR_GPU_TEST_STRICT=1`: the linked LibTorch must have CUDA,
