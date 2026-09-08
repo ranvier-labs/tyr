@@ -226,6 +226,7 @@ jobs:
           python3 scripts/test_inventory.py
           python3 scripts/test_test_inventory.py
           python3 scripts/test_native_build.py
+          python3 scripts/test_branching_checkpoint_snapshot.py
 
       - name: Check for TODO/FIXME comments
         run: |

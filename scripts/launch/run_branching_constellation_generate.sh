@@ -60,7 +60,26 @@ if [[ ! -f "$data" ]]; then
   echo "Missing constellation dataset: $data" >&2
   exit 1
 fi
-if [[ ! -f "$checkpoint/meta.txt" ]]; then
+# Resolve CURRENT once. Hash and load that same immutable snapshot even if a
+# concurrent training process publishes a newer one during generation.
+checkpoint_snapshot="$checkpoint"
+if [[ -e "$checkpoint/CURRENT" || -L "$checkpoint/CURRENT" ]]; then
+  if [[ ! -f "$checkpoint/CURRENT" ]]; then
+    echo "Invalid checkpoint snapshot pointer: $checkpoint/CURRENT" >&2
+    exit 1
+  fi
+  snapshot_name="$(cat "$checkpoint/CURRENT")"
+  if [[ ! "$snapshot_name" =~ ^snapshot-[A-Za-z0-9_-]+$ ]]; then
+    echo "Invalid checkpoint snapshot pointer: $checkpoint/CURRENT" >&2
+    exit 1
+  fi
+  checkpoint_snapshot="$checkpoint/.snapshots/$snapshot_name"
+  if [[ ! -d "$checkpoint_snapshot" ]]; then
+    echo "Missing checkpoint snapshot: $checkpoint_snapshot" >&2
+    exit 1
+  fi
+fi
+if [[ ! -f "$checkpoint_snapshot/meta.txt" ]]; then
   echo "Missing constellation checkpoint: $checkpoint" >&2
   exit 1
 fi
@@ -113,7 +132,7 @@ cmd=(
   --require-data
   --data "$data"
   --out-prefix "$output_dir/constellation"
-  --resume-checkpoint "$checkpoint"
+  --resume-checkpoint "$checkpoint_snapshot"
   --generate-only
   --no-checkpoint
   --no-resume-optimizer
@@ -144,9 +163,9 @@ if [[ "$fixed_labels" == "1" ]]; then
   cmd+=(--fixed-labels)
 fi
 
-checkpoint_meta_sha256="$(sha256sum "$checkpoint/meta.txt" | awk '{print $1}')"
+checkpoint_meta_sha256="$(sha256sum "$checkpoint_snapshot/meta.txt" | awk '{print $1}')"
 shopt -s nullglob
-checkpoint_params=("$checkpoint"/param_*.pt)
+checkpoint_params=("$checkpoint_snapshot"/param_*.pt)
 shopt -u nullglob
 if [[ "${#checkpoint_params[@]}" -eq 0 ]]; then
   echo "Checkpoint contains no parameter tensors: $checkpoint" >&2
@@ -168,6 +187,7 @@ mkdir -p "$output_dir"
   echo "dataset=$data"
   echo "dataset_sha256=$(sha256sum "$data" | awk '{print $1}')"
   echo "checkpoint=$checkpoint"
+  echo "checkpoint_snapshot=$checkpoint_snapshot"
   echo "checkpoint_meta_sha256=$checkpoint_meta_sha256"
   echo "checkpoint_param_count=${#checkpoint_params[@]}"
   echo "checkpoint_params_sha256=$checkpoint_params_sha256"
@@ -195,9 +215,9 @@ generation_status="${generation_pipeline_status[0]}"
 generation_log_status="${generation_pipeline_status[1]}"
 echo "generation_exit_code=$generation_status" >> "$output_dir/manifest.txt"
 echo "generation_log_exit_code=$generation_log_status" >> "$output_dir/manifest.txt"
-checkpoint_meta_sha256_after="$(sha256sum "$checkpoint/meta.txt" | awk '{print $1}')"
+checkpoint_meta_sha256_after="$(sha256sum "$checkpoint_snapshot/meta.txt" | awk '{print $1}')"
 shopt -s nullglob
-checkpoint_params_after=("$checkpoint"/param_*.pt)
+checkpoint_params_after=("$checkpoint_snapshot"/param_*.pt)
 shopt -u nullglob
 checkpoint_params_sha256_after="missing"
 if [[ "${#checkpoint_params_after[@]}" -gt 0 ]]; then

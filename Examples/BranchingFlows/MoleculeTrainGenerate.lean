@@ -435,7 +435,7 @@ private def saveMuonOptimState [TensorStruct Params]
 private def loadMuonOptimState [TensorStruct Params]
     (template : Params) (dir : String) : IO (MoleculeMuonState Params) := do
   let momentum ←
-    _root_.torch.checkpoint.loadParams template dir "optim_muon_momentum"
+    _root_.torch.checkpoint.loadParams template dir "optim_muon_momentum" (asParameters := false)
   let countRaw ← IO.FS.readFile (muonCountPath dir)
   let count ← match countRaw.trimAscii.toString.toNat? with
     | some n => pure n
@@ -454,12 +454,18 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
     (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
     (graphModel? : Option (BranchingMoleculeModel maxLen vocab Params) := none) :
     IO Unit := do
+  -- Pin one immutable directory before reading model, metadata, and optimizer
+  -- state. Legacy flat checkpoint directories resolve to themselves.
+  let resumeSnapshot? ← match opts.resumeCheckpoint? with
+    | none => pure none
+    | some dir => some <$> _root_.torch.checkpoint.resolveSnapshot dir
   let (initParams, startIteration, resumedMeta?) ←
-    match opts.resumeCheckpoint? with
+    match resumeSnapshot? with
     | none => pure (initParams, 0, none)
     | some checkpointDir => do
-        let (loadedParams, checkpointMeta) ←
-          _root_.torch.checkpoint.loadCheckpoint initParams checkpointDir "param"
+        let checkpointMeta ←
+          _root_.torch.checkpoint.loadCheckpointMeta (checkpointDir ++ "/meta.txt")
+        let loadedParams ← _root_.torch.checkpoint.loadParams initParams checkpointDir "param"
         IO.println s!"loaded molecule checkpoint from {checkpointDir} at iteration={checkpointMeta.iteration} trainLoss={checkpointMeta.trainLoss}"
         pure (loadedParams, checkpointMeta.iteration, some checkpointMeta)
   let initParams := TensorStruct.map (fun t => t.to opts.device) initParams
@@ -481,15 +487,20 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   if !opts.generateOnly then
     let initOptState := initMoleculeMuonState params
     let initOptState ←
-      match opts.resumeCheckpoint? with
+      match resumeSnapshot? with
       | some checkpointDir =>
           if opts.resumeOptimizer then
+            let expectedCount := (resumedMeta?.map (fun m => m.optimCount)).getD 0
             let hasOptim ← muonOptimStateExists checkpointDir
             if hasOptim then
               let loaded ← loadMuonOptimState params checkpointDir
+              if expectedCount > 0 && loaded.step != expectedCount then
+                throw (IO.userError s!"Muon optimizer count mismatch in {checkpointDir}: metadata={expectedCount}, optimizer={loaded.step}")
               IO.println s!"loaded molecule Muon optimizer checkpoint from {checkpointDir} at count={loaded.step}"
               pure loaded
             else
+              if expectedCount > 0 then
+                throw (IO.userError s!"missing Muon optimizer checkpoint in {checkpointDir}: metadata declares count={expectedCount}")
               IO.eprintln s!"warning: no Muon optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
               pure initOptState
           else
@@ -628,10 +639,16 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
 
     if opts.saveCheckpoint then
       let checkpointIteration := startIteration + opts.steps
-      _root_.torch.checkpoint.saveCheckpoint params checkpointIteration finalTrain.total finalTrain.total
-        opts.checkpointDir "param"
-      if opts.saveOptimizer then
-        saveMuonOptimState optState opts.checkpointDir
+      _root_.torch.checkpoint.publishSnapshot opts.checkpointDir "CURRENT" fun snapshot => do
+        _root_.torch.checkpoint.saveParams params snapshot "param"
+        if opts.saveOptimizer then
+          saveMuonOptimState optState snapshot
+        _root_.torch.checkpoint.saveCheckpointMeta {
+          iteration := checkpointIteration
+          bestValLoss := finalTrain.total
+          trainLoss := finalTrain.total
+          optimCount := if opts.saveOptimizer then optState.step else 0
+        } (snapshot ++ "/meta.txt")
       IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
 
   let (evalBridge, rng') ←
