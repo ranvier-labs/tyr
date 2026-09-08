@@ -269,18 +269,36 @@ private def parseHeaderEntries (sourceFile : String) (headerJson : Json)
       entries := entries.push parsed
   pure entries
 
+/-- Maximum JSON header allocation during schema discovery (100 MiB). -/
+def maxHeaderBytes : Nat := 100 * 1024 * 1024
+
+private def readHeaderBytes (handle : IO.FS.Handle) (count : Nat) : IO ByteArray := do
+  let mut bytes := ByteArray.empty
+  while bytes.size < count do
+    let chunk ← handle.read (count - bytes.size).toUSize
+    if chunk.isEmpty then break
+    bytes := bytes ++ chunk
+  pure bytes
+
 private def parseSafeTensorFile (path sourceFile : String) : IO (Array TensorSchema) := do
-  let bytes ← IO.FS.readBinFile path
+  let handle ← IO.FS.Handle.mk path .read
+  let bytes ← readHeaderBytes handle 8
   let headerSize ←
     match readU64LE? bytes 0 with
     | some n => pure n
     | none => throw <| IO.userError s!"Invalid SafeTensors file '{path}': missing 8-byte header size"
   let headerSizeNat := headerSize.toNat
-  if 8 + headerSizeNat > bytes.size then
+  if headerSizeNat > maxHeaderBytes then
+    throw <| IO.userError
+      s!"Invalid SafeTensors file '{path}': header exceeds {maxHeaderBytes}-byte limit"
+  let fileSize := (← (System.FilePath.mk path).metadata).byteSize.toNat
+  if 8 + headerSizeNat > fileSize then
     throw <| IO.userError
       s!"Invalid SafeTensors file '{path}': header exceeds file size ({headerSizeNat} bytes)"
 
-  let headerBytes := bytes.extract 8 (8 + headerSizeNat)
+  let headerBytes ← readHeaderBytes handle headerSizeNat
+  if headerBytes.size != headerSizeNat then
+    throw <| IO.userError s!"Invalid SafeTensors file '{path}': truncated header"
   let headerStr ←
     match String.fromUTF8? headerBytes with
     | some s => pure s
