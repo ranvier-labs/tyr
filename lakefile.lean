@@ -431,7 +431,6 @@ def gpuMakeEnv : IO (Array (String × Option String)) := do
 extern_lib libtyr pkg := do
   let tyrCLib := pkg.dir / "cc" / "build" / "libTyrC.a"
   let gpuIrRoot := pkg.buildDir / "ir" / "Tyr" / "GPU"
-  let gpuKernelSrcRoot := pkg.dir / "Tyr" / "GPU" / "Kernels"
   let generatedCudaDir := pkg.dir / "cc" / "src" / "generated"
   let gpuCodegenConfigPath := pkg.buildDir / "libtyr_gpu_codegen.env"
   -- TYR_GPU_CODEGEN_MODULE may be a single module name OR a space-separated
@@ -459,21 +458,54 @@ extern_lib libtyr pkg := do
     IO.FS.createDirAll pkg.buildDir
     IO.FS.writeFile gpuCodegenConfigPath gpuCodegenConfig
 
+  let sysroot ← getLeanSysroot
+  let gpuEnv ← gpuMakeEnv
+  let extraEnv :=
+    if System.Platform.isOSX then
+      #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
+    else
+      #[]
+  let nativeEnv := #[
+    ("LEAN_HOME", some sysroot.toString),
+    ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
+  ] ++ gpuEnv ++ extraEnv
+  -- Refresh content-stable manifests before Lake checks its native trace. Make
+  -- owns effective compiler/GPU detection; the stub inventory also notices new
+  -- kernel declarations without invalidating every native object on body edits.
+  let nativeConfigOut ← IO.Process.output {
+    cmd := "make"
+    args := #["-s", "-C", (pkg.dir / "cc").toString, "native-config", "gpu-stubs"]
+    env := nativeEnv
+  }
+  if nativeConfigOut.exitCode != 0 then
+    error s!"Failed to refresh native build inputs:\n{nativeConfigOut.stderr}"
+
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
   let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
   let gpuCodegenConfigJob ← inputTextFile gpuCodegenConfigPath
+  let nativeConfigJob ← inputTextFile <| pkg.dir / "cc" / "build" / "native-build.json"
+  let nativeDependenciesPath := pkg.dir / "cc" / "build" / "native-dependencies.txt"
+  let nativeDependenciesManifestJob ← inputTextFile nativeDependenciesPath
+  let mut nativeDependenciesJob := Job.mixArray #[nativeDependenciesManifestJob]
+  -- Consume compiler-discovered dependencies too (including vendor headers).
+  -- Make exports absolute, existing paths; removed headers change this manifest.
+  for path in (← IO.FS.readFile nativeDependenciesPath).splitOn "\n" do
+    if !path.isEmpty then
+      let header ← inputTextFile (FilePath.mk path)
+      nativeDependenciesJob := nativeDependenciesJob.mix header
   let srcJob ← inputDir (pkg.dir / "cc" / "src") (text := true) fun p =>
     p.toString.endsWith ".cpp" || p.toString.endsWith ".mm" ||
-      p.toString.endsWith ".cu" || p.toString.endsWith ".h"
+      p.toString.endsWith ".cu" || p.toString.endsWith ".h" || p.toString.endsWith ".hpp"
+  let headerJob ← inputDir (pkg.dir / "cc" / "include") (text := true) fun p =>
+    p.toString.endsWith ".h" || p.toString.endsWith ".hpp"
   let toolJob ← inputDir (pkg.dir / "cc" / "tools") (text := true) fun p =>
     p.toString.endsWith ".py"
-  -- Note: we deliberately do NOT watch `gpuKernelSrcRoot` (the kernel `.lean`
+  -- Note: we deliberately do NOT watch the kernel `.lean`
   -- source tree). Changes to a kernel `.lean` file flow through Lean
   -- compilation to its `.c.o.export`, which `gpuIrJob` already watches with
   -- the right scope (only the active codegen module's IR triggers a rebuild).
   -- Watching the whole `Tyr/GPU/Kernels/` directory caused every kernel-edit
   -- in the workspace to invalidate the libtyr build cascade.
-  let _ := gpuKernelSrcRoot
   -- Fresh checkouts do not have the generated GPU IR tree yet.
   -- Create it so the optional IR scan can track later `.c.o.export` files instead of failing early.
   IO.FS.createDirAll gpuIrRoot
@@ -503,16 +535,10 @@ extern_lib libtyr pkg := do
     else
       inputDir gpuIrRoot (text := false) fun p =>
         p.toString.endsWith ".c.o.export"
-  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix srcJob |>.mix toolJob |>.mix gpuIrJob
+  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix nativeConfigJob |>.mix nativeDependenciesJob
+    |>.mix srcJob |>.mix headerJob |>.mix toolJob |>.mix gpuIrJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do
-    let sysroot ← getLeanSysroot
-    let gpuEnv ← gpuMakeEnv
-    let extraEnv :=
-      if System.Platform.isOSX then
-        #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
-      else
-        #[]
     let skipGpuCodegen? ← IO.getEnv "TYR_SKIP_GPU_CODEGEN"
     if skipGpuCodegen?.getD "" != "1" then
       let generatorExe := pkg.dir / ".lake" / "build" / "bin" / "GenerateGpuKernels"
@@ -564,10 +590,7 @@ extern_lib libtyr pkg := do
     proc {
       cmd := "make"
       args := makeArgs
-      env := #[
-        ("LEAN_HOME", some sysroot.toString),
-        ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
-      ] ++ gpuEnv ++ extraEnv
+      env := nativeEnv
     }
 
 /-! ## Lean Library -/

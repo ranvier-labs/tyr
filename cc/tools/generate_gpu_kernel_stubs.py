@@ -6,6 +6,8 @@ import argparse
 import pathlib
 import re
 
+from write_build_config import write_if_changed
+
 
 PATTERN = re.compile(rb"lean_launch_[A-Za-z0-9_]+")
 GPU_KERNEL_ATTR_RE = re.compile(r"^\s*@\[gpu_kernel(?:\s+[^\]]+)?\]")
@@ -16,39 +18,95 @@ DEF_RE = re.compile(
 )
 
 
-def collect_symbols(ir_root: pathlib.Path) -> list[str]:
+def without_comments(source: str) -> str:
+    """Remove nested Lean comments while preserving line breaks and strings."""
+    result: list[str] = []
+    depth = 0
+    quoted = False
+    i = 0
+    while i < len(source):
+        pair = source[i:i + 2]
+        char = source[i]
+        if depth:
+            if pair == "/-":
+                depth += 1
+                i += 2
+            elif pair == "-/":
+                depth -= 1
+                i += 2
+            else:
+                result.append("\n" if char == "\n" else " ")
+                i += 1
+        elif quoted:
+            result.append(char)
+            i += 1
+            if char == "\\" and i < len(source):
+                result.append(source[i])
+                i += 1
+            elif char == '"':
+                quoted = False
+        elif pair == "/-":
+            depth = 1
+            result.append(" ")
+            i += 2
+        elif pair == "--":
+            while i < len(source) and source[i] != "\n":
+                i += 1
+        else:
+            result.append(char)
+            quoted = char == '"'
+            i += 1
+    return "".join(result)
+
+
+def source_symbols(kernel_src_root: pathlib.Path) -> set[str]:
     symbols: set[str] = set()
+    for path in sorted(kernel_src_root.rglob("*.lean")):
+        # Sections also consume `end`, but do not extend declaration names.
+        scopes: list[str] = []
+        pending_gpu_kernel = False
+        for line in without_comments(path.read_text(encoding="utf-8")).splitlines():
+            namespace_match = NAMESPACE_RE.match(line)
+            if namespace_match:
+                scopes.append(namespace_match.group(1))
+            elif re.match(r"^\s*section(?:\s|$)", line):
+                scopes.append("")
+            elif re.match(r"^\s*end(?:\s|$)", line) and scopes:
+                scopes.pop()
+            attr_match = GPU_KERNEL_ATTR_RE.match(line)
+            if attr_match:
+                pending_gpu_kernel = True
+                line = line[attr_match.end():]
+            if not pending_gpu_kernel:
+                continue
+            def_match = DEF_RE.match(line)
+            if def_match:
+                name = def_match.group(1)
+                namespace = ".".join(scope for scope in scopes if scope)
+                full_name = f"{namespace}.{name}" if namespace else name
+                if full_name.startswith("_root_."):
+                    full_name = full_name[len("_root_."):]
+                symbols.add("lean_launch_" + full_name.replace(".", "_"))
+                pending_gpu_kernel = False
+            elif line.strip():
+                pending_gpu_kernel = False
+    return symbols
+
+
+def collect_symbols(ir_root: pathlib.Path, kernel_src_root: pathlib.Path) -> list[str]:
+    symbols = source_symbols(kernel_src_root)
     if ir_root.exists():
         for path in ir_root.rglob("*.c.o.export"):
             data = path.read_bytes()
             for match in PATTERN.finditer(data):
-                symbols.add(match.group().decode("utf-8"))
-
-    repo_root = pathlib.Path(__file__).resolve().parents[2]
-    kernel_src_root = repo_root / "Tyr" / "GPU" / "Kernels"
-    if kernel_src_root.exists():
-        for path in sorted(kernel_src_root.rglob("*.lean")):
-            namespace = ""
-            pending_gpu_kernel = False
-            for line in path.read_text(encoding="utf-8").splitlines():
-                namespace_match = NAMESPACE_RE.match(line)
-                if namespace_match:
-                    namespace = namespace_match.group(1)
-                if GPU_KERNEL_ATTR_RE.match(line):
-                    pending_gpu_kernel = True
-                    continue
-                if not pending_gpu_kernel:
-                    continue
-                def_match = DEF_RE.match(line)
-                if def_match:
-                    name = def_match.group(1)
-                    full_name = name if "." in name else f"{namespace}.{name}" if namespace else name
-                    symbols.add("lean_launch_" + full_name.replace(".", "_"))
-                    pending_gpu_kernel = False
-                else:
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith("--"):
-                        pending_gpu_kernel = False
+                symbol = match.group().decode("utf-8")
+                # Kernel sources are authoritative: old IR can retain launchers
+                # after a declaration/file is removed. Keep IR-only launchers
+                # for codegen tests outside this source tree, and architecture
+                # specializations of declarations which still exist.
+                base = re.sub(r"_SM(?:80|90|100)$", "", symbol)
+                if not symbol.startswith("lean_launch_Tyr_GPU_Kernels_") or base in symbols:
+                    symbols.add(symbol)
     return sorted(symbols)
 
 
@@ -81,13 +139,14 @@ def render(symbols: list[str]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ir-root", required=True)
+    parser.add_argument("--kernel-src-root", type=pathlib.Path,
+                        default=pathlib.Path(__file__).resolve().parents[2] / "Tyr/GPU/Kernels")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
     ir_root = pathlib.Path(args.ir_root)
     output = pathlib.Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render(collect_symbols(ir_root)))
+    write_if_changed(output, render(collect_symbols(ir_root, args.kernel_src_root)))
     return 0
 
 
