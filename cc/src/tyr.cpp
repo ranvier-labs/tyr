@@ -75,6 +75,7 @@
 #include <chrono>
 #include <thread>
 #include <lean/lean.h>
+#include "tyr_ffi_abi.h"
 #include <torch/torch.h>
 #include <ATen/ATen.h>
 #include <ATen/Generator.h>
@@ -248,10 +249,10 @@ static lean_object* mkStdIoError(const char* context, const std::exception& e) {
 //
 // Most tensor ops are pure on the Lean side (`T s → T s`), so there is no IO
 // channel to report a libtorch error through, and we deliberately do not
-// guard each entry point: shape errors are prevented by Lean's type system
-// before crossing the FFI, and what remains (device/dtype misuse) is a
-// programming error that should terminate. The only job of this handler is
-// to make that termination readable: print the pending exception's message
+// guard each entry point. Raw T shape annotations are not enforced by Lean;
+// the Tensor facade checks selected operations and raw-entry contracts.
+// An invalid raw pure call still terminates the process. This handler makes
+// that termination readable: print the pending exception's message
 // — for `c10::Error` just the user-facing text, not the multi-page dispatch
 // table and C++ backtrace the default handler dumps — and then abort.
 // Set TYR_VERBOSE_ERRORS=1 to get the full libtorch report instead.
@@ -383,6 +384,8 @@ lean_object* lean_torch_get_dtype(lean_obj_arg /*s*/, b_lean_obj_arg t) {
     else if (dtype == torch::kInt8) dtype_str = "Int8";
     else if (dtype == torch::kUInt8) dtype_str = "UInt8";
     else if (dtype == torch::kBool) dtype_str = "Bool";
+    else if (dtype == torch::kFloat8_e4m3fn) dtype_str = "float8_e4m3fn";
+    else if (dtype == torch::kFloat8_e5m2) dtype_str = "float8_e5m2";
     else dtype_str = "Unknown";
 
     return lean_mk_string(dtype_str.c_str());
@@ -546,22 +549,32 @@ lean_object* lean_torch_copy_(lean_obj_arg /*s*/, b_lean_obj_arg dst,
   }
 }
 
-lean_object* lean_torch_arange(int start, int stop, int step) {
-  auto t = torch::arange(start, stop, step, torch::kLong);
+lean_object* lean_torch_arange(uint64_t start, uint64_t stop, uint64_t step) {
+  constexpr auto max_index = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  TORCH_CHECK(start <= max_index && stop <= max_index && step <= max_index,
+              "arange: arguments must fit in signed 64-bit tensor indices");
+  auto t = torch::arange(static_cast<int64_t>(start), static_cast<int64_t>(stop),
+                         static_cast<int64_t>(step), torch::kLong);
   return fromTorchTensor(t);
 }
 
-lean_object* lean_torch_eye(int n, int requires_grad) {
+lean_object* lean_torch_eye(uint64_t n, uint8_t requires_grad) {
+  TORCH_CHECK(n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+              "eye: dimension must fit in signed 64 bits");
   auto t = torch::eye(n, torch::TensorOptions().requires_grad(requires_grad));
   return fromTorchTensor(t);
 }
 
-lean_object* lean_torch_linspace(double start, double stop, int steps, int requires_grad) {
+lean_object* lean_torch_linspace(double start, double stop, uint64_t steps, uint8_t requires_grad) {
+  TORCH_CHECK(steps <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+              "linspace: steps must fit in signed 64 bits");
   auto t = torch::linspace(start, stop, steps, torch::TensorOptions().requires_grad(requires_grad));
   return fromTorchTensor(t);
 }
 
-lean_object* lean_torch_logspace(double start, double stop, int steps, double base, int requires_grad) {
+lean_object* lean_torch_logspace(double start, double stop, uint64_t steps, double base, uint8_t requires_grad) {
+  TORCH_CHECK(steps <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+              "logspace: steps must fit in signed 64 bits");
   auto t = torch::logspace(start, stop, steps, base, torch::TensorOptions().requires_grad(requires_grad));
   return fromTorchTensor(t);
 }
@@ -575,7 +588,8 @@ bool lean_torch_requires_grad(lean_obj_arg /* shape */, b_lean_obj_arg x) {
 
 //
 
-lean_object* lean_torch_reshape(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_obj_arg shape) {
+lean_object* lean_torch_reshape(lean_obj_arg s, b_lean_obj_arg self, b_lean_obj_arg shape) {
+  lean_dec(s);
   auto shape_ = getShape(shape);
   // In Lean code, reshape #[ ] is used as a type-erasure cast to dynamic shape.
   // Treat empty shape as a no-op instead of attempting scalar reshape.
@@ -590,6 +604,12 @@ lean_object* lean_torch_reshape(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_
   return fromTorchTensor(res);
 }
 
+lean_object* lean_torch_reshape_exact(lean_obj_arg s, b_lean_obj_arg self,
+                                      b_lean_obj_arg shape) {
+  lean_dec(s);
+  return fromTorchTensor(borrowTensor(self).reshape(getShape(shape)));
+}
+
 lean_object* lean_torch_permute(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_obj_arg permutation) {
   auto permutation_ = getShape(permutation);
   auto self_ = borrowTensor(self);
@@ -597,9 +617,16 @@ lean_object* lean_torch_permute(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_
   return fromTorchTensor(res);
 }
 
-lean_object* lean_torch_get(lean_obj_arg /*s*/, b_lean_obj_arg self, int idx) {
+lean_object* lean_torch_get(lean_obj_arg s, b_lean_obj_arg self, lean_obj_arg idx) {
+  lean_dec(s);
+  const auto index = static_cast<int64_t>(lean_int64_of_int(idx));
+  auto* roundtrip = lean_int64_to_int(index);
+  const bool fits = lean_int_dec_eq(idx, roundtrip);
+  lean_dec(roundtrip);
+  lean_dec(idx);
+  TORCH_CHECK(fits, "getOp: index must fit in signed 64 bits");
   auto self_ = borrowTensor(self);
-  auto res = self_.index({idx});
+  auto res = self_.index({index});
   return fromTorchTensor(res);
 }
 
@@ -2392,12 +2419,18 @@ lean_object* lean_torch_stack(
 
 // Unbind a tensor along a dimension
 lean_object* lean_torch_unbind(
-  lean_obj_arg /*s*/,
+  lean_obj_arg s,
   b_lean_obj_arg t,
-  uint64_t dim
+  lean_obj_arg dim
 ) {
+  lean_dec(s);
+  // Nat is boxed in Lean, unlike UInt64/Int64. Check the axis before
+  // conversion so an arbitrary-precision Nat cannot wrap into a valid axis.
   auto t_ = borrowTensor(t);
-  auto unbinded = torch::unbind(t_, dim);
+  const bool in_range = lean_nat_dec_lt(dim, lean_box(t_.dim()));
+  const auto axis = lean_uint64_of_nat_mk(dim);
+  TORCH_CHECK(in_range, "unbind: dimension out of range");
+  auto unbinded = torch::unbind(t_, static_cast<int64_t>(axis));
   size_t n = unbinded.size();
   lean_object* result = lean_alloc_array(n, n);
   for (size_t i = 0; i < n; i++) {
@@ -2834,7 +2867,8 @@ lean_object* lean_torch_save_tensor(lean_obj_arg /*s*/, b_lean_obj_arg tensor, b
 }
 
 // Load tensor from a binary file with expected shape
-lean_object* lean_torch_load_tensor(lean_obj_arg shape, b_lean_obj_arg path_obj, lean_object* w) {
+lean_object* lean_torch_load_tensor(lean_obj_arg shape, b_lean_obj_arg path_obj) {
+  std::unique_ptr<lean_object, void (*)(lean_object*)> shape_owner(shape, lean_dec);
   const char* path = lean_string_cstr(path_obj);
 
   try {
@@ -2842,14 +2876,13 @@ lean_object* lean_torch_load_tensor(lean_obj_arg shape, b_lean_obj_arg path_obj,
     torch::load(tensors, path);
 
     if (tensors.empty()) {
-      lean_dec(shape);
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string("No tensors found in file")));
     }
 
     // Return the first tensor (reshape to expected shape if needed)
     auto tensor = tensors[0];
-    auto expected_shape = getShape(shape); lean_dec(shape);
+    auto expected_shape = getShape(shape);
 
     // Verify shape matches (or reshape if possible)
     if (tensor.numel() != std::accumulate(expected_shape.begin(), expected_shape.end(),
@@ -2861,9 +2894,30 @@ lean_object* lean_torch_load_tensor(lean_obj_arg shape, b_lean_obj_arg path_obj,
     auto result = tensor.reshape(expected_shape);
     return lean_io_result_mk_ok(fromTorchTensor(result));
   } catch (const c10::Error& e) {
-    lean_dec(shape);
     return lean_io_result_mk_error(lean_mk_io_user_error(
       lean_mk_string(("Failed to load tensor: " + std::string(e.what())).c_str())));
+  } catch (const std::exception& e) {
+    return mkStdIoError("Failed to load tensor", e);
+  }
+}
+
+lean_object* lean_torch_load_tensor_exact(lean_obj_arg shape, b_lean_obj_arg path_obj) {
+  std::unique_ptr<lean_object, void (*)(lean_object*)> shape_owner(shape, lean_dec);
+  try {
+    const auto expected_shape = getShape(shape);
+    std::vector<torch::Tensor> tensors;
+    torch::load(tensors, lean_string_cstr(path_obj));
+    if (tensors.empty()) {
+      return mkIoUserError("No tensors found in file");
+    }
+    if (tensors[0].sizes().vec() != expected_shape) {
+      return mkIoUserError("Tensor shape mismatch with expected shape");
+    }
+    return lean_io_result_mk_ok(fromTorchTensor(tensors[0]));
+  } catch (const c10::Error& e) {
+    return mkC10IoError("Failed to load tensor", e);
+  } catch (const std::exception& e) {
+    return mkStdIoError("Failed to load tensor", e);
   }
 }
 
