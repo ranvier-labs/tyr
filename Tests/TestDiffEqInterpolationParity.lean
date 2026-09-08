@@ -198,6 +198,57 @@ private def finalSavedValue {S C : Type}
   let diff := interp.evaluate 4.5 none true - interp.evaluate 1.5 none true
   assertApprox "LinearInterpolation increment consistency" inc diff 1e-12
 
+@[test] def testReverseDenseSolutionAndSaveAt : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve (Term := ODETerm Float Unit) (Y := Float) (VF := Float)
+      (Control := Time) (Args := Unit) (Controller := ConstantStepSize)
+      term solver 1.0 0.0 (some 0.5) (1.0 : Float) ()
+      (saveat := { dense := true, t1 := false, ts := some #[1.0, 0.75, 0.5, 0.25, 0.0] })
+  LeanTest.assertTrue (sol.result == Result.successful) "Reverse Euler solve should succeed"
+  -- Euler step states are 1, 1.5, 2.25; each interior sample must use its own step.
+  let times := #[1.0, 0.75, 0.5, 0.25, 0.0]
+  let expected := #[1.0, 1.25, 1.5, 1.875, 2.25]
+  match sol.ys with
+  | none => LeanTest.fail "Reverse solve should save requested samples"
+  | some ys =>
+      LeanTest.assertEqual ys.size expected.size
+      for i in [:expected.size] do
+        assertApprox s!"Reverse saved sample {i}" ys[i]! expected[i]! 1e-12
+        assertApprox s!"Reverse dense sample {i}" (sol.evaluate times[i]!) expected[i]! 1e-12
+  assertApprox "Reverse dense first-step derivative" (sol.derivative 0.75) (-1.0) 1e-12
+  assertApprox "Reverse dense second-step derivative" (sol.derivative 0.25) (-1.5) 1e-12
+  assertApprox "Reverse dense increment" (sol.evaluate 0.75 (some 0.25)) 0.625 1e-12
+
+@[test] def testReverseInterpolationPhysicalKnotSides : IO Unit := do
+  let highSegment := LocalLinearDenseInfo.toInterpolation
+    ({ t0 := 2.0, t1 := 1.0, y0 := (12.0 : Float), y1 := 10.0 } : LocalLinearDenseInfo Float)
+  let lowSegment := LocalLinearDenseInfo.toInterpolation
+    ({ t0 := 1.0, t1 := 0.0, y0 := (1.0 : Float), y1 := 0.0 } : LocalLinearDenseInfo Float)
+  let dense := PiecewiseDenseInterpolation.toDense
+    ({ ts := #[2.0, 1.0, 0.0], segments := #[highSegment, lowSegment] } :
+      PiecewiseDenseInterpolation Float)
+  assertApprox "Descending knot lower-time value" (dense.evaluate 1.0 none true) 1.0 1e-12
+  assertApprox "Descending knot upper-time value" (dense.evaluate 1.0 none false) 10.0 1e-12
+  assertApprox "Descending knot lower-time slope" (dense.derivative 1.0 true) 1.0 1e-12
+  assertApprox "Descending knot upper-time slope" (dense.derivative 1.0 false) 2.0 1e-12
+  let linear := LinearInterpolation.toDense
+    ({ ts := #[5.0, 3.0, 2.0, 0.0], ys := #[10.0, 2.0, 5.0, 1.0] } : LinearInterpolation Float)
+  assertApprox "Descending linear middle segment" (linear.evaluate 2.5 none true) 3.5 1e-12
+  assertApprox "Descending linear lower-time slope" (linear.derivative 2.0 true) 2.0 1e-12
+  assertApprox "Descending linear upper-time slope" (linear.derivative 2.0 false) (-3.0) 1e-12
+
+@[test] def testReverseSplitHermiteInterpolation : IO Unit := do
+  let dense := LocalHermiteDenseInfo.toInterpolation
+    ({ t0 := 2.0, t1 := 0.0, y0 := (0.0 : Float), y1 := 4.0,
+       m0 := 0.0, m1 := 0.0, split? := some (1.0, 1.0, 0.0) } : LocalHermiteDenseInfo Float)
+  assertApprox "Descending Hermite first half" (dense.evaluate 1.5 none true) 0.5 1e-12
+  assertApprox "Descending Hermite second half" (dense.evaluate 0.5 none true) 2.5 1e-12
+  assertApprox "Descending Hermite first-half derivative" (dense.derivative 1.5 true) (-1.5) 1e-12
+  assertApprox "Descending Hermite second-half derivative" (dense.derivative 0.5 true) (-4.5) 1e-12
+
 def run : IO Unit := do
   testLinearPathEndpointIncrementAndDerivativeParity
   testCubicPathEndpointIncrementAndDerivativeParity
@@ -206,5 +257,8 @@ def run : IO Unit := do
   testLocalLinearDenseZeroLengthParity
   testLocalLinearDenseIncrementShiftAndAntisymmetryParity
   testLinearInterpolationKnotAndSlopeParity
+  testReverseDenseSolutionAndSaveAt
+  testReverseInterpolationPhysicalKnotSides
+  testReverseSplitHermiteInterpolation
 
 end Tests.DiffEqInterpolationParity

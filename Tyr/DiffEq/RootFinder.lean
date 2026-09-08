@@ -16,7 +16,10 @@ structure FixedPoint where
   maxIters : Nat := 20
   deriving Inhabited
 
-structure Newton where
+/-- Fixed-point iteration with a scalar relaxation factor chosen from ratios of
+scaled iterate/residual norms. This does not compute or invert a Jacobian and
+has no Newton convergence guarantee for noncontractive stage equations. -/
+structure NormRatioFixedPoint where
   rtol : Float := 1.0e-6
   atol : Float := 1.0e-6
   maxIters : Nat := 20
@@ -25,7 +28,9 @@ structure Newton where
   stepMax : Float := 10.0
   deriving Inhabited
 
-structure VeryChord where
+/-- Relaxed fixed-point iteration that reduces its scalar step according to
+successive residual norms. This does not form or reuse a chord Jacobian. -/
+structure AdaptiveFixedPoint where
   rtol : Float := 1.0e-6
   atol : Float := 1.0e-6
   maxIters : Nat := 20
@@ -37,8 +42,8 @@ structure VeryChord where
 
 inductive RootFindMethod where
   | fixedPoint (cfg : FixedPoint)
-  | newton (cfg : Newton)
-  | veryChord (cfg : VeryChord)
+  | normRatioFixedPoint (cfg : NormRatioFixedPoint)
+  | adaptiveFixedPoint (cfg : AdaptiveFixedPoint)
   deriving Inhabited
 
 class RootFinder (R : Type) where
@@ -52,8 +57,8 @@ def FixedPoint.withTolerances (cfg : FixedPoint) (rtol atol : Option Float)
   maxIters := maxIters.getD cfg.maxIters
 }
 
-def Newton.withTolerances (cfg : Newton) (rtol atol : Option Float)
-    (maxIters : Option Nat) : Newton := {
+def NormRatioFixedPoint.withTolerances (cfg : NormRatioFixedPoint) (rtol atol : Option Float)
+    (maxIters : Option Nat) : NormRatioFixedPoint := {
   rtol := rtol.getD cfg.rtol
   atol := atol.getD cfg.atol
   maxIters := maxIters.getD cfg.maxIters
@@ -62,8 +67,8 @@ def Newton.withTolerances (cfg : Newton) (rtol atol : Option Float)
   stepMax := cfg.stepMax
 }
 
-def VeryChord.withTolerances (cfg : VeryChord) (rtol atol : Option Float)
-    (maxIters : Option Nat) : VeryChord := {
+def AdaptiveFixedPoint.withTolerances (cfg : AdaptiveFixedPoint) (rtol atol : Option Float)
+    (maxIters : Option Nat) : AdaptiveFixedPoint := {
   rtol := rtol.getD cfg.rtol
   atol := atol.getD cfg.atol
   maxIters := maxIters.getD cfg.maxIters
@@ -77,8 +82,8 @@ def RootFindMethod.withTolerances (cfg : RootFindMethod) (rtol atol : Option Flo
     (maxIters : Option Nat) : RootFindMethod :=
   match cfg with
   | .fixedPoint fp => .fixedPoint (fp.withTolerances rtol atol maxIters)
-  | .newton n => .newton (n.withTolerances rtol atol maxIters)
-  | .veryChord vc => .veryChord (vc.withTolerances rtol atol maxIters)
+  | .normRatioFixedPoint n => .normRatioFixedPoint (n.withTolerances rtol atol maxIters)
+  | .adaptiveFixedPoint cfg => .adaptiveFixedPoint (cfg.withTolerances rtol atol maxIters)
 
 private def scaledError {Y : Type} [DiffEqSpace Y] [DiffEqSeminorm Y] [DiffEqElem Y]
     (rtol atol : Float) (yPrev yNext : Y) : Float :=
@@ -116,7 +121,7 @@ instance : RootFinder FixedPoint where
           loop (i + 1) yNext
     loop 0 y0
 
-instance : RootFinder VeryChord where
+instance : RootFinder AdaptiveFixedPoint where
   solve {Y} _ _ _ cfg step y0 :=
     let step0 := clampFloat cfg.step cfg.stepMin cfg.stepMax
     let rec loop (i : Nat) (yPrev : Y) (prevErr : Float) (stepScale : Float) :
@@ -139,7 +144,7 @@ instance : RootFinder VeryChord where
           loop (i + 1) yNext err nextScale
     loop 0 y0 1.0e30 step0
 
-instance : RootFinder Newton where
+instance : RootFinder NormRatioFixedPoint where
   solve {Y} _ _ _ cfg step y0 :=
     let damping := clampFloat cfg.damping 0.0 cfg.stepMax
     let rec loop (i : Nat) (yPrev : Y) (prev : Option (Y × Y)) : RootFindResult Y :=
@@ -175,8 +180,8 @@ instance : RootFinder RootFindMethod where
   solve {Y} _ _ _ cfg step y0 :=
     match cfg with
     | .fixedPoint fp => RootFinder.solve fp step y0
-    | .newton n => RootFinder.solve n step y0
-    | .veryChord vc => RootFinder.solve vc step y0
+    | .normRatioFixedPoint n => RootFinder.solve n step y0
+    | .adaptiveFixedPoint cfg => RootFinder.solve cfg step y0
 
 end DiffEq
 end torch
