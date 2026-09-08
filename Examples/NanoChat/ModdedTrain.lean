@@ -502,9 +502,21 @@ structure CheckpointMetadata where
 private def checkpointMetadataFile (path : String) : System.FilePath :=
   ⟨s!"{path}/training_meta.json"⟩
 
-/-- Check whether a serialized checkpoint exists at `path`. -/
-def checkpointExists (path : String) : IO Bool := do
+private def checkpointExistsAt (path : String) : IO Bool := do
   data.fileExists s!"{path}/step.pt"
+
+/-- Resolve once, retaining whether strict snapshot metadata is required. -/
+private def resolveCheckpointPath (path : String) : IO (String × Bool) := do
+  let snapshot ← checkpoint.resolveSnapshot path
+  let inSnapshotDir := ((System.FilePath.mk snapshot).parent >>= System.FilePath.fileName) == some ".snapshots"
+  pure (snapshot, snapshot != path || inSnapshotDir)
+
+/-- Check whether a published snapshot or legacy flat checkpoint exists. -/
+def checkpointExists (path : String) : IO Bool := do
+  let (snapshot, strict) ← resolveCheckpointPath path
+  -- A published but damaged snapshot must enter the resume/error path, rather
+  -- than being mistaken for a fresh training directory.
+  if strict then pure true else checkpointExistsAt snapshot
 
 private def saveScalarUInt64 (value : UInt64) (path : String) : IO Unit := do
   let t := data.fromInt64Array #[value.toInt64]
@@ -525,11 +537,117 @@ private def loadScalarFloat (path : String) : IO Float := do
   let t ← data.loadTensor #[] path
   pure (nn.item t)
 
+private structure MuonStateLayout where
+  step : Nat
+  momentum : Bool
+  secondMomentShape? : Option Shape
+  deriving Lean.ToJson, Lean.FromJson
+
+/-- TensorStruct does not serialize scalar counters or Option presence. Persist
+them separately so loading can reconstruct the exact optimizer traversal. -/
+private structure CheckpointStateMetadata where
+  version : Nat := 1
+  trainingMetadata : Bool
+  step : UInt64
+  optimStep : UInt64
+  adamCount : Nat
+  bestValLossBits : UInt64
+  baseLrBits : UInt64
+  weightDecayBits : UInt64
+  adamSteps : Array Nat
+  muonStates : Array MuonStateLayout
+  deriving Lean.ToJson, Lean.FromJson
+
+private def muonStateLayout {s : Shape} (state : NorMuon.ParamState s) : MuonStateLayout := {
+  step := state.step
+  momentum := state.momentumBuffer.isSome
+  secondMomentShape? := state.secondMoment.map (·.runtimeShape)
+}
+
+private def checkpointStateMetadata {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg)
+    (trainingMetadata : Bool) :
+    CheckpointStateMetadata := Id.run do
+  let state := ckpt.optState.dualState
+  let adamSteps := #[state.embed.step] ++ state.valueEmbeds.map (·.step) ++
+    #[state.lmHead.step, state.scalars.step]
+  let mut muonStates := #[muonStateLayout state.smearGate]
+  for block in state.blocks do
+    if let some attn := block.attn then
+      muonStates := muonStates ++ #[muonStateLayout attn.wQ, muonStateLayout attn.wK,
+        muonStateLayout attn.wV, muonStateLayout attn.wO]
+    muonStates := muonStates ++ #[muonStateLayout block.cFc, muonStateLayout block.cProj]
+  return {
+    trainingMetadata
+    step := ckpt.step, optimStep := ckpt.optState.step, adamCount := ckpt.optState.adamState.fst.count
+    bestValLossBits := ckpt.bestValLoss.toBits, baseLrBits := ckpt.optState.baseLr.toBits
+    weightDecayBits := ckpt.optState.weightDecay.toBits, adamSteps, muonStates
+  }
+
+private def restoreMuonState {s : Shape} (layouts : Array MuonStateLayout) (index : Nat) :
+    Except String (NorMuon.ParamState s) := do
+  let some layout := layouts[index]?
+    | throw "Missing checkpoint Muon state layout"
+  pure {
+    momentumBuffer := if layout.momentum then some (zeros s) else none
+    secondMoment := layout.secondMomentShape?.map fun shape =>
+      if shape.isEmpty then nn.meanAll (zeros #[1]) else zeros shape
+    step := layout.step
+  }
+
+private def restoreDualStateLayout {cfg : moddedGpt.Config} (state : DualParamState cfg)
+    (metadata : CheckpointStateMetadata) : Except String (DualParamState cfg) := do
+  if metadata.version != 1 then
+    throw s!"Unsupported checkpoint state metadata version: {metadata.version}"
+  let expectedMuonCount := state.blocks.foldl
+    (fun count block => count + if block.attn.isSome then 6 else 2) 1
+  if metadata.adamSteps.size != state.valueEmbeds.size + 3 ||
+      metadata.muonStates.size != expectedMuonCount then
+    throw "Checkpoint optimizer layout does not match the model configuration"
+  let embed := { state.embed with step := metadata.adamSteps[0]! }
+  let valueEmbeds := state.valueEmbeds.mapIdx fun i value =>
+    { value with step := metadata.adamSteps[i + 1]! }
+  let lmHead := { state.lmHead with step := metadata.adamSteps[state.valueEmbeds.size + 1]! }
+  let scalars := { state.scalars with step := metadata.adamSteps[state.valueEmbeds.size + 2]! }
+  let smearGate ← restoreMuonState (s := #[1, 12]) metadata.muonStates 0
+  let mut index := 1
+  let mut blocks := #[]
+  for block in state.blocks do
+    let attn ← match block.attn with
+      | none => pure none
+      | some _ => do
+          let wQ ← restoreMuonState (s := #[cfg.nHead * cfg.headDim, cfg.modelDim]) metadata.muonStates index
+          let wK ← restoreMuonState (s := #[cfg.nHead * cfg.headDim, cfg.modelDim]) metadata.muonStates (index + 1)
+          let wV ← restoreMuonState (s := #[cfg.nHead * cfg.headDim, cfg.modelDim]) metadata.muonStates (index + 2)
+          let wO ← restoreMuonState (s := #[cfg.modelDim, cfg.nHead * cfg.headDim]) metadata.muonStates (index + 3)
+          pure (some ({ wQ, wK, wV, wO } : MuonAttnState cfg))
+    if block.attn.isSome then index := index + 4
+    let cFc ← restoreMuonState (s := #[4 * cfg.modelDim, cfg.modelDim]) metadata.muonStates index
+    let cProj ← restoreMuonState (s := #[4 * cfg.modelDim, cfg.modelDim]) metadata.muonStates (index + 1)
+    index := index + 2
+    blocks := blocks.push { attn, cFc, cProj }
+  pure { embed, valueEmbeds, lmHead, scalars, smearGate, blocks }
+
+private def loadCheckpointStateMetadata (path : String) (required : Bool) :
+    IO (Option CheckpointStateMetadata) := do
+  let statePath : System.FilePath := s!"{path}/state_meta.json"
+  if !(← statePath.pathExists) then
+    if required then throw <| IO.userError s!"Missing checkpoint state metadata: {statePath}"
+    return none
+  let content ← IO.FS.readFile statePath
+  let parsed := Lean.Json.parse content >>= (Lean.fromJson? (α := CheckpointStateMetadata))
+  match parsed with
+  | .ok metadata =>
+      if metadata.version != 1 then
+        throw <| IO.userError s!"Unsupported checkpoint state metadata version: {metadata.version}"
+      if metadata.trainingMetadata && !(← (checkpointMetadataFile path).pathExists) then
+        throw <| IO.userError s!"Missing checkpoint training metadata: {path}"
+      return some metadata
+  | .error err => throw <| IO.userError s!"Invalid checkpoint state metadata: {err}"
+
 private def saveCheckpointMetadata (path : String) (metadata : CheckpointMetadata) : IO Unit := do
   IO.FS.writeFile (checkpointMetadataFile path) (Lean.toJson metadata).pretty
 
-/-- Load checkpoint metadata if present. -/
-def loadCheckpointMetadata (path : String) (quiet : Bool := false)
+private def loadCheckpointMetadataAt (path : String) (quiet : Bool := false) (strict : Bool := false)
     : IO (Option CheckpointMetadata) := do
   let metaPath := checkpointMetadataFile path
   if !(← metaPath.pathExists) then
@@ -538,19 +656,33 @@ def loadCheckpointMetadata (path : String) (quiet : Bool := false)
     let content ← IO.FS.readFile metaPath
     match Lean.Json.parse content with
     | .error err =>
+      if strict then throw <| IO.userError s!"Invalid checkpoint metadata {metaPath}: {err}"
       if !quiet then
         IO.eprintln s!"Warning: failed to parse checkpoint metadata {metaPath}: {err}"
       return none
     | .ok json =>
       match (Lean.fromJson? json : Except String CheckpointMetadata) with
       | .error err =>
+        if strict then throw <| IO.userError s!"Invalid checkpoint metadata {metaPath}: {err}"
         if !quiet then
           IO.eprintln s!"Warning: invalid checkpoint metadata in {metaPath}: {err}"
         return none
       | .ok metadata => return some metadata
   catch e =>
+    if strict then throw e
     if !quiet then
       IO.eprintln s!"Warning: failed to read checkpoint metadata {metaPath}: {e}"
+    return none
+
+/-- Load optional training metadata from one committed snapshot or a legacy directory. -/
+def loadCheckpointMetadata (path : String) (quiet : Bool := false) :
+    IO (Option CheckpointMetadata) := do
+  try
+    let (snapshot, strict) ← resolveCheckpointPath path
+    if strict then let _ ← loadCheckpointStateMetadata snapshot true
+    loadCheckpointMetadataAt snapshot quiet strict
+  catch e =>
+    if !quiet then IO.eprintln s!"Failed to load checkpoint metadata from {path}: {e}"
     return none
 
 private def captureDataCursor (gen : DistributedDataGenerator) : DataCursor := {
@@ -606,24 +738,30 @@ private def mkCheckpointMetadata (cfg : moddedGpt.Config) (hp : Hyperparameters)
   dataCursor? := dataCursor?
 }
 
-/-- Save a checkpoint to disk -/
+/-- Publish parameters, optimizer tensors/layout, counters, and training metadata
+as one immutable snapshot. Existing readers retain the previously published directory. -/
 def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : String)
     (metadata? : Option CheckpointMetadata := none)
+    (writeExtra? : Option (String → IO Unit) := none)
     : IO Unit := do
-  IO.FS.createDirAll ⟨path⟩
-
-  checkpoint.saveParams ckpt.params path "param"
-  checkpoint.saveParams ckpt.optState.adamState path "optim_adam"
-  checkpoint.saveParams ckpt.optState.dualState path "optim_dual"
-
-  saveScalarUInt64 ckpt.step s!"{path}/step.pt"
-  saveScalarUInt64 ckpt.optState.step s!"{path}/opt_step.pt"
-  saveScalarUInt64 ckpt.optState.adamState.fst.count.toUInt64 s!"{path}/adam_count.pt"
-  saveScalarFloat ckpt.bestValLoss s!"{path}/best_val_loss.pt"
-  saveScalarFloat ckpt.optState.baseLr s!"{path}/base_lr.pt"
-  saveScalarFloat ckpt.optState.weightDecay s!"{path}/weight_decay.pt"
-  if let some metadata := metadata? then
-    saveCheckpointMetadata path metadata
+  checkpoint.publishSnapshot path "CURRENT" fun snapshot => do
+    checkpoint.saveParams ckpt.params snapshot "param"
+    checkpoint.saveParams ckpt.optState.adamState snapshot "optim_adam"
+    checkpoint.saveParams ckpt.optState.dualState snapshot "optim_dual"
+    -- Keep the legacy scalar files for checkpoint inspection tools. The state
+    -- sidecar restores exact Float bits and all optimizer-local counters.
+    saveScalarUInt64 ckpt.step s!"{snapshot}/step.pt"
+    saveScalarUInt64 ckpt.optState.step s!"{snapshot}/opt_step.pt"
+    saveScalarUInt64 ckpt.optState.adamState.fst.count.toUInt64 s!"{snapshot}/adam_count.pt"
+    saveScalarFloat ckpt.bestValLoss s!"{snapshot}/best_val_loss.pt"
+    saveScalarFloat ckpt.optState.baseLr s!"{snapshot}/base_lr.pt"
+    saveScalarFloat ckpt.optState.weightDecay s!"{snapshot}/weight_decay.pt"
+    IO.FS.writeFile (s!"{snapshot}/state_meta.json" : System.FilePath)
+      (Lean.toJson (checkpointStateMetadata ckpt metadata?.isSome)).pretty
+    if let some metadata := metadata? then
+      saveCheckpointMetadata snapshot metadata
+    if let some writeExtra := writeExtra? then
+      writeExtra snapshot
 
   IO.println s!"Saving checkpoint to {path} at step {ckpt.step}"
 
@@ -633,32 +771,45 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : Stri
   IO.println s!"  Parameters: {numTensors} tensors, {numParams} elements"
   IO.println s!"  Best validation loss: {ckpt.bestValLoss}"
 
-/-- Load a checkpoint from disk. -/
-def loadCheckpoint (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false)
+private def loadCheckpointAt (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false)
+    (strict : Bool := false)
     : IO (Option (Checkpoint cfg)) := do
-  if !(← checkpointExists path) then
+  if !(← checkpointExistsAt path) then
     return none
 
   try
     -- Templates supply the static structure and tensor shapes for deserialization.
     let templateParams ← ModdedGPTParams.init cfg
     let templateOpt := OptimizerState.init cfg templateParams
+    let stateMetadata? ← loadCheckpointStateMetadata path strict
 
     let params ← checkpoint.loadParams templateParams path "param"
     let loadedAdamState ← checkpoint.loadParams templateOpt.adamState path "optim_adam"
-    let loadedDualState ←
-      try
-        checkpoint.loadParams templateOpt.dualState path "optim_dual"
-      catch _ =>
-        -- Backward compatibility with checkpoints saved before dual-state serialization.
-        pure (initDualParamState cfg params)
+      (asParameters := false)
+    let loadedDualState ← match stateMetadata? with
+      | some metadata => do
+          let dualTemplate ← match restoreDualStateLayout templateOpt.dualState metadata with
+            | .ok state => pure state
+            | .error err => throw <| IO.userError err
+          checkpoint.loadParams dualTemplate path "optim_dual" (asParameters := false)
+      | none => do
+          -- Only legacy flat checkpoints lack layout metadata. Their optional
+          -- Muon buffers/counters were not recorded; retain the old best-effort fallback.
+          try checkpoint.loadParams templateOpt.dualState path "optim_dual" (asParameters := false)
+          catch _ => pure (initDualParamState cfg params)
 
-    let step ← loadScalarUInt64 s!"{path}/step.pt"
-    let optStep ← loadScalarUInt64 s!"{path}/opt_step.pt"
-    let adamCount := (← loadScalarUInt64 s!"{path}/adam_count.pt").toNat
-    let bestValLoss ← loadScalarFloat s!"{path}/best_val_loss.pt"
-    let baseLr ← loadScalarFloat s!"{path}/base_lr.pt"
-    let weightDecay ← loadScalarFloat s!"{path}/weight_decay.pt"
+    let (step, optStep, adamCount, bestValLoss, baseLr, weightDecay) ← match stateMetadata? with
+      | some metadata => pure (metadata.step, metadata.optimStep, metadata.adamCount,
+          Float.ofBits metadata.bestValLossBits, Float.ofBits metadata.baseLrBits,
+          Float.ofBits metadata.weightDecayBits)
+      | none => do
+          let step ← loadScalarUInt64 s!"{path}/step.pt"
+          let optStep ← loadScalarUInt64 s!"{path}/opt_step.pt"
+          let adamCount := (← loadScalarUInt64 s!"{path}/adam_count.pt").toNat
+          let bestValLoss ← loadScalarFloat s!"{path}/best_val_loss.pt"
+          let baseLr ← loadScalarFloat s!"{path}/base_lr.pt"
+          let weightDecay ← loadScalarFloat s!"{path}/weight_decay.pt"
+          pure (step, optStep, adamCount, bestValLoss, baseLr, weightDecay)
 
     let adamState := {
       loadedAdamState with
@@ -683,14 +834,26 @@ def loadCheckpoint (cfg : moddedGpt.Config) (path : String) (quiet : Bool := fal
       IO.eprintln s!"Failed to load checkpoint from {path}: {e}"
     return none
 
-/-- Load checkpoint tensors plus optional training metadata for resume. -/
-def loadCheckpointForResume (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false)
+/-- Load all checkpoint tensors and scalars from one resolved snapshot, or a
+legacy flat directory when no CURRENT pointer exists. -/
+def loadCheckpoint (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false) :
+    IO (Option (Checkpoint cfg)) := do
+  try
+    let (snapshot, strict) ← resolveCheckpointPath path
+    loadCheckpointAt cfg snapshot quiet strict
+  catch e =>
+    if !quiet then IO.eprintln s!"Failed to load checkpoint from {path}: {e}"
+    return none
+
+private def loadCheckpointForResumeAt (cfg : moddedGpt.Config) (path : String) (quiet : Bool)
+    (strict : Bool)
     : IO (Option (Checkpoint cfg × Option CheckpointMetadata)) := do
-  let rawMetadata? ← loadCheckpointMetadata path quiet
+  let rawMetadata? ← loadCheckpointMetadataAt path quiet strict
   let metadata? ←
     match rawMetadata? with
     | some metadata =>
       if metadata.version != 1 then
+        if strict then throw <| IO.userError s!"Unsupported checkpoint metadata version: {metadata.version}"
         if !quiet then
           IO.eprintln s!"Warning: unsupported checkpoint metadata version {metadata.version} in {path}; ignoring metadata."
         pure none
@@ -708,9 +871,19 @@ def loadCheckpointForResume (cfg : moddedGpt.Config) (path : String) (quiet : Bo
         IO.eprintln s!"Checkpoint config mismatch for {path}; refusing resume because saved model config differs from current config."
       return none
   | none => pure ()
-  match ← loadCheckpoint cfg path quiet with
+  match ← loadCheckpointAt cfg path quiet strict with
   | none => return none
   | some ckpt => return some (ckpt, metadata?)
+
+/-- Pin the snapshot once before reading both training metadata and tensors. -/
+def loadCheckpointForResume (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false) :
+    IO (Option (Checkpoint cfg × Option CheckpointMetadata)) := do
+  try
+    let (snapshot, strict) ← resolveCheckpointPath path
+    loadCheckpointForResumeAt cfg snapshot quiet strict
+  catch e =>
+    if !quiet then IO.eprintln s!"Failed to resume checkpoint from {path}: {e}"
+    return none
 
 /-! ## Training Loop -/
 
@@ -1661,6 +1834,49 @@ private def validateWithProvider {cfg : moddedGpt.Config} {batch seq : UInt64}
   else
     return some (totalLoss / seen.toFloat)
 
+/-- All ranks finish their cursor files before the master can publish a model
+snapshot. The staging directory is never used by checkpoint readers. -/
+private def checkpointPhase (label : String) (worldSize : UInt64) (device : Device)
+    (action : IO Unit) : IO Unit := do
+  let failure? ← try action; pure none catch e => pure (some s!"{e}")
+  let failed : Bool ← if worldSize > 1 then do
+      let flag := (full #[1] (if failure?.isSome then 1.0 else 0.0)).to device
+      dist.allReduce flag .max
+      pure (decide (nn.item flag > 0.0))
+    else pure failure?.isSome
+  match failed with
+  | true =>
+      throw <| IO.userError s!"Checkpoint {label} failed: {failure?.getD "another rank reported an error"}"
+  | false => pure ()
+
+private def stageStreamCursors (checkpointDir : String) (step rank worldSize : UInt64)
+    (device : Device)
+    (saveCursor? : Option (String → IO Unit)) : IO (Option String) := do
+  match saveCursor? with
+  | none => pure none
+  | some saveCursor => do
+      let staging : System.FilePath := s!"{checkpointDir}/.stream-cursors-{step}"
+      checkpointPhase "cursor staging preparation" worldSize device do
+        if rank == 0 then
+          if ← staging.pathExists then IO.FS.removeDirAll staging
+          IO.FS.createDirAll staging
+      checkpointPhase "rank cursor write" worldSize device (saveCursor staging.toString)
+      return some staging.toString
+
+private def streamCursorWriter (staging? : Option String) (worldSize : UInt64) :
+    Option (String → IO Unit) :=
+  staging?.map fun staging snapshot => do
+    for rank in [:worldSize.toNat] do
+      let name := s!"stream_cursor_rank{rank}.json"
+      let contents ← IO.FS.readFile (s!"{staging}/{name}" : System.FilePath)
+      IO.FS.writeFile (s!"{snapshot}/{name}" : System.FilePath) contents
+    IO.FS.writeFile (s!"{snapshot}/stream_cursor_world_size.txt" : System.FilePath) (toString worldSize)
+
+private def removeStreamCursorStaging (staging? : Option String) (rank : UInt64) : IO Unit := do
+  if rank == 0 then
+    if let some staging := staging? then
+      try IO.FS.removeDirAll staging catch _ => pure ()
+
 private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (state : StreamTrainState cfg)
     (trainProvider : DynamicGPTBatchProvider)
@@ -1672,7 +1888,6 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
   let totalSteps := hp.numIterations + hp.extensionIterations
   let mut state := state
   let isMaster := state.rank == 0
-  let isDistributed := state.worldSize > 1
   let latestPath := s!"{checkpointDir}/latest.ckpt"
   let startStep := state.optState.step
   if isMaster then
@@ -1727,39 +1942,35 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
             state := { state with bestValLoss := valLoss }
 
     if stepU % hp.checkpointInterval == 0 && stepU > 0 then
-      if isMaster then
-        let ckpt : Checkpoint cfg := {
-          params := state.params
-          optState := state.optState
-          step := stepU
-          bestValLoss := state.bestValLoss
-        }
-        let metadata := mkCheckpointMetadata cfg hp state.totalTokens none
-        let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
-        saveCheckpoint ckpt stepPath (some metadata)
-        saveCheckpoint ckpt latestPath (some metadata)
-      if isDistributed then
-        dist.barrier
-      if let some saveStreamCursor := saveStreamCursor? then
-        saveStreamCursor latestPath
-      if isDistributed then
-        dist.barrier
+      let staging? ← stageStreamCursors checkpointDir state.optState.step state.rank state.worldSize
+        state.params.embed.device saveStreamCursor?
+      checkpointPhase "snapshot publication" state.worldSize state.params.embed.device do
+        if isMaster then
+          let ckpt : Checkpoint cfg := {
+            params := state.params
+            optState := state.optState
+            step := stepU
+            bestValLoss := state.bestValLoss
+          }
+          let metadata := mkCheckpointMetadata cfg hp state.totalTokens none
+          let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+          saveCheckpoint ckpt stepPath (some metadata) (streamCursorWriter staging? state.worldSize)
+          saveCheckpoint ckpt latestPath (some metadata) (streamCursorWriter staging? state.worldSize)
+      removeStreamCursorStaging staging? state.rank
 
-  if isMaster then
-    let finalCkpt : Checkpoint cfg := {
-      params := state.params
-      optState := state.optState
-      step := state.step
-      bestValLoss := state.bestValLoss
-    }
-    let finalMetadata := mkCheckpointMetadata cfg hp state.totalTokens none
-    saveCheckpoint finalCkpt latestPath (some finalMetadata)
-  if isDistributed then
-    dist.barrier
-  if let some saveStreamCursor := saveStreamCursor? then
-    saveStreamCursor latestPath
-  if isDistributed then
-    dist.barrier
+  let staging? ← stageStreamCursors checkpointDir state.optState.step state.rank state.worldSize
+    state.params.embed.device saveStreamCursor?
+  checkpointPhase "snapshot publication" state.worldSize state.params.embed.device do
+    if isMaster then
+      let finalCkpt : Checkpoint cfg := {
+        params := state.params
+        optState := state.optState
+        step := state.step
+        bestValLoss := state.bestValLoss
+      }
+      let finalMetadata := mkCheckpointMetadata cfg hp state.totalTokens none
+      saveCheckpoint finalCkpt latestPath (some finalMetadata) (streamCursorWriter staging? state.worldSize)
+  removeStreamCursorStaging staging? state.rank
   if isMaster then
     IO.println s!"Training complete! Total tokens: {state.totalTokens}"
 
@@ -1809,7 +2020,8 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
     | some resumePath =>
       if isMaster then
         IO.println s!"Resuming from checkpoint: {resumePath}"
-      match ← loadCheckpointForResume cfg resumePath (!isMaster) with
+      let (snapshot, strict) ← resolveCheckpointPath resumePath
+      match ← loadCheckpointForResumeAt cfg snapshot (!isMaster) strict with
       | some (ckpt, metadata?) =>
         let resumedParams ← moveToDevice ckpt.params device
         let resumedOptState : OptimizerState cfg := {
@@ -1836,9 +2048,13 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
               IO.println s!"Restored checkpoint hyperparameters (using current iteration horizon: numIterations={hp'.numIterations}, extensionIterations={hp'.extensionIterations})."
             pure ({ baseState with totalTokens := metadata.totalTokens }, hp')
         if let some restoreStreamCursor := restoreStreamCursor? then
-          restoreStreamCursor resumePath
+          if strict then
+            let cursorWorldSize ← IO.FS.readFile (s!"{snapshot}/stream_cursor_world_size.txt" : System.FilePath)
+            if cursorWorldSize.trimAscii.toString.toNat? != some worldSize.toNat then
+              throw <| IO.userError "Checkpoint stream cursor world size does not match this training run"
+          restoreStreamCursor snapshot
           if isMaster then
-            IO.println s!"Restored stream cursor state from {resumePath}"
+            IO.println s!"Restored stream cursor state from {snapshot}"
         pure (resumedState, restoredHp)
       | none =>
         if resume.isSome then

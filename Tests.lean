@@ -3,6 +3,7 @@ import Tests.TestDataLoader
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint
 import Tests.TestCheckpointPersistence
+import Tests.TestNanoChatCheckpoint
 import Tests.TestFFIBoundary
 import Tests.TestCoreSmoke
 import Tests.TestModelIO
