@@ -1,19 +1,25 @@
 # Tyr
 
-A dependently-typed deep learning framework for Lean 4, providing compile-time tensor shape verification. Very much WIP.
+A deep learning framework for Lean 4 with a typed tensor facade over LibTorch. Very much WIP.
 
 ## Overview
 
-Tyr uses Lean 4's dependent type system to catch tensor dimension mismatches at compile time, not runtime. This eliminates a major source of bugs while providing access to optimized tensor operations.
+Use `torch.Tensor` for compile-time shape and dtype checks in new model code.
+The raw `torch.T s` interface remains available for existing models and native
+interop; its shape argument is an annotation and does not enforce shape equality.
 
 ```lean
--- Shapes are tracked in the type system
-def linear {m n b : UInt64} (x : T #[b, m]) (M : T #[n, m]) : T #[b, n] := ...
+import Tyr.Typed
+open torch
 
--- Mismatched dimensions fail at compile time, not runtime!
-let x : T #[32, 768] := ...
-let w : T #[768, 512] := ...
-let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
+def forward : DTensor #[32, 512] .Float32 :=
+  let x := Tensor.ones #[32, 768]
+  let w := Tensor.ones #[512, 768]
+  x.linear w
+
+-- Replacing w with Tensor.ones #[768, 512] is a type error.
+-- Raw handles cross into this facade through Tensor.ofTensor, which checks
+-- their actual shape and dtype. Tensor.assumeSpec explicitly bypasses checks.
 ```
 
 ## Dependencies
@@ -229,17 +235,23 @@ Notes:
 
 ## Key Concepts
 
-### Shape-Indexed Tensors
+### Typed and Raw Tensors
 
-The core data type is `T s` - a tensor type indexed by its shape:
+`Tensor σ` tracks shape, dtype, and a device policy in one static specification:
 
 ```lean
--- T is parameterized by shape (Array UInt64)
-def T (s : Shape) : Type := TSpec.type
-
--- Shape mismatches are compile-time errors
-def matmul {a b c : UInt64} (x : T #[a, b]) (y : T #[b, c]) : T #[a, c] := ...
+def project {m k n : UInt64}
+    (x : DTensor #[m, k] .Float32) (w : DTensor #[k, n] .Float32) :
+    DTensor #[m, n] .Float32 :=
+  x.mm w
 ```
+
+The underlying `T s` is a reducible alias for one opaque tensor handle type;
+different shape annotations on raw tensors are definitionally equal. Use
+`Tensor.ofTensor` at raw boundaries and `Tensor.validate` when auditing a
+typed value. `Tensor.reshape` requires equal element counts and treats `#[]`
+as a scalar. Legacy raw `reshape t #[]` retains its shape-erasure behavior;
+`reshapeExact` provides real scalar reshaping at the raw level.
 
 ### TensorStruct Typeclass
 
@@ -260,7 +272,7 @@ Use `Vector n α` instead of `Array α` for type-safe `zipWith` operations.
 Two patterns for different use cases:
 
 ```lean
--- Fixed dimensions (type-safe):
+-- Fixed dimensions (raw tensor API):
 let iter := SequentialBatchIterator.new loader 8 256
 let (batch, iter') := iter.next  -- Returns T #[8, 256]
 

@@ -2,14 +2,16 @@
 
 ## Purpose and when to use
 
-`Tyr/Typed` is a phantom-typed layer over Tyr's raw shape-indexed tensor `T s`.
+`Tyr/Typed` is a phantom-typed layer over Tyr's raw tensor handle `T s`.
 It grades each tensor by a single `StaticSpec` index — shape, dtype, and device
 policy — so that shape mismatches, non-broadcastable operands, and dtype- or
 device-mismatched matmuls fail at compile time instead of inside libtorch.
 Use it for new model code where you want the type checker to catch wiring
 errors, and for boundary checks (weight loading, solver states) where you want
 an explicit runtime audit of static claims. The raw `T s` FFI surface stays
-fully available underneath; the two interoperate freely.
+fully available underneath. Its shape annotation is not enforced because
+`T s` is a reducible alias independent of `s`; use checked constructors when
+crossing from that API into `Tensor`.
 
 The design is LeanMLX-inspired: dtype promotion and result-spec computation
 happen in a pure algebra, while device placement stays a runtime property that
@@ -66,7 +68,7 @@ Result types are computed by pure functions, so the type checker can see them:
 
 - `DType.promote : DType → DType → DType` (`Tyr/Typed/DType.lean:80`) encodes
   PyTorch-flavored promotion (f32 absorbs f16/bf16, mixed f16+bf16 gives f32,
-  integers promote by rank, `Unknown` is sticky). Helpers `sumResult`,
+  integers promote by rank with `UInt8 + Int8 → Int16`, `Unknown` is sticky). Helpers `sumResult`,
   `meanResult`, `divideResult`, `atLeastFloat`, and predicates `isFloating`,
   `isIntegral`, `isBool`, `isIndex` describe reduction and division results.
 - `TensorSpec := { shape : Shape, dtype : DType }` (`Tyr/Typed/Spec.lean:12`)
@@ -111,8 +113,9 @@ Crossing from raw `T s` into the facade (`Tyr/Typed/Tensor.lean`):
   typed op uses this internally, so each op encodes an assumption about
   libtorch behavior; the parity tests in `Tests/TestTyped.lean` exist to keep
   those assumptions honest. Treat it as the escape hatch it is in your own code.
-- `Tensor.ofTensor?` / `Tensor.ofTensor` — wrap after checking the runtime
-  dtype (`Option` / `Except String`).
+- `Tensor.ofTensor?` / `Tensor.ofTensor` — wrap after checking both the runtime
+  shape and dtype (`Option` / `Except String`). The raw type annotation alone
+  is not evidence of a tensor's actual shape.
 - `Tensor.ofTensorWithContract` — full contract check (shape, dtype, device).
 - `Tensor.validate : Tensor σ → Except String Unit` (`Tyr/Typed/Tensor.lean:118`)
   — audit every phantom claim against the runtime handle. Shape is always
@@ -252,7 +255,9 @@ def sumAll  (t : Tensor σ) : Tensor σ.sumSpec        -- shape #[], dtype sumRe
 def meanAll (t : Tensor σ) (_float : σ.dtype.isFloating = true := by decide) :
     Tensor (σ.withShape #[])
 
-def reshape     (t : Tensor σ) (shape' : Shape) : Tensor (σ.withShape shape')
+def reshape (t : Tensor σ) (shape' : Shape)
+    (_h : TensorSpec.numelOfShape σ.shape = TensorSpec.numelOfShape shape' := by decide) :
+    Tensor (σ.withShape shape')
 def permute     (t : Tensor σ) (p : Array UInt64) :
     Tensor (σ.withShape (permuteShape σ.shape p))
 def transpose   (t : Tensor σ) (dim0 dim1 : UInt64) :
@@ -263,6 +268,13 @@ def unsqueeze   (t : Tensor σ) (dim : Nat) :
 def cat (t1 : Tensor ⟨s1, d, dev⟩) (t2 : Tensor ⟨s2, d, dev⟩) (dim : Nat) :
     Tensor ⟨nn.catShape s1 s2 dim, d, dev⟩
 ```
+
+An empty reshape target denotes a scalar, so only a one-element tensor can
+reshape to `#[]`. This differs from the legacy raw empty-target erasure
+convention. For symbolic shapes, supply the element-count proof explicitly.
+The CPU runtime tests compare all 100 pairs of regular supported dtypes
+against real addition; float8 storage widths and metadata are tested separately
+because float8 CPU arithmetic is not generally supported by LibTorch.
 
 ### Layers (`namespace torch.Typed`, `Tyr/Typed/Layers.lean`)
 

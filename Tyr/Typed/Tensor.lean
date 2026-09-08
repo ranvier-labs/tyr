@@ -123,12 +123,13 @@ def validate {σ : StaticSpec} (t : Tensor σ) : Except String Unit := do
   σ.device.check t.raw.device
 
 def ofTensor? {shape : Shape} (dtype : DType) (raw : T shape) : Option (DTensor shape dtype) :=
-  if raw.dtype == dtype then
+  if raw.runtimeShape == shape && raw.dtype == dtype then
     some (.mk raw)
   else
     none
 
 def ofTensor {shape : Shape} (dtype : DType) (raw : T shape) : Except String (DTensor shape dtype) := do
+  TensorSpec.checkShape shape raw.runtimeShape
   TensorSpec.checkDType dtype raw.dtype
   pure (.mk raw)
 

@@ -5,12 +5,38 @@ open torch
 
 namespace Tests.TestTyped
 
+/- Compile-time rejection tests. `fail_if_success` checks elaboration failure
+   without inserting sorry-backed declarations into the runtime test module. -/
+example (_x : DTensor #[2, 3] .Float32) : True := by
+  fail_if_success
+    have _wrongShape : DTensor #[3, 2] .Float32 := _x
+  trivial
+
+example (_x : DTensor #[2, 3] .Float32) (_w : DTensor #[4, 5] .Float32) : True := by
+  fail_if_success
+    have _wrongInnerDims := Tensor.mm _x _w
+  trivial
+
+example (_x : DTensor #[2, 3] .Float32) : True := by
+  fail_if_success
+    have _wrongNumel := _x.reshape #[5]
+  trivial
+
+example (_x : DTensor #[2, 3] .Float32) (_w : DTensor #[3, 4] .Int64) : True := by
+  fail_if_success
+    have _wrongDType := Tensor.mm _x _w
+  trivial
+
 @[test]
 def testDTypePromotionPolicy : IO Unit := do
   LeanTest.assertEqual (DType.promote .Float16 .BFloat16) .Float32
     "mixed f16/bf16 should promote to f32"
   LeanTest.assertEqual (DType.promote .Int16 .UInt8) .Int16
     "small mixed integer promotion should keep enough signed range"
+  LeanTest.assertEqual (DType.promote .UInt8 .Int8) .Int16
+  LeanTest.assertEqual (DType.promote .Int8 .UInt8) .Int16
+  LeanTest.assertEqual DType.Float8E4M3FN.bitWidth? (some 8)
+  LeanTest.assertEqual DType.Float8E5M2.bitWidth? (some 8)
   LeanTest.assertEqual (DType.meanResult .Int64) .Float32
     "integer means should promote to a floating dtype"
   LeanTest.assertEqual (DType.sumResult .Float8E4M3FN) .Float32
@@ -60,6 +86,45 @@ private def assertValid {σ : StaticSpec}
   match t.validate with
   | .ok () => pure ()
   | .error err => LeanTest.fail s!"{label}: {err}"
+
+@[test]
+def testTypedCheckedShapeBoundary : IO Unit := do
+  let raw := torch.ones #[2]
+  LeanTest.assertTrue (Tensor.ofTensor? (shape := #[99]) .Float32 raw).isNone
+    "the raw T shape annotation cannot establish the typed shape invariant"
+  match Tensor.ofTensor (shape := #[99]) .Float32 raw with
+  | .ok _ => LeanTest.fail "a mismatched runtime shape must be rejected"
+  | .error error => LeanTest.assertTrue (error.containsSubstr "Expected shape")
+  match Tensor.ofTensor (shape := #[2]) .Float32 raw with
+  | .ok tensor => assertValid tensor "checked constructor"
+  | .error error => LeanTest.fail error
+  assertValid ((Tensor.ones #[1]).reshape #[]) "scalar reshape"
+  assertValid ((Tensor.ones #[]).reshape #[1, 1]) "reshape from scalar"
+  assertValid ((Tensor.ones #[0, 3]).reshape #[0]) "empty tensor reshape"
+
+/-- Check the dtype algebra against actual tensor arithmetic for every pair
+    of regular CPU dtypes, including the mixed unsigned/signed edge case.
+    Float8 storage metadata is covered separately: CPU float8 arithmetic
+    kernels are not generally available in libtorch. -/
+@[test]
+def testTypedDtypePromotionMatrix : IO Unit := do
+  let path := "Tests/fixtures/typed/dtype_scalars.safetensors"
+  let dtypes : Array DType := #[.Bool, .UInt8, .Int8, .Int16, .Int32, .Int64,
+    .Float16, .BFloat16, .Float32, .Float64]
+  for lhs in dtypes do
+    let a ← safetensors.loadTensor path lhs.canonicalName #[1]
+    let .ok a := Tensor.ofTensor (shape := #[1]) lhs a | LeanTest.fail s!"fixture dtype {lhs}"
+    for rhs in dtypes do
+      let b ← safetensors.loadTensor path rhs.canonicalName #[1]
+      let .ok b := Tensor.ofTensor (shape := #[1]) rhs b | LeanTest.fail s!"fixture dtype {rhs}"
+      assertValid (Tensor.add a b) s!"{lhs} + {rhs}"
+  let u8 ← safetensors.loadTensor path "UInt8" #[1]
+  let i8 ← safetensors.loadTensor path "Int8" #[1]
+  LeanTest.assertEqual ((torch.add u8 i8).getValues.toList.toArray) #[254.0]
+  for dtype in #[DType.Float8E4M3FN, DType.Float8E5M2] do
+    let raw ← safetensors.loadTensor path dtype.canonicalName #[1]
+    LeanTest.assertEqual raw.dtype dtype
+    LeanTest.assertEqual dtype.bitWidth? (some 8)
 
 /-- The typed wrappers re-index the phantom dtype according to the promotion
     algebra in `Tyr.Typed.DType`. These tests run the real ops and assert the

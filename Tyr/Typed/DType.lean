@@ -46,9 +46,9 @@ def isIndex : DType → _root_.Bool
 
 def bitWidth? : DType → Option Nat
   | .Bool => some 1
-  | .UInt8 | .Int8 => some 8
+  | .UInt8 | .Int8 | .Float8E4M3FN | .Float8E5M2 => some 8
   | .Int16 => some 16
-  | .Int32 | .Float32 | .Float8E4M3FN | .Float8E5M2 => some 32
+  | .Int32 | .Float32 => some 32
   | .Int64 | .Float64 => some 64
   | .Float16 | .BFloat16 => some 16
   | .Unknown _ => none
@@ -69,13 +69,17 @@ private def intRank : DType → Nat
   | _ => 0
 
 private def promoteIntegral (lhs rhs : DType) : DType :=
-  match Nat.max (intRank lhs) (intRank rhs) with
-  | 0 => .Bool
-  | 1 => .UInt8
-  | 2 => .Int8
-  | 3 => .Int16
-  | 4 => .Int32
-  | _ => .Int64
+  -- Neither eight-bit type contains the full range of the other.
+  if (lhs == .UInt8 && rhs == .Int8) || (lhs == .Int8 && rhs == .UInt8) then
+    .Int16
+  else
+    match Nat.max (intRank lhs) (intRank rhs) with
+    | 0 => .Bool
+    | 1 => .UInt8
+    | 2 => .Int8
+    | 3 => .Int16
+    | 4 => .Int32
+    | _ => .Int64
 
 def promote : DType → DType → DType
   | .Unknown raw, _ => .Unknown raw
