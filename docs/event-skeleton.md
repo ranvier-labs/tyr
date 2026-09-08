@@ -44,7 +44,7 @@ structure SkeletonGraph where
 
 All kernels are partial via `Except String` and operate on dense arrays.
 
-- **Saltation** (`Tyr/EventSkeleton/Saltation.lean`) — reverse mode through one deterministic hybrid event without forming the dense saltation matrix. `SaltationData` stores the reset Jacobian `R_x`, guard gradient `g_x`, and the precomputed `a = f⁺ − R_x f⁻ − R_t`, `γ = g_t + g_x·f⁻`, `β`. The reverse update is `p⁻ = c_x + R_xᵀ p⁺ + g_xᵀ α` with `α = (aᵀp⁺ − β)/γ`; a zero `γ` is rejected as "not transverse" (`validateGamma`, `Saltation.lean:126`).
+- **Saltation** (`Tyr/EventSkeleton/Saltation.lean`) — reverse mode through one deterministic hybrid event without forming the dense saltation matrix. `SaltationData` stores the reset Jacobian `R_x`, guard gradient `g_x`, and the precomputed `a = f⁺ − R_x f⁻ − R_t`, `γ = g_t + g_x·f⁻`, `β`. The reverse update is `p⁻ = c_x + R_xᵀ p⁺ + g_xᵀ α` with `α = (aᵀp⁺ − β)/γ`. Checked operations reject zero or nonfinite `γ`, inconsistent matrix/vector dimensions, nonfinite fields/cotangents, and overflowing results. Empty optional cost and parameter terms mean zero.
 - **Marks** (`Tyr/EventSkeleton/Mark.lean`) — `CategoricalMarkData.exactEliminate?` marginalizes over explicit marks: `V⁻ = Σ_y π_y Q_y` plus the probability-message term `(Dπ)ᵀQ`. `SampledMarkData.eliminate` keeps one sampled mark live and adds the score-function term `(Q_y − b) ∇ log π_y`. `EventMessage` is the per-outcome value/adjoint payload. `simplexHitCotangent?` computes the hit-simplex cotangent `Q − 1·(vᵀQ)/(1ᵀv)`.
 - **Branches** (`Tyr/EventSkeleton/Branch.lean`) — `BranchEventData.aggregate?` generalizes the saltation update to weighted children: `p⁻ = c_x + Σ_j w_j R_{j,x}ᵀ p_j⁺ + g_xᵀ α` with `α = (Σ_j w_j a_jᵀ p_j⁺ − β)/γ`.
 - **Intervals** (`Tyr/EventSkeleton/Interval.lean`) — `AcceptedStepSegment` records one accepted integration attempt (`tStart`, `tAttempt`, `tAfter`, jump flags); `localizedByEvent` is true when the segment ended before the attempted time, i.e. an event root was localized. `planForAcceptedSegment` emits an `intervalAdjoint` move (plus an optional `checkpointBoundary`), and `graphFromAcceptedSegments` builds a `SkeletonGraph` from a run of segments.
@@ -112,6 +112,8 @@ via the `LeanUrdfTypeProvider` dependency, which `lakefile.lean` requires from a
 | Declaration | Signature |
 |---|---|
 | `SaltationData.mkFromFields` | `(resetJac : Array (Array Float)) (guardGrad : Array Float) (fMinus fPlus : Array Float) (resetTime := #[]) (guardTime := 0.0) (beta := 0.0) … → SaltationData` — computes `a` and `γ` from the vector fields |
+| `SaltationData.mkFromFields?` | Same arguments, returning `Except String SaltationData`; validates the input vector fields before their dimensions are lost in contractions. Use this at dynamic input boundaries; `mkFromFields` is an unchecked algebraic constructor. |
+| `SaltationData.validate` | Checks finite data, a rectangular reset Jacobian, and matching state/parameter dimensions. |
 | `SaltationData.timingAdjoint?` | `SaltationData → (pPlus : Array Float) → Except String Float` |
 | `SaltationData.reverseState?` | `SaltationData → (pPlus : Array Float) → Except String (Array Float)` — `c_x + R_xᵀp⁺ + g_xᵀα` |
 | `SaltationData.reverseTheta?` | same shape, for parameter cotangents (`R_θ`, `g_θ`, `c_θ`) |
