@@ -1,5 +1,6 @@
 import LeanTest
 import Lean.Util.Path
+import Tests.TestGPUTileIR
 
 /-- Parse command line arguments into a RunConfig. -/
 def parseArgs (args : List String) : IO LeanTest.RunConfig := do

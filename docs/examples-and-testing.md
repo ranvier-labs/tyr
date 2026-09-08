@@ -62,9 +62,10 @@ structure LeanTest.RunConfig where
   filter         : Option String := none
 ```
 
-Consequence worth remembering: **a test file that no runner imports never
-executes**, even though it still compiles as part of `lean_lib Tests`. Several
-files in the tree are in that state today (see "Caveats" below).
+**A test file that no runner imports never executes.**
+`python3 scripts/test_inventory.py` checks that every LeanTest module is
+reachable from a required suite or an explicitly optional suite. It also checks
+standalone test executables for a `main` and an assigned suite.
 
 ### Test tiers
 
@@ -72,7 +73,7 @@ Tests are organized in three tiers:
 
 1. **Main suite** — `lake test` (alias: `lake run`). `test_runner`'s root is
    `Tests/RunTests.lean`, which imports the umbrella module `Tests.lean`
-   (116 imports) plus `Tests.TestAdditionalManifolds` (special-cased there, not
+   plus `Tests.TestAdditionalManifolds` (special-cased there, not
    in `Tests.lean`). It parses `--filter PATTERN`, `--ignored`, `--fail-fast`,
    `--help` into a `LeanTest.RunConfig`.
 2. **Experimental suite** — `lake exe test_runner_experimental`, root
@@ -86,17 +87,25 @@ Tests are organized in three tiers:
    `TestGPUGB10E2E`, `TestGPUTileIR`, `TestTileIRGenerateMain`, `TestDiffusion`,
    and `RunRiemannianNanoGPTTests`. Each is a thin runner module
    (`Tests/RunTest*.lean`, `Tests/Run*.lean` — the prefix split is historical)
-   with the same copy-pasted `parseArgs` → `runTestsAndExit` body, except
-   `TestDiffusion` whose executable roots at the test file directly
-   (`lakefile.lean:762`), and the SDE/underdamped order-parity runners
+   with a `parseArgs` → `runTestsAndExit` body in most runners. `TestDiffusion`
+   has a dedicated `Tests/RunTestDiffusion.lean` driver. The SDE/underdamped order-parity runners
    (`Tests/RunDiffEqSDEOrderParity.lean`, `RunDiffEqUnderdampedOrderParity.lean`)
    which just call a `run` function.
 
-Hosted CI (`.github/workflows/ci.yml`) builds and runs only tiers 1 and 2
-(`test_runner --fail-fast`, then `test_runner_experimental`). The GPU suites
-run on self-hosted hardware via `.github/workflows/cuda-smoke.yml`
-(`TestGPUGB10E2E --fail-fast`, `RunMhaH100Decode`) or manually through the
-shell harnesses in `scripts/gpu/`.
+Hosted CI (`.github/workflows/ci.yml`) builds and runs the manifest in
+`scripts/test_suites.json`: the main and experimental runners plus Laguna's
+config, tokenizer, NVFP4, MoE, model, reference parity, and rotary suites.
+These Laguna suites run CPU checks against tracked fixtures; their CUDA branches
+remain conditional. Diffusion and TileIR export-driver tests are in the main
+suite. Add new standalone CPU assertion suites to the same manifest.
+
+GPU suites run on self-hosted hardware via `.github/workflows/cuda-smoke.yml`.
+That workflow sets `TYR_GPU_TEST_STRICT=1`: the linked LibTorch must have CUDA,
+the configured family must match, and the selected suite must execute tests
+with no skips. Blackwell uses `TestGPUGB10E2E`; Hopper runs `TestGPUE2E` filtered
+to `TorchParity`, then `RunMhaH100Decode` including cache parity. GPU test and
+example changes are included in the workflow path filters. Local GPU runs
+without strict mode retain optional skips and print executed/skipped counts.
 
 There is also `lean_exe ffi_crash_probe` (`lakefile.lean:672`, root
 `Tests/FfiCrashProbe.lean`): a manual probe that intentionally triggers a
@@ -214,6 +223,10 @@ def testSafeTensorsIntrospectionSingle : IO Unit := do
 
 To make a new test file actually run, add `import Tests.MyNewTest` to
 `Tests.lean` — the runner discovers tests by scanning the imported environment.
+Run `python3 scripts/test_inventory.py` before committing. GPU-only or
+intentional-crash executables belong in the manifest's `optional` map with a
+reason; focused runners that import already-routed LeanTest modules are checked
+automatically.
 
 Running tests and examples:
 
@@ -223,6 +236,9 @@ lake test -- --filter diffeq --fail-fast   # subset, stop on first failure
 lake exe test_runner_experimental          # experimental suite
 lake exe TestGPUE2E                        # standalone GPU suite (needs CUDA + fixtures)
 lake exe ffi_crash_probe                   # manual FFI failure-mode probe
+python3 scripts/test_inventory.py --build # build every required CPU suite
+lake env python3 scripts/test_inventory.py --run # run that same suite list
+TYR_GPU_TEST_STRICT=1 lake exe TestGPUGB10E2E --fail-fast
 
 lake build TrainGPT && lake run train      # char-GPT on Shakespeare
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt "Summarize dependent types." --stream
@@ -232,7 +248,7 @@ lake run validateMhaH100Examples           # build + run H100 MHA fixture checks
 
 ## What is covered vs uncovered
 
-The main suite (`Tests.lean`, 116 modules) is deepest in: autodiff
+The main suite (`Tests.lean`) is deepest in: autodiff
 (`TestAD*`, `TestAutoGrad`), differential equations (`TestDiffEq*` —
 `TestDiffEq.lean` alone is 3880 lines), event-skeleton physics (~40
 `TestEventSkeleton*` files), Mctx (`TestMctx*`), GPU DSL/kernels/TileIR
@@ -249,9 +265,9 @@ smoke-tested through the FFI surface in `Tests/TestModdedGPT.lean`.
 
 Caveats to be aware of when extending the suite:
 
-- **Orphaned examples.** `Examples/GPU/Run{BrownianSample,BrownianDescent,EulerMaruyamaFused,RKCombine,RKFusedSolve,MhaGB10}.lean`
-  are well-documented CPU↔GPU parity harnesses with no executable target; they
-  only get compiled via `lake build Examples`.
+- GPU parity harnesses under `Examples/GPU/Run{BrownianSample,BrownianDescent,EulerMaruyamaFused,RKCombine,RKFusedSolve,MhaGB10}.lean`
+  are exercised through `TestGPUGB10E2E`; hosted CPU success does not validate
+  their numerical CUDA behavior.
 - `Tests/Test.lean` defines helpers (`encode`, `decode`, `charToInt`, ...) at
   global scope and imports `Examples.GPT.*`, so the test library depends on the
   examples library and those generic names leak into downstream test modules.

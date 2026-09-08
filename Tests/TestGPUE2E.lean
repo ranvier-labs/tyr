@@ -1,4 +1,5 @@
 import LeanTest
+import Tests.GPUCoverage
 import Tyr.Torch
 import Examples.GPU.Parity
 import Examples.GPU.FixtureRunner
@@ -21,9 +22,9 @@ private def runGpuBoolTestIf
     (action : IO Bool)
     : IO Unit := do
   if !(← torch.cuda_is_available) then
-    IO.println s!"[skip] {label}: CUDA unavailable"
+    Tests.GPUCoverage.skip label "CUDA unavailable"
   else if !(← enabled) then
-    IO.println s!"[skip] {label}: {reason}"
+    Tests.GPUCoverage.skip label reason
   else
     let ok ← action
     LeanTest.assertTrue ok label

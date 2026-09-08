@@ -3,6 +3,7 @@ import Tests.TestDataLoader
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint
 import Tests.TestCheckpointPersistence
+import Tests.TestFFIBoundary
 import Tests.TestCoreSmoke
 import Tests.TestModelIO
 import Tests.TestPipeline
@@ -83,6 +84,7 @@ import Tests.TestMctx
 import Tests.TestMctxBatched
 import Tests.TestMctxDag
 import Tests.TestDiffEq
+import Tests.TestDiffEqRootFinder
 import Tests.TestDiffEqEventTreeParity
 import Tests.TestDiffEqMilsteinAutodiffParity
 import Tests.TestDiffEqSDEOrderParity
@@ -112,7 +114,9 @@ import Tests.TestDiffEqSaveAtParity
 import Tests.TestDiffEqSteadyStateEventParity
 import Tests.TestGPUDSL
 import Tests.TestGPUKernels
+import Tests.TestGPUCoverage
 import Tests.TestGPUTileIR
+import Tests.TestTileIRGenerateMain
 import Tests.TestDiffusion
 import Tests.TestNanoChatTokens
 import Tests.TestNanoChatTasks
