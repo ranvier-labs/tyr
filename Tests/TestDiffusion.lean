@@ -7,9 +7,10 @@ import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionTrain
 import LeanTest
 
+namespace Tests.Diffusion
+
 open torch
 open torch.diffusion
-open torch.nanoproof (RotaryCache)
 
 
 
@@ -36,8 +37,10 @@ def testMaskPreservesContext : IO Unit := do
   -- With context_len=16 and seq=128, we have 112 non-context positions per sample
   -- At timestep 63 with linear schedule, mask_prob ~= 1.0, so most should be masked
   LeanTest.assertTrue (numMasked > 50) "Many positions are masked"
-  -- Context positions (0-15) should not all be masked
-  -- We can't easily slice, so just verify the mask worked
+  let originalContext := data.slice x_0 1 0 16
+  let maskedContext := data.slice x_t 1 0 16
+  LeanTest.assertTrue (allclose originalContext maskedContext 0.0 0.0)
+    "Every context token is preserved"
 
 @[test]
 def testMaskedLoss : IO Unit := do
@@ -95,6 +98,7 @@ def testSampleTopK : IO Unit := do
 
 @[test]
 def testTrainStep : IO Unit := do
+  manualSeed 20260908
   let modelCfg := Config.tiny
   let trainCfg : diffusion.train.TrainConfig := { maxIters := 1, batchSize := 2 }
   let params ← DiffusionParams.init modelCfg
@@ -115,5 +119,9 @@ def testTrainStep : IO Unit := do
   
   -- Parameters should change after training step
   LeanTest.assertTrue (diffSum > 1e-6) s!"Parameters updated (diff={diffSum})"
+  -- The zero-initialized output head receives the first step's learning signal;
+  -- embedding changes alone can be explained by decoupled weight decay.
+  let headDiff := nn.item (nn.sumAll (nn.abs (params.output_head - params'.output_head)))
+  LeanTest.assertTrue (headDiff > 1e-6) s!"Output head learned (diff={headDiff})"
 
-
+end Tests.Diffusion

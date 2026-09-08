@@ -806,7 +806,7 @@ lean_exe Qwen3ASRLiveMicTrueStream where
 
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
-  root := `Tests.TestDiffusion
+  root := `Tests.RunTestDiffusion
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

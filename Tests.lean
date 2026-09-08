@@ -112,6 +112,7 @@ import Tests.TestDiffEqSteadyStateEventParity
 import Tests.TestGPUDSL
 import Tests.TestGPUKernels
 import Tests.TestGPUTileIR
+import Tests.TestDiffusion
 import Tests.TestNanoChatTokens
 import Tests.TestNanoChatTasks
 import Tests.TestNanoGPTCopy
