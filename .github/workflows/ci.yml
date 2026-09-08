@@ -109,7 +109,7 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake -R build Examples
+          lake -R build Examples BranchingFlowsMoleculeTrainGenerate
           # Key example files that are not covered by `Examples.lean`.
           lake -R env lean Examples/NanoChat/Generator/TypedState.lean
           lake -R env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
@@ -128,6 +128,7 @@ jobs:
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
           lake -R env python3 scripts/test_inventory.py --run
+          lake -R env python3 scripts/test_branching_checkpoint_resume.py
 
       - name: Evaluate Qwen3-TTS parity regression gate
         if: runner.os == 'macOS'
