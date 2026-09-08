@@ -1007,19 +1007,19 @@ lean_exe FluxDebug where
 
 /-- End-to-end demo for a minimal ThunderKittens-style copy kernel. -/
 lean_exe RunCopy where
-  root := `Examples.GPU.RunCopy
+  root := `Examples.GPU.RunCopyExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end rotary fixture validation using a ThunderKittens-style kernel. -/
 lean_exe RunRotary where
-  root := `Examples.GPU.RunRotary
+  root := `Examples.GPU.RunRotaryExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end ThunderKittens layernorm fixture validation. -/
 lean_exe RunLayerNorm where
-  root := `Examples.GPU.RunLayerNorm
+  root := `Examples.GPU.RunLayerNormExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1043,7 +1043,7 @@ lean_exe RunOptimizer where
 
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunFlashAttn where
-  root := `Examples.GPU.RunFlashAttn
+  root := `Examples.GPU.RunFlashAttnExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1094,7 +1094,7 @@ lean_exe RunDecodeBench where
 
 /-- End-to-end ThunderKittens `mha_h100` forward/backward fixture validation. -/
 lean_exe RunMhaH100 where
-  root := `Examples.GPU.RunMhaH100
+  root := `Examples.GPU.RunMhaH100Exe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1106,7 +1106,7 @@ lean_exe RunMhaH100Train where
 
 /-- End-to-end GB10 MHA validation and synchronized benchmark. -/
 lean_exe RunMhaGB10 where
-  root := `Examples.GPU.RunMhaGB10
+  root := `Examples.GPU.RunMhaGB10Exe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

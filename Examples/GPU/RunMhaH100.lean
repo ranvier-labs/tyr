@@ -4,7 +4,7 @@ import Tyr.Torch
 import Tyr.GPU.Kernels.MhaH100
 import Examples.GPU.FixtureRunner
 
-namespace Examples.GPU
+namespace Examples.GPU.RunMhaH100
 
 open torch
 open Tyr.GPU.Kernels
@@ -17,7 +17,7 @@ private def contractLabel : String := "dq_direct_kv_sweep_store_add"
 private def seqLen : Nat := 128
 private def headDim : Nat := 64
 private def kvTiles : Nat := 2
-private def suiteName : String := "mha_h100"
+def suiteName : String := "mha_h100"
 
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/mha_h100_128x64"⟩
@@ -181,6 +181,4 @@ def main (args : List String) : IO UInt32 := do
   let dumpPartials := args.contains "--dump-partials"
   runWithFixtures args suiteName fixtureSpec generateFixtures (runOnce dumpPartials)
 
-end Examples.GPU
-
-def main : List String → IO UInt32 := Examples.GPU.main
+end Examples.GPU.RunMhaH100

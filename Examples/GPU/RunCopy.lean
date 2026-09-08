@@ -67,6 +67,3 @@ def main (args : List String) : IO UInt32 := do
     pure (if ok then 0 else 1)
 
 end Examples.GPU.RunCopy
-
-def main (args : List String) : IO UInt32 :=
-  Examples.GPU.RunCopy.main args
