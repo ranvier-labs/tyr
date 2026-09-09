@@ -97,11 +97,38 @@ words, magic `20240520`, version 1; `splitFinewebPayload`,
 2. `DataShard.loadFromFile` (`DataLoader.lean:239`) reads a shard via the torch
    FFI, strips the header, slices the per-rank token range
    `[rank·⌊n/world⌋, ...)`, and builds a `BOSFinder`.
-3. `BOSFinder.getBatch` (`DataLoader.lean:125`) slices a contiguous
-   `batchSize × seqLen` window as `T #[batchSize, seqLen]`.
-4. `BatchIterator` / `DistributedDataGenerator` (`DataLoader.lean:280,313`)
-   drive epoch rollover and rotation across shard files. Rank and world size
+3. `DataShard.load` retains the actual partition length and returns
+   `Σ n, DataShard n`, just like `loadFromFile`; it neither truncates large
+   partitions nor tiles small ones.
+4. `BOSFinder` packs document fragments in a deterministic order. A seeded
+   shuffle changes document order while preserving token order inside each
+   document, including the partition fragment before its first BOS. Sequences
+   may span documents; BOS tokens remain in the stream, and attention masking
+   across document boundaries remains the model's responsibility.
+5. `DistributedDataGenerator` preserves incomplete file tails across batches.
+   After every file has been consumed it advances the epoch and reshuffles;
+   a fixed-shape batch can span that epoch boundary. Rank and world size
    are auto-detected via `Tyr.Distributed` in `DistributedDataGenerator.init`.
+
+`Config.seed` controls document order (`shuffle := false` selects source
+order). `numWorkers` and `bufferSize` are retained only for source compatibility:
+this loader performs synchronous reads and has no worker pool or prefetch queue.
+It loads one complete file before selecting the rank partition; it is not yet a
+bounded-memory reader for arbitrarily large files. `BatchIterator` used directly
+is a finite single-shard iterator and returns `none` for an incomplete final
+batch; use the distributed generator to preserve tails across files.
+Batch dimensions and GPT's additional target token are checked before fixed-width
+arithmetic. `BatchIterator.updateParams` and `updateForStepGPT` now return `IO`
+so invalid parameter updates report errors before consumption.
+
+`DistributedDataGenerator.cursor` records the file index, logical token
+position, epoch, seed, BOS policy, rank/world size, paths and partition length.
+`restoreCursor` reconstructs document order and rejects incompatible metadata;
+the underlying shard contents must remain unchanged. ModdedTrain embeds this
+versioned cursor in checkpoint metadata. Legacy cursor-only checkpoints are
+rejected for exact data resume because their offsets addressed the old truncated,
+unshuffled stream. ModdedTrain also rejects multi-rank exact data resume until
+its checkpoints collect every rank's cursor instead of only rank 0's.
 
 Two batch-shape patterns coexist, and the assignment of names to files is
 worth getting right:
@@ -239,9 +266,11 @@ assembles a pretraining → midtraining → SFT sequence.
 
 | API | Signature | Location |
 | --- | --- | --- |
-| `Config` | `{ dataPath, valPath, seqLen, bosToken, numWorkers, bufferSize, seed }` | `Tyr/DataLoader.lean:30` |
+| `Config` | `{ dataPath, valPath, seqLen, bosToken, seed, shuffle }`; synchronous compatibility fields `numWorkers`, `bufferSize` | `Tyr/DataLoader.lean` |
 | `resolveShardPaths` | `(pathSpec : String) (kind : ShardKind) : IO (Array String)` | `Tyr/DataLoader.lean:75` |
 | `DataShard.loadFromFile` | `(path) (shardIdx numShards bosToken : UInt64) : IO (Σ n, DataShard n)` | `Tyr/DataLoader.lean:239` |
+| `DataShard.load` / `loadValidationData` | Return `IO (Σ n, DataShard n)` with the real partition length | `Tyr/DataLoader.lean` |
+| `DistributedDataGenerator.cursor` / `.restoreCursor` | Versioned `StreamCursor` capture and validated restore | `Tyr/DataLoader.lean` |
 | `BatchIterator.new` / `.next` | `(shard) (batchSize seqLen : UInt64) : BatchIterator` / `IO (Option (T #[]) × BatchIterator)` | `Tyr/DataLoader.lean:288,291` |
 | `DistributedDataGenerator.init` | `(config : Config) (batchSize seqLen : UInt64) : IO DistributedDataGenerator` | `Tyr/DataLoader.lean:323` |
 | `DistributedDataGenerator.nextBatch` | `IO (Option (T #[]) × DistributedDataGenerator)` | `Tyr/DataLoader.lean:333` |
@@ -369,11 +398,6 @@ let out := tokenizer.qwen35.decodeText tok generatedIds
 
 Behavior verified against source that the module docs do not advertise:
 
-- `BOSFinder.getBatch` slices contiguously from `currentPos`; the recorded
-  `bosPositions` (and `shuffle`) are never consulted — batching is sequential
-  windowing (`Tyr/DataLoader.lean:125-136`).
-- `DataShard.load` silently tiles shards smaller than `defaultShardSize`
-  (1M tokens) up to size (`Tyr/DataLoader.lean:267-272`); `loadFromFile` does not.
 - `trainBPE` never pretokenizes and ignores `TrainConfig.{maxChars, docCap,
   splitPattern, seed}` (`Tyr/Tokenizer/Training.lean:211-278`).
 - `PretrainingLoader.nextBatch` / `ValidationLoader.nextBatch` are incomplete

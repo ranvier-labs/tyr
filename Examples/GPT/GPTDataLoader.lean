@@ -22,6 +22,7 @@ open torch
 -/
 def BatchIterator.nextGPT (iter : BatchIterator)
     : IO (Option (T #[] × T #[]) × BatchIterator) := do
+  let _ ← checkedBatchTokens iter.batchSize iter.seqLen 1
   -- Get batch from BOS finder
   -- We need seqLen + 1 to split into input and target
   let (maybeBatch, newBosFinder) ← iter.shard.bosFinder.getBatch
@@ -30,13 +31,8 @@ def BatchIterator.nextGPT (iter : BatchIterator)
   match maybeBatch with
   | none =>
     -- Epoch complete, reset and increment epoch
-    let resetFinder := newBosFinder.reset.shuffle iter.epoch
-    let newShard := { iter.shard with bosFinder := resetFinder }
-    let newIter := { iter with
-      shard := newShard
-      epoch := iter.epoch + 1
-      batchCount := 0
-    }
+    let newIter := BatchIterator.new { iter.shard with bosFinder := newBosFinder }
+      iter.batchSize iter.seqLen iter.shuffleSeed (iter.epoch + 1)
     return (none, newIter)
   | some batch =>
     -- Split into input and target (target is shifted by 1)
@@ -59,37 +55,25 @@ def BatchIterator.nextGPT (iter : BatchIterator)
 /-- Get the next batch for GPT training. -/
 def DistributedDataGenerator.nextBatchGPT (gen : DistributedDataGenerator)
     : IO (Option (T #[] × T #[]) × DistributedDataGenerator) := do
-  let (maybeBatch, newIterator) ← gen.iterator.nextGPT
-  match maybeBatch with
-  | some batch =>
-    let newGen := { gen with
-      iterator := newIterator
-      globalStep := gen.globalStep + 1
-    }
-    return (some batch, newGen)
-  | none =>
-    let nextIdx := (gen.trainPathIdx + 1) % gen.trainPaths.size
-    let nextPath := gen.trainPaths[nextIdx]!
-    let shard ← DataShard.load nextPath gen.rank gen.worldSize gen.config.bosToken
-    let iter0 := BatchIterator.new shard newIterator.batchSize newIterator.seqLen
-    let (maybeBatch', iter1) ← iter0.nextGPT
-    let newGen := { gen with
-      iterator := iter1
-      globalStep := gen.globalStep + 1
-      trainPathIdx := nextIdx
-    }
-    return (maybeBatch', newGen)
+  let b := gen.iterator.batchSize
+  let s := gen.iterator.seqLen
+  let count ← checkedBatchTokens b s 1
+  let (tokens, gen') ← gen.nextTokens count
+  let batch := reshape tokens #[b, s + 1]
+  let input := reshape (batch.slice 1 0 s.toInt64) #[b, s]
+  let target := reshape (batch.slice 1 1 (s.toInt64 + 1)) #[b, s]
+  return (some (input, target), gen')
 
 /-- Update batch and sequence parameters based on training step for modded-nanogpt. -/
 def DistributedDataGenerator.updateForStepGPT (gen : DistributedDataGenerator)
-    (step : UInt64) (blockSize : UInt64 := 128) : DistributedDataGenerator :=
+    (step : UInt64) (blockSize : UInt64 := 128) : IO DistributedDataGenerator := do
   let (batchSize, windowBlocks) :=
     if step < 200 then (8, 3)
     else if step < 1000 then (16, 7)
     else (24, 11)
-  let seqLen := windowBlocks * blockSize
-  let newIterator := gen.iterator.updateParams batchSize seqLen
-  { gen with iterator := newIterator }
+  let seqLen ← checkedBatchTokens windowBlocks blockSize
+  let newIterator ← gen.iterator.updateParams batchSize seqLen
+  return { gen with iterator := newIterator }
 
 /-! ## Utility Functions -/
 
