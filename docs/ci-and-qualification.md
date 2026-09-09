@@ -64,7 +64,10 @@ so one job cannot change another's Python dependencies or partial downloads.
 The job also rejects an already-active unrelated CUDA process. Other services
 that launch CUDA work should honor the same lock; the startup check alone
 cannot prevent a noncooperating workload from starting later. Qualification
-never interrupts such workloads.
+rechecks before CUDA runtime preflight and each test command, waiting up to ten
+minutes for unrelated processes to finish and recording the wait separately
+from execution time. It never interrupts such workloads. Other CUDA services
+still need the shared lock to guarantee exclusion throughout a test command.
 
 The GPU phase runs the strict family-specific LeanTest suite, regenerated decode
 and cache parity, the standalone native attention value/gradient tests on CUDA,
@@ -72,6 +75,15 @@ and Laguna model/cache checks with `TYR_LAGUNA_CACHE_BENCH=1`. CUDA benchmark
 markers are required; CPU-only success cannot qualify Laguna. Timing output
 compares cache capacities 128 and 8192 without imposing a hardware-independent
 speed threshold.
+
+`gpu-plan.json` and the GPU report record the architecture-specific codegen
+inputs and production decode route. `RunMhaH100Decode` runs on every configured
+GPU through the production dispatcher: H100 uses its custom decode kernel for
+eligible shapes; GB10, B200 and B300 currently exercise the SDPA fallback.
+The Blackwell plans do not compile the unused Hopper decode module. In
+particular, GB10 cannot compile its WGMMA/tcgen05 instructions. A successful
+Blackwell decode gate therefore establishes fallback/cache parity, not custom
+Hopper-kernel qualification.
 
 The real-model phase uses immutable inputs from
 `scripts/qualification/fixtures.json`:

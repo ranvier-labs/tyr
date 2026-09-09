@@ -31,19 +31,16 @@ if [[ "${TYR_QUALIFY_MODELS:-false}" == true ]]; then
     --download --paths-output output/qualification/fixture-paths.json
 fi
 export TYR_QUALIFICATION_PYTHON="$python_bin"
+# The Hopper vendor kernel includes Python.h through Torch's pybind header.
+# Make must discover headers from this prepared runtime on a fresh checkout.
+export PYTHON="$python_bin"
 export GPU=${GPU:-GB10}
 export TYR_GPU_TARGET="$GPU"
-case "$GPU" in
-  GB10|B200|B300)
-    export TYR_GPU_FAMILY=BLACKWELL
-    modules=(Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample)
-    gpu_runner=TestGPUGB10E2E ;;
-  H100)
-    export TYR_GPU_FAMILY=HOPPER
-    modules=(Tyr.GPU.Kernels.Copy Tyr.GPU.Kernels.Rotary Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode)
-    gpu_runner=TestGPUE2E ;;
-  *) echo "No strict suite configured for GPU=$GPU" >&2; exit 1 ;;
-esac
+python3 scripts/qualification/gpu_plan.py "$GPU" > output/qualification/gpu-plan.json
+TYR_GPU_FAMILY=$(python3 scripts/qualification/gpu_plan.py "$GPU" --field family)
+export TYR_GPU_FAMILY
+gpu_runner=$(python3 scripts/qualification/gpu_plan.py "$GPU" --field runner)
+mapfile -t modules < <(python3 scripts/qualification/gpu_plan.py "$GPU" --field modules)
 export TYR_GPU_CODEGEN_MODULE="${modules[*]}"
 export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${CUDA_HOME:-/usr/local/cuda}/lib64:${LD_LIBRARY_PATH:-}"
 source scripts/ci/environment.sh

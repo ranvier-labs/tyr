@@ -5,14 +5,43 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from prepare import ensure_file, safe_path, verify
+from gpu_plan import configuration as gpu_configuration
 from readiness import configuration
-from run import validate_result
+from run import validate_result, wait_for_idle_gpu
 from summarize import summarize
 
 
 class QualificationTests(unittest.TestCase):
+    def test_new_gpu_workload_is_waited_for_without_being_interrupted(self):
+        with patch("run.subprocess.check_output", side_effect=["12345\n", ""]), \
+             patch("run.time.monotonic", side_effect=[0.0, 0.0, 1.25]), \
+             patch("run.time.sleep") as sleep, patch("builtins.print"):
+            self.assertEqual(wait_for_idle_gpu(), 1.25)
+            sleep.assert_called_once_with(5.0)
+        with patch("run.subprocess.check_output", return_value="12345\n"), \
+             patch("run.time.monotonic", side_effect=[0.0, 600.0]), \
+             patch("run.time.sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "remains occupied"):
+                wait_for_idle_gpu()
+            sleep.assert_not_called()
+
+    def test_decode_build_inputs_match_hardware_and_production_dispatch(self):
+        hopper = gpu_configuration("H100")
+        self.assertIn("Tyr.GPU.Kernels.MhaH100Decode", hopper["modules"])
+        self.assertEqual(hopper["decode_route"], "hopper_custom_kernel_when_eligible")
+        for gpu in ("GB10", "B200", "B300"):
+            with self.subTest(gpu=gpu):
+                plan = gpu_configuration(gpu)
+                self.assertNotIn("Tyr.GPU.Kernels.MhaH100Decode", plan["modules"])
+                self.assertNotIn("Tyr.GPU.Kernels.MhaH100", plan["modules"])
+                self.assertEqual(plan["runner"], "TestGPUGB10E2E")
+                self.assertEqual(plan["decode_route"], "sdpa_fallback")
+        with self.assertRaises(ValueError):
+            gpu_configuration("A100")
+
     def test_empty_skipped_and_failed_gpu_runs_cannot_qualify(self):
         for output, code in [
             ("", 0), ("all good", 0),

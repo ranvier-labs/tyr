@@ -11,9 +11,25 @@ import sys
 import time
 
 from prepare import MANIFEST, prepare
+from gpu_plan import configuration as gpu_configuration
 
 REPO = Path(__file__).resolve().parents[2]
 COVERAGE = re.compile(r"\[gpu-coverage\] executed=(\d+) skipped=(\d+) failed=(\d+).*strict=true")
+
+
+def wait_for_idle_gpu(timeout=600.0, interval=5.0):
+    """A noncooperating service may acquire CUDA during our CPU build."""
+    start = time.monotonic()
+    while True:
+        active = subprocess.check_output(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"], text=True).strip()
+        if not active:
+            return time.monotonic() - start
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            raise ValueError(f"GPU remains occupied by unrelated processes after {timeout:g}s: {active}")
+        print(f"GPU occupied by processes {active.splitlines()}; waiting without interrupting them.", flush=True)
+        time.sleep(min(interval, timeout - elapsed))
 
 
 def validate_result(kind, output, code):
@@ -97,24 +113,25 @@ def main():
                   ["git", "status", "--porcelain", "--untracked-files=normal"], text=True).splitlines()}
     env = dict(os.environ, TYR_GPU_TEST_STRICT="1", TYR_QUALIFICATION_STRICT="1",
                TYR_QUALIFICATION_PYTHON=args.python, TYR_SKIP_QUALIFICATION_BUILD="1",
-               TYR_DEVICE="cuda:0", QWEN3_TTS_DEVICE_MAP="cuda:0", PYTHONHASHSEED="0")
+               TYR_DEVICE="cuda", QWEN3_TTS_DEVICE_MAP="cuda:0", PYTHONHASHSEED="0")
     env["LIBTORCH_DIR"] = str(REPO / "external/libtorch")
     env["TYR_LAGUNA_CACHE_BENCH"] = "1"
     env["PATH"] = str(Path(args.python).parent) + os.pathsep + env.get("PATH", "")
     try:
         if report["source_status"]:
             raise ValueError("Strict qualification requires a clean committed candidate checkout")
+        report["preflight_gpu_wait_seconds"] = wait_for_idle_gpu()
         report["runtime"] = runtime(args.python, manifest, args.kind == "models")
         if args.check_runtime:
             report["status"] = "runtime_ready"
             return 0
         if args.kind == "gpu":
             gpu = env.get("TYR_GPU_TARGET", env.get("GPU", "GB10"))
-            if gpu not in ("GB10", "B200", "B300", "H100"):
-                raise ValueError(f"No qualified GPU suite for {gpu}")
+            plan = gpu_configuration(gpu)
+            report["gpu_plan"] = plan
             if not any(gpu in device["name"] for device in report["runtime"]["devices"]):
                 raise ValueError(f"Configured GPU {gpu} does not match the detected devices")
-            suite = "TestGPUE2E" if gpu == "H100" else "TestGPUGB10E2E"
+            suite = plan["runner"]
             arguments = ["--filter", "TorchParity", "--fail-fast"] if gpu == "H100" else ["--fail-fast"]
             commands = [("gpu", ["lake", "-R", "env", f"./.lake/build/bin/{suite}", *arguments]),
                         ("decode", ["lake", "-R", "env", "./.lake/build/bin/RunMhaH100Decode", "--regen"]),
@@ -134,9 +151,12 @@ def main():
             commands = [("parity", ["bash", "scripts/qwen3tts_parity_regression.sh"]),
                         ("asr", ["bash", "scripts/qwen3tts_asr_regression.sh"])]
         for name, command in commands:
-            start = time.monotonic()
             item = {"name": name, "status": "failed", "command": command}
+            if name == "decode":
+                item["production_route"] = report["gpu_plan"]["decode_route"]
             report["suites"].append(item)
+            item["gpu_wait_seconds"] = wait_for_idle_gpu()
+            start = time.monotonic()
             log_path = args.report.parent / (args.kind + "-" + name + ".log")
             with log_path.open("w") as log:
                 with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
