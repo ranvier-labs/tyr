@@ -20,9 +20,12 @@
   (a) KV-cache parity: logits from a single full-sequence forward == logits
       from prefill + step-by-step decode (seq 20 > window 8, so sliding-layer
       decode-time KV truncation is exercised). CPU fp32 dense (tol 2e-4),
-      CUDA fp32 dense (tol 1e-2), CPU + CUDA bf16 MoE (tol 0.1 — bf16 has
-      ~3 decimal digits; prefill (causal seq SDPA) and decode (q_seq=1 SDPA)
-      kernels round differently; random-weight logits are O(1)). The cache
+      CUDA fp32 dense (tol 1e-2). BF16 cross-shape comparisons require every
+      logit to satisfy |got-ref| <= 0.05 + 0.02*|ref|: sequence-sized GEMMs
+      and attention kernels round differently, with errors depending on
+      each logit's scale. The near-zero floor is tighter than the former
+      global 0.1 limit; the relative term matches the Laguna MoE fixture's
+      2%/0.05 bound. Same-prefix cached/uncached equality remains exact. The cache
       fixture gives MoE selection scores a guaranteed margin, so rounding
       cannot switch experts. The same dequantized weights also run through
       a tight FP32 MoE cache oracle. Unconstrained routing remains covered
@@ -108,6 +111,52 @@ private def maxAbsDiff (a b : T #[]) : IO Float := do
     throw <| IO.userError "Non-finite tensor comparison"
   pure diff
 
+private structure MixedErrorStats where
+  maxAbs : Float := 0.0
+  referenceAtMaxAbs : Float := 0.0
+  maxReference : Float := 0.0
+  maxRatio : Float := 0.0
+  violations : Nat := 0
+
+private def MixedErrorStats.merge (a b : MixedErrorStats) : MixedErrorStats :=
+  { maxAbs := max a.maxAbs b.maxAbs
+    referenceAtMaxAbs := if b.maxAbs >= a.maxAbs then b.referenceAtMaxAbs else a.referenceAtMaxAbs
+    maxReference := max a.maxReference b.maxReference
+    maxRatio := max a.maxRatio b.maxRatio
+    violations := a.violations + b.violations }
+
+/-- A per-element bound, never a fraction of the largest logit in the tensor.
+The small test tensors are copied to CPU so validation and diagnostics use
+the same scalar calculation, including explicit input/arithmetic checks. -/
+private def mixedErrorStats (got expected : T #[]) (rtol := 0.02) (atol := 0.05) : IO MixedErrorStats := do
+  if got.runtimeShape != expected.runtimeShape then
+    throw <| IO.userError "Tensor comparison runtime shape mismatch"
+  if !rtol.isFinite || !atol.isFinite || rtol < 0.0 || atol <= 0.0 then
+    throw <| IO.userError "Invalid tensor comparison tolerance"
+  let values ← data.tensorToFloatArray' (toFloat' got)
+  let references ← data.tensorToFloatArray' (toFloat' expected)
+  if values.size != references.size then
+    throw <| IO.userError "Tensor comparison element count mismatch"
+  let mut stats : MixedErrorStats := {}
+  for i in [:values.size] do
+    let value := values[i]!
+    let reference := references[i]!
+    let diff := (value - reference).abs
+    let bound := atol + rtol * reference.abs
+    let ratio := diff / bound
+    if !value.isFinite || !reference.isFinite || !diff.isFinite ||
+        !bound.isFinite || !ratio.isFinite then
+      throw <| IO.userError "Non-finite tensor comparison"
+    stats := stats.merge {
+      maxAbs := diff, referenceAtMaxAbs := reference.abs,
+      maxReference := reference.abs, maxRatio := ratio,
+      violations := if diff > bound then 1 else 0 }
+  pure stats
+
+private def checkMixedErrors (stats : MixedErrorStats) (label : String) : IO Unit := do
+  IO.println s!"  {label}: maxAbs={stats.maxAbs} |ref|@maxAbs={stats.referenceAtMaxAbs} max|ref|={stats.maxReference} max(error/bound)={stats.maxRatio} violations={stats.violations} (atol=0.05 rtol=0.02)"
+  check (stats.violations == 0) s!"{label} every logit satisfies the BF16 mixed bound"
+
 private def checkComparisonFailures : IO Unit := do
   for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
     let rejected ← try
@@ -120,6 +169,39 @@ private def checkComparisonFailures : IO Unit := do
     pure false
   catch _ => pure true
   check rejected "comparison rejects broadcastable shape mismatch"
+  let accepted ← mixedErrorStats (data.fromFloatArray #[0.046875, 10.125])
+    (data.fromFloatArray #[0.0, 10.0])
+  check (accepted.violations == 0 && accepted.maxAbs == 0.125)
+    "mixed comparison permits bounded BF16 rounding at zero and larger scales"
+  let nearZero ← mixedErrorStats (data.fromFloatArray #[1000.0, 0.0546875])
+    (data.fromFloatArray #[1000.0, 0.0])
+  check (nearZero.violations == 1 && nearZero.maxRatio > 1.0)
+    "mixed comparison rejects a near-zero error despite an unrelated large logit"
+  let relative ← mixedErrorStats (data.fromFloatArray #[10.5]) (data.fromFloatArray #[10.0])
+  check (relative.violations == 1) "mixed comparison rejects excessive relative error"
+  for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
+    for pair in #[(full #[1] invalid, zeros #[1]), (zeros #[1], full #[1] invalid)] do
+      let rejected ← try
+        let _ ← mixedErrorStats pair.1 pair.2
+        pure false
+      catch _ => pure true
+      check rejected "mixed comparison rejects non-finite values on either side"
+  let rejected ← try
+    let _ ← mixedErrorStats (zeros #[1]) (zeros #[2])
+    pure false
+  catch _ => pure true
+  check rejected "mixed comparison rejects broadcastable shape mismatch"
+  for tolerances in #[(0.02, 0.0), (-0.02, 0.05), (0.02, Float.ofBits 0x7ff0000000000000)] do
+    let rejected ← try
+      let _ ← mixedErrorStats (zeros #[1]) (zeros #[1]) tolerances.1 tolerances.2
+      pure false
+    catch _ => pure true
+    check rejected "mixed comparison rejects invalid tolerance"
+  let rejected ← try
+    let _ ← mixedErrorStats (full #[1] 100.0) (full #[1] 100.0) 1e308
+    pure false
+  catch _ => pure true
+  check rejected "mixed comparison rejects overflow in a finite tolerance bound"
 
 /-- Deterministic int64 token-id tensor `[1, seq]` on `device`. -/
 private def mkIds (vals : Array Int64) (device : Device) : T #[1, vals.size.toUInt64] :=
@@ -161,7 +243,7 @@ private def floatReference (cfg : Config) (m : LagunaForCausalLM cfg) : IO (Lagu
   pure (TensorStruct.map (fun t => toFloat' t) { m with model := { m.model with layers } })
 
 private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
-    (model : LagunaForCausalLM cfg) (tol : Float) : IO Unit := do
+    (model : LagunaForCausalLM cfg) (tol : Float) (bf16CrossShape := false) : IO Unit := do
   let seq : UInt64 := 20
   let ids : T #[1, seq] := mkIds baseIds device
 
@@ -193,6 +275,7 @@ private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
 
   let mut cache := cacheP1
   let mut dStep : Float := 0.0
+  let mut stepStats : MixedErrorStats := {}
   for pos in [prefillLen.toNat : seq.toNat] do
     let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
     let (hiddenStep, cache') ←
@@ -202,11 +285,18 @@ private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
     let logitsRef : T #[1, 1, 1024] := data.slice logitsAll 1 pos.toUInt64 1
     let d ← maxAbsDiff (nn.eraseShape logitsStep) (nn.eraseShape logitsRef)
     if d > dStep then dStep := d
+    if bf16CrossShape then
+      stepStats := stepStats.merge (← mixedErrorStats (nn.eraseShape logitsStep) (nn.eraseShape logitsRef))
 
-  IO.println s!"  [{lbl}] prefill-20 maxAbs={dPrefill}  prefill-12 maxAbs={dPrefillPart}  decode maxAbs={dStep}  (tol={tol})"
+  IO.println s!"  [{lbl}] prefill-20 maxAbs={dPrefill}  prefill-12 maxAbs={dPrefillPart}  decode maxAbs={dStep}  (same-shape tol={tol})"
   check (dPrefill ≤ tol) s!"(a) [{lbl}] prefill-20 logits match full forward (maxAbs={dPrefill})"
-  check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
-  check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
+  if bf16CrossShape then
+    let prefixStats ← mixedErrorStats (nn.eraseShape logitsP) (nn.eraseShape logitsPRef)
+    checkMixedErrors prefixStats s!"(a) [{lbl}] prefill-12"
+    checkMixedErrors stepStats s!"(a) [{lbl}] decode-step"
+  else
+    check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
+    check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
 
 private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol : Float) : IO Unit := do
   let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
@@ -216,7 +306,7 @@ private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol :
     let reference ← floatReference cfg model
     let referenceTol := match device with | .CPU => 2e-4 | _ => 1e-2
     runCacheParityModel cfg device s!"{deviceLabel device}/fp32-moe-oracle" reference referenceTol
-  runCacheParityModel cfg device lbl model tol
+  runCacheParityModel cfg device lbl model tol bf16
 
 /-! ## (b) Sliding-window invariance -/
 
@@ -423,7 +513,7 @@ def main : IO Unit := do
   -- fp32 all-dense 4-layer model: tight tolerance on CPU, looser on CUDA
   -- (different SDPA kernels between causal prefill and q_seq=1 decode).
   runCacheParity denseTiny Device.CPU false 2e-4
-  -- bf16 MoE model on CPU (production dtype; wider documented tolerance).
+  -- BF16 cross-shape errors use a per-logit mixed bound (see module doc).
   runCacheParity lagunaTiny Device.CPU true 0.1
   if ← torch.cuda_is_available then
     runCacheParity denseTiny (Device.CUDA 0) false 1e-2
