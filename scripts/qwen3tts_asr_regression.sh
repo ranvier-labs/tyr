@@ -116,10 +116,6 @@ if [[ ! -f "$WAV_PATH" ]]; then
   exit 1
 fi
 
-if command -v ffprobe >/dev/null 2>&1; then
-  ffprobe -v error -show_entries format=duration -show_entries stream=codec_name,sample_rate,channels -of default=noprint_wrappers=1 "$WAV_PATH"
-fi
-
 "${RUN_ENV[@]}" "$PYTHON_BIN" - "$WAV_PATH" <<'PY'
 import sys, wave, struct, math
 path = sys.argv[1]
@@ -136,7 +132,7 @@ vals = struct.unpack('<' + 'h' * (len(data) // 2), data)
 if ch > 1:
     vals = vals[::ch]
 rms = math.sqrt(sum(v * v for v in vals) / max(1, len(vals)))
-print(f"[qwen3tts-asr] wav stats: sr={sr} samples={len(vals)} rms={rms:.2f}")
+print(f"[qwen3tts-asr] wav stats: format=PCM16 sr={sr} channels={ch} frames={n} duration={n / sr:.6f}s samples={len(vals)} rms={rms:.2f}")
 if rms < 20.0:
     print("[qwen3tts-asr] FAIL: waveform energy too low")
     sys.exit(1)

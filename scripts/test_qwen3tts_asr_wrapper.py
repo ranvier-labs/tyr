@@ -32,13 +32,14 @@ if binary == "Qwen3TTSEndToEnd":
     wav_path = args[args.index("--wav-path") + 1]
     with wave.open(wav_path, "wb") as wav:
         wav.setnchannels(1)
-        wav.setsampwidth(2)
+        wav.setsampwidth(1 if behavior == "wrong_width" else 2)
         wav.setframerate(16000)
-        wav.writeframes(struct.pack("<" + "h" * 160, *([100, -100] * 80)))
+        samples = [0] * 160 if behavior == "silent_audio" else [100, -100] * 80
+        wav.writeframes(struct.pack("<" + "h" * 160, *samples))
     if behavior in ("fallback", "fallback_then_lean"):
         print("Lean speech-tokenizer decode unavailable (synthetic failure); falling back to Python decode bridge.")
         print(f"Saved waveform to {wav_path} (Python decode bridge)")
-    if behavior in ("lean", "fallback_then_lean"):
+    if behavior in ("lean", "fallback_then_lean", "silent_audio", "wrong_width"):
         print(f"Saved waveform to {wav_path} (Lean decoder)")
 elif binary == "Qwen3ASRTranscribe":
     (root / "asr-ran").touch()
@@ -60,8 +61,8 @@ class AsrWrapperTests(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / "lake").write_text(MOCK_LAKE)
         (self.bin / "lake").chmod(0o755)
-        # ffprobe output is optional; keep tests independent of its installation.
-        (self.bin / "ffprobe").write_text("#!/bin/sh\nexit 0\n")
+        # WAV metadata/validation must not depend on an optional system ffprobe.
+        (self.bin / "ffprobe").write_text("#!/bin/sh\necho broken-ffprobe >&2\nexit 127\n")
         (self.bin / "ffprobe").chmod(0o755)
         self.output = self.root / "output"
         self.output.mkdir()
@@ -87,6 +88,8 @@ class AsrWrapperTests(unittest.TestCase):
         result = self.run_wrapper("lean")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("[qwen3tts-asr] PASS", result.stdout)
+        self.assertNotIn("broken-ffprobe", result.stdout)
+        self.assertIn("format=PCM16 sr=16000 channels=1 frames=160 duration=0.010000s", result.stdout)
         self.assertTrue((self.root / "asr-ran").exists())
         args = json.loads((self.root / "tts-args.json").read_text())
         self.assertEqual(args[args.index("--python") + 1], sys.executable)
@@ -137,6 +140,16 @@ class AsrWrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stdout)
         self.assertFalse((self.root / "asr-ran").exists())
         self.assertIn("synthetic TTS stderr retained", (self.output / "tts.log").read_text())
+
+    def test_wave_validation_still_gates_asr_without_ffprobe(self):
+        for behavior, message in [("silent_audio", "waveform energy too low"),
+                                  ("wrong_width", "expected 16-bit PCM")]:
+            with self.subTest(behavior=behavior):
+                result = self.run_wrapper(behavior)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stdout)
+                self.assertNotIn("broken-ffprobe", result.stdout)
+                self.assertFalse((self.root / "asr-ran").exists())
 
 
 if __name__ == "__main__":

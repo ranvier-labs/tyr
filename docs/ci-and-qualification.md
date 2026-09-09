@@ -116,6 +116,8 @@ cache, outside the candidate checkout. The model gates check tokenizer codes
 against the pinned Python reference, then generated-audio energy and a nonempty
 ASR transcription. The latter is a model integration smoke test, not a speech
 quality or transcription-accuracy benchmark. Generation uses sampling seed zero.
+Generated PCM16 WAV metadata and energy are checked with Python's standard
+library; qualification does not require an optional system `ffprobe` installation.
 Both gates retain Lean and Python execution logs. Strict qualification requires
 CUDA device evidence from Lean; the ASR gate additionally requires a completed
 Lean waveform decode and rejects the optional Python decoder fallback. Tokenizer
