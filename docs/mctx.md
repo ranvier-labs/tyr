@@ -52,57 +52,91 @@ training target, and the `searchTree` itself; `Tree.summary` exposes a
 
 ### Search tree
 
-`Tree S E` (`Tyr/Mctx/Tree.lean:7`) is a flat, fixed-capacity store — one
+`Tree S E` (`Tyr/Mctx/Tree.lean`) is a flat, fixed-capacity store — one
 array per node attribute (`nodeVisits`, `rawValues`, `nodeValues`, `parents`,
 `embeddings`) and one nested array per node-per-action edge attribute
 (`childrenIndex`, `childrenPriorLogits`, `childrenVisits`, `childrenRewards`,
-`childrenDiscounts`, `childrenValues`). Capacity is `numSimulations + 1`, so
-the whole search is allocation-free after instantiation. Sentinels:
+`childrenDiscounts`, `childrenValues`). Fresh searches reserve
+`numSimulations + 1` nodes. The arena stays fixed during search, and
+`numAllocated` tracks its contiguous occupied prefix for constant-time node
+allocation. Persistent arrays and model evaluation can still allocate memory.
+Sentinels:
 `ROOT_INDEX = 0`, `NO_PARENT = -1`, `UNVISITED = -1`. The `E` parameter is
 policy-specific extra data — Gumbel MuZero uses it to stash the root Gumbel
-sample (`GumbelMuZeroExtraData.rootGumbel`); the other policies use `Unit`.
+sample and cached sequential-halving schedule (`GumbelMuZeroExtraData`); the
+other policies use `Unit`.
 
 Useful tree operations:
 
-- `Tree.qvalues tree nodeIndex` — `r + γ · v` per action.
+- `Tree.qvalues tree nodeIndex` — expected complete return per action, including
+  evaluated edges without an allocated child.
 - `Tree.summary tree` — root statistics for policies.
 - `resetSearchTree tree` — wipe a tree back to empty, keeping capacity.
-- `getSubtree tree childAction` (`Tyr/Mctx/Tree.lean:133`) — extract the
+- `getSubtree tree childAction` (`Tyr/Mctx/Tree.lean`) — extract the
   subtree under a root action with remapped indices; this is how AlphaZero
   reuses search across environment steps.
 
 ### Search loop
 
-`search` (`Tyr/Mctx/Search.lean:225`) instantiates a tree from the root and
-hands off to `searchWithTree` (:195), which repeats the classic three steps
+`search` (`Tyr/Mctx/Search.lean`) instantiates a tree from the root and
+hands off to `searchWithTree`, which repeats the classic three steps
 `numSimulations` times:
 
-1. `simulate` (:106) — descend from the root with the action-selection
+1. `simulate` — descend from the root with the action-selection
    function until an unvisited edge or the depth cutoff. Root and interior
    selectors are combined by `switchingActionSelectionWrapper`.
-2. `expand` (:134) — call `recurrentFn` on the chosen `(parent, action)`
-   edge, allocate the next free slot (`Tree.nextNodeIndex`), store reward,
-   discount, prior, value, embedding.
-3. `backward` (:162) — back the leaf value up to the root along parent
-   pointers, updating running-average node values and edge visit counts.
+2. Call `recurrentFn` on the chosen `(parent, action)` edge to obtain its
+   reward, discount, prior, value and embedding.
+3. `expandWithStepAndBackup` — allocate the next free slot when available and
+   back the evaluated return up along parent pointers, updating running-average
+   node values and edge visit counts. Evaluations at full capacity still count.
 
 Because the tree is persistent (immutable Lean structures), passing an
 existing tree to `searchWithTree` continues a previous search — the mechanism
 behind AlphaZero subtree reuse.
 
+### Capacity and continuation
+
+`maxNodes` is a hard arena bound; constructors reserve at least the root slot,
+including when passed zero. When no child slot remains, the model is still
+evaluated and its complete return `reward + discount * value` is backed up.
+The edge remains `UNVISITED` because it has no stored child, but its visits and
+mean return contribute to the policy and Q-values. Each ancestor receives the
+current rollout return, keeping its running average distinct from that return.
+This applies to tree, batched, and DAG searches.
+
+For these evaluated but unallocated edges, `childrenValues` stores the mean
+complete return; for allocated children it stores the continuation value.
+Custom Q-transforms should use `tree.qvalues` to handle both representations.
+If rerooting frees a slot and such an edge later acquires a child, its cached
+value changes back to the new child's continuation value. Prior visit counts
+and ancestor averages are retained.
+
+`getSubtree` compacts reachable nodes with the chosen child at index zero,
+including DAG transpositions to earlier nodes and cycles back to the old root.
+Reset and reroot maintain the allocation counter. Manually constructed tree
+records infer that counter once from the occupied visit-count prefix; manual
+record updates must preserve the prefix and `numAllocated` together.
+
+For batched continuation with no explicit `maxDepth`, each row uses its own
+capacity-derived depth limit. Reordering heterogeneous trees therefore cannot
+change another row's cutoff. An explicit depth limit applies to every row.
+
 ### Action selection and Q-transforms
 
-Selectors have two signatures (`Tyr/Mctx/ActionSelection.lean:10-15`):
+Selectors have two signatures (`Tyr/Mctx/ActionSelection.lean`):
 `RootActionSelectionFn` (no depth) and `InteriorActionSelectionFn`. Provided
 implementations:
 
-- `muzeroActionSelection` (:29) — PUCT: `argmax` of normalized Q plus
+- `muzeroActionSelection` — PUCT: `argmax` of normalized Q plus
   `√N · pbC · π / (n + 1)`, with `pbCInit = 1.25`, `pbCBase = 19652`.
   Invalid actions are masked at the root only.
-- `gumbelMuZeroRootActionSelection` (:60) — sequential-halving schedule
-  (`getTableOfConsideredVisits` from `Tyr/Mctx/SeqHalving.lean`) scoring
+- `gumbelMuZeroRootActionSelection` — sequential-halving schedule
+  (from `Tyr/Mctx/SeqHalving.lean`) scores
   `gumbel + logits + normalizedQ` among actions on the current visit round.
-- `gumbelMuZeroInteriorActionSelection` (:80) — deterministic:
+  Each policy caches its one required schedule in `extraData`; direct selector
+  calls without matching cache metadata construct only the needed schedule.
+- `gumbelMuZeroInteriorActionSelection` — deterministic:
   `argmax` of `softmax(logits + completedQ) − visits / (1 + Σvisits)`.
 
 Q-transforms normalize raw Q-values before selection
@@ -116,12 +150,12 @@ paper via `computeMixedValue`).
 
 The public entry points are in `Tyr/Mctx/Policies.lean`:
 
-- `muzeroPolicy` (:61) — fresh tree each call, symmetric Dirichlet root noise,
+- `muzeroPolicy` — fresh tree each call, symmetric Dirichlet root noise,
   PUCT selection everywhere.
-- `alphazeroPolicy` (:103) — same selection, but takes an optional
+- `alphazeroPolicy` — same selection, but takes an optional
   `searchTree` to continue from and a `maxNodes` capacity override, enabling
   subtree persistence across environment steps.
-- `gumbelMuZeroPolicy` (:155) — Gumbel root with sequential halving,
+- `gumbelMuZeroPolicy` — Gumbel root with sequential halving,
   deterministic interior; `maxNumConsideredActions := 16`,
   `gumbelScale := 1.0`. `actionWeights` are
   `softmax(priorLogits + completedQvalues)` rather than raw visit
@@ -150,19 +184,21 @@ one per row. `muzeroPolicyBatched`, `alphazeroPolicyBatched`,
 ### DAG backend
 
 `Tyr/MctxDag/` re-implements the same pipeline over `DagTree S K E`
-(`Tyr/MctxDag/Tree.lean:7`). The differences from `Tree`:
+(`Tyr/MctxDag/Tree.lean`). The differences from `Tree`:
 
 - A `keys : Array K` slot per node plus `keyToNode : Std.HashMap K NodeIndex`
   and a `numAllocated` bump counter (requires `[BEq K] [Hashable K]`).
 - No `parents`/`actionFromParent` arrays: a node can have several parents, so
   backup uses the concrete simulated path (`simulatePath` / `backwardPath` in
-  `Tyr/MctxDag/Search.lean:124,205`).
-- `expandEdge` (:154) hashes the successor embedding with a user-supplied
+  `Tyr/MctxDag/Search.lean`).
+- `expandEdgeForBackup` hashes the successor embedding with a user-supplied
   `keyFn : S → K`; if the key is already in the table, the existing node is
-  reused as the edge target instead of allocating a new one.
+  reused as the edge target instead of allocating a new one. At capacity it
+  returns the evaluated continuation separately for `backwardPath`. The older
+  pair-returning `expandEdge` remains available for compatibility.
 
 The three policies `muzeroPolicyDag`, `alphazeroPolicyDag`,
-`gumbelMuZeroPolicyDag` (`Tyr/MctxDag/Policies.lean:66,107,159`) take the same
+`gumbelMuZeroPolicyDag` (`Tyr/MctxDag/Policies.lean`) take the same
 arguments as their tree counterparts plus `keyFn`, and return
 `PolicyOutput (DagTree S K _)`. There is no batched DAG API.
 
@@ -177,12 +213,12 @@ as the DAG transposition key). It provides a deterministic
 priors/values (`heuristicPriorLogits`, `heuristicValue`), an
 `invalidActionMask`, and ready-made entry points:
 
-- `searchStep?` (:698) — one tree-Gumbel-guided step.
-- `searchStepDagWithPolicy?` (:758) — one DAG step with
+- `searchStep?` — one tree-Gumbel-guided step.
+- `searchStepDagWithPolicy?` — one DAG step with
   `AlphaGradDagMctsPolicy.alphaZero | .gumbelMuZero`; AlphaZero returns the
   tree for carry-over.
 - `searchEpisode?` / `searchEpisodeDag?` / `searchEpisodeDagGumbel?`
-  (:851/:942/:951) — run a full elimination episode, returning
+  — run a full elimination episode, returning
   `Except String AlphaGradEpisodeResult` (`actions0`, `order1`, `stepRewards`,
   `totalReward`). `...FromEdges?` / `...FromGraph?` variants build the initial
   state for you; `replayActions?` replays a fixed action sequence.
@@ -209,14 +245,14 @@ Lower-level pieces you touch when writing a custom policy:
 
 | Function | Location | Purpose |
 | --- | --- | --- |
-| `search` / `searchWithTree` | `Tyr/Mctx/Search.lean:225/195` | run search from a root / existing tree |
-| `instantiateTreeFromRoot(WithCapacity)` | `Tyr/Mctx/Search.lean:71/40` | allocate a tree |
-| `updateTreeWithRoot` | `Tyr/Mctx/Search.lean:82` | refresh root prior/value on a reused tree |
-| `getSubtree` / `resetSearchTree` | `Tyr/Mctx/Tree.lean:133/110` | subtree reuse, tree wipe |
+| `search` / `searchWithTree` | `Tyr/Mctx/Search.lean` | run search from a root / existing tree |
+| `instantiateTreeFromRoot(WithCapacity)` | `Tyr/Mctx/Search.lean` | allocate a tree |
+| `updateTreeWithRoot` | `Tyr/Mctx/Search.lean` | refresh root prior/value on a reused tree |
+| `getSubtree` / `resetSearchTree` | `Tyr/Mctx/Tree.lean` | subtree reuse, tree wipe |
 | `muzeroActionSelection` etc. | `Tyr/Mctx/ActionSelection.lean` | plug-in selectors |
 | `qtransformBy*` | `Tyr/Mctx/QTransforms.lean` | plug-in Q normalizers |
-| `searchDag` / `searchWithDag` | `Tyr/MctxDag/Search.lean:275/244` | DAG equivalents |
-| `searchBatched(WithTrees)` | `Tyr/Mctx/Batched.lean:159/90` | batched search loop |
+| `searchDag` / `searchWithDag` | `Tyr/MctxDag/Search.lean` | DAG equivalents |
+| `searchBatched(WithTrees)` | `Tyr/Mctx/Batched.lean` | batched search loop |
 
 AlphaGrad configs (`Tyr/AD/Elim/AlphaGradMctx.lean`):
 
@@ -303,8 +339,15 @@ lake exe AlphaGradPolicyTrain <mode> [task] [epochs] [episodes-per-epoch]
 ```
 
 Tests live in `Tests/TestMctx*.lean` and `Tests/TestMctxDag.lean` (run via
-`lake exe test_runner`); `Tests/MctxData/` holds JSON tree dumps recorded with
-upstream mctx configuration conventions (`pb_c_base`, qtransform names).
+`lake exe test_runner`); `Tests/MctxData/` holds reference data with upstream
+provenance. The strict reference tests compare deterministic search topology,
+actions, visits, values, and Q-values. The original large dumps remain unchanged
+as historical data. See the [fixture guide](../Tests/MctxData/README.md) for
+generation and migration details.
+
+The native `mctx_bench` executable compares cached scheduling and constant-time
+allocation with the previous algorithms, checking equivalent results before
+reporting CPU timings. See [the benchmark guide](../benchmarks/README-mcts.md).
 
 ## Exploration and reproducibility
 
