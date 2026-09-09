@@ -76,8 +76,10 @@
 #include <thread>
 #include <lean/lean.h>
 #include "tyr_ffi_abi.h"
+#include "tyr_owned_kv_abi.h"
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#include "tyr_attention.h"
 #include <ATen/Generator.h>
 #include <ATen/Context.h>
 #if defined(__has_include)
@@ -2369,6 +2371,37 @@ lean_object* lean_torch_slice_scatter_along_dim_inplace(
   return input;
 }
 
+// Effectful inference cache write: no clone and no autograd history.
+lean_object* lean_torch_copy_slice_io(
+  lean_obj_arg shape, lean_obj_arg src_shape, b_lean_obj_arg input,
+  uint64_t dim, uint64_t start, b_lean_obj_arg src
+) {
+  lean_dec(shape);
+  lean_dec(src_shape);
+  try {
+    torch::NoGradGuard guard;
+    auto dst = borrowTensor(input);
+    auto source = borrowTensor(src);
+    TORCH_CHECK(dim < static_cast<uint64_t>(dst.dim()), "cache copy dimension out of range");
+    TORCH_CHECK(source.dim() == dst.dim(), "cache copy rank mismatch");
+    const auto d = static_cast<int64_t>(dim);
+    TORCH_CHECK(start <= static_cast<uint64_t>(dst.size(d)) &&
+      static_cast<uint64_t>(source.size(d)) <= static_cast<uint64_t>(dst.size(d)) - start,
+      "cache copy exceeds capacity");
+    for (int64_t i = 0; i < dst.dim(); ++i) {
+      TORCH_CHECK(i == d || dst.size(i) == source.size(i), "cache copy shape mismatch");
+    }
+    TORCH_CHECK(dst.device() == source.device() && dst.scalar_type() == source.scalar_type(),
+      "cache copy device/dtype mismatch");
+    dst.narrow(d, static_cast<int64_t>(start), source.size(d)).copy_(source);
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const c10::Error& e) {
+    return mkC10IoError("copySliceIO", e);
+  } catch (const std::exception& e) {
+    return mkStdIoError("copySliceIO", e);
+  }
+}
+
 // Slice a 2D tensor along dimension 0: data[start:start+len, :]
 lean_object* lean_torch_slice_2d(
   uint64_t /*n*/,
@@ -4461,69 +4494,28 @@ lean_object* lean_torch_sdpa_gqa(
 // Each position can only attend to the previous window_size positions
 lean_object* lean_torch_sdpa_gqa_window(
   uint64_t /*batch*/,
-  uint64_t n_head,
-  uint64_t n_kv_head,
+  uint64_t /*n_head*/,
+  uint64_t /*n_kv_head*/,
   uint64_t /*seq*/,
   uint64_t /*head_dim*/,
   b_lean_obj_arg query,
   b_lean_obj_arg key,
   b_lean_obj_arg value,
   double dropout_p,
-  uint8_t is_causal,
+  uint8_t /*is_causal*/,
   uint8_t enable_gqa,
   uint64_t window_size
 ) {
+
   auto q = borrowTensor(query);
   auto k = borrowTensor(key);
   auto v = borrowTensor(value);
-
-  // Handle GQA by expanding KV heads to match Q heads
-  if (enable_gqa) {
-    if (n_head != n_kv_head && n_kv_head > 0) {
-      auto repeat_factor = n_head / n_kv_head;
-      k = k.repeat_interleave(repeat_factor, 1);
-      v = v.repeat_interleave(repeat_factor, 1);
-    }
-  }
-
-  // Get sequence length from query shape: [batch, n_head, seq, head_dim]
-  auto seq_len = q.size(2);
-
-  // Create sliding window causal mask
-  // mask[i,j] = True if position j is NOT attended to by position i
-  // For sliding window: j is attended if (j <= i) AND (i - j < window_size)
-  // Create row indices [seq_len, 1] and col indices [1, seq_len]
-  auto row_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
-  auto col_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);
-
-  // Causal mask: mask where col > row (future positions)
-  auto causal_mask = col_idx > row_idx;
-
-  // Sliding window mask: mask where (row - col) >= window_size (too far in the past)
-  auto window_mask = (row_idx - col_idx) >= static_cast<int64_t>(window_size);
-
-  // Combined mask: either future or too far in the past
-  auto combined_mask = causal_mask | window_mask;
-
-  // Convert boolean mask to attention mask format expected by SDPA
-  // SDPA expects: -inf for masked positions, 0 for unmasked
-  auto attn_mask = torch::where(
-    combined_mask,
-    torch::full({seq_len, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
-    torch::zeros({seq_len, seq_len}, q.options())
-  );
-
-  // Expand mask to [1, 1, seq, seq] for broadcasting over batch and heads
-  attn_mask = attn_mask.unsqueeze(0).unsqueeze(0);
-
-  auto result_ = torch::scaled_dot_product_attention(
-    q, k, v,
-    attn_mask,
-    dropout_p,
-    false  // is_causal=false since we're using explicit mask
-  );
-
-  return fromTorchTensor(result_);
+  // The public window binding has always been causal, including is_causal=false.
+  // Clamp oversized windows to the sequence length before narrowing to int64_t.
+  const auto window = static_cast<int64_t>(std::min<uint64_t>(window_size, q.size(2)));
+  return fromTorchTensor(tyr_ops::bounded_sdpa(q, k, v, c10::nullopt,
+      tyr_ops::AttentionMaskKind::Padding, dropout_p, true, c10::nullopt,
+      enable_gqa != 0, window));
 }
 
 // Scaled dot-product attention with GQA and explicit attention mask
@@ -4532,8 +4524,8 @@ lean_object* lean_torch_sdpa_gqa_window(
 // attn_mask: [batch, seq] - padding mask (1 for valid, 0 for padding)
 lean_object* lean_torch_sdpa_gqa_mask(
   uint64_t /*batch*/,
-  uint64_t n_head,
-  uint64_t n_kv_head,
+  uint64_t /*n_head*/,
+  uint64_t /*n_kv_head*/,
   uint64_t /*seq*/,
   uint64_t /*head_dim*/,
   b_lean_obj_arg query,
@@ -4544,63 +4536,11 @@ lean_object* lean_torch_sdpa_gqa_mask(
   uint8_t is_causal,
   uint8_t enable_gqa
 ) {
-  auto q = borrowTensor(query);
-  auto k = borrowTensor(key);
-  auto v = borrowTensor(value);
-  auto padding_mask = borrowTensor(mask);  // [batch, seq]
 
-  // Handle GQA by expanding KV heads to match Q heads
-  if (enable_gqa) {
-    if (n_head != n_kv_head && n_kv_head > 0) {
-      auto repeat_factor = n_head / n_kv_head;
-      k = k.repeat_interleave(repeat_factor, 1);
-      v = v.repeat_interleave(repeat_factor, 1);
-    }
-  }
-
-  // Get sequence length from query shape: [batch, n_head, seq, head_dim]
-  auto seq_len = q.size(2);
-
-  // Convert padding mask [batch, seq] to attention mask format
-  // SDPA expects: -inf for masked positions, 0 for unmasked
-  // padding_mask: 1 for valid, 0 for padding
-
-  // Expand padding mask to [batch, 1, 1, seq] for key/value masking
-  auto key_mask = padding_mask.unsqueeze(1).unsqueeze(2);  // [batch, 1, 1, seq]
-
-  // Create causal mask if needed: [1, 1, seq, seq]
-  torch::Tensor attn_mask;
-  if (is_causal) {
-    auto row_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
-    auto col_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);
-    auto causal_mask = col_idx > row_idx;  // True for positions to mask (future)
-
-    // Combine with padding mask: mask if either causal or padding
-    // key_mask: [batch, 1, 1, seq], causal_mask: [seq, seq]
-    auto combined_mask = causal_mask.unsqueeze(0).unsqueeze(0) | (key_mask == 0);
-
-    attn_mask = torch::where(
-      combined_mask,
-      torch::full({1, 1, seq_len, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
-      torch::zeros({1, 1, seq_len, seq_len}, q.options())
-    );
-  } else {
-    // Just padding mask
-    attn_mask = torch::where(
-      key_mask == 0,
-      torch::full({1, 1, 1, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
-      torch::zeros({1, 1, 1, seq_len}, q.options())
-    );
-  }
-
-  auto result_ = torch::scaled_dot_product_attention(
-    q, k, v,
-    attn_mask,
-    dropout_p,
-    false  // is_causal=false since we're using explicit mask
-  );
-
-  return fromTorchTensor(result_);
+  return fromTorchTensor(tyr_ops::bounded_sdpa(
+      borrowTensor(query), borrowTensor(key), borrowTensor(value), borrowTensor(mask),
+      tyr_ops::AttentionMaskKind::Padding, dropout_p, is_causal != 0,
+      c10::nullopt, enable_gqa != 0));
 }
 
 // Scaled dot-product attention with GQA and explicit query/key mask.
@@ -4609,8 +4549,8 @@ lean_object* lean_torch_sdpa_gqa_mask(
 // attn_mask: [batch, q_seq, kv_seq] - 1 for allowed attention edges, 0 for masked edges
 LEAN_EXPORT lean_object* lean_torch_sdpa_gqa_mask_qkv(
   uint64_t /*batch*/,
-  uint64_t n_head,
-  uint64_t n_kv_head,
+  uint64_t /*n_head*/,
+  uint64_t /*n_kv_head*/,
   uint64_t /*q_seq*/,
   uint64_t /*kv_seq*/,
   uint64_t /*head_dim*/,
@@ -4621,34 +4561,10 @@ LEAN_EXPORT lean_object* lean_torch_sdpa_gqa_mask_qkv(
   double dropout_p,
   uint8_t enable_gqa
 ) {
-  auto q = borrowTensor(query);
-  auto k = borrowTensor(key);
-  auto v = borrowTensor(value);
-  auto qk_mask = borrowTensor(mask).to(q.device());  // [batch, q_seq, kv_seq]
 
-  if (enable_gqa) {
-    if (n_head != n_kv_head && n_kv_head > 0) {
-      auto repeat_factor = n_head / n_kv_head;
-      k = k.repeat_interleave(repeat_factor, 1);
-      v = v.repeat_interleave(repeat_factor, 1);
-    }
-  }
-
-  auto expanded_mask = qk_mask.unsqueeze(1);  // [batch, 1, q_seq, kv_seq]
-  auto attn_mask = torch::where(
-    expanded_mask == 0,
-    torch::full(expanded_mask.sizes(), -std::numeric_limits<float>::infinity(), q.options()),
-    torch::zeros(expanded_mask.sizes(), q.options())
-  );
-
-  auto result_ = torch::scaled_dot_product_attention(
-    q, k, v,
-    attn_mask,
-    dropout_p,
-    false  // explicit mask already encodes allowed edges
-  );
-
-  return fromTorchTensor(result_);
+  return fromTorchTensor(tyr_ops::bounded_sdpa(
+      borrowTensor(query), borrowTensor(key), borrowTensor(value), borrowTensor(mask),
+      tyr_ops::AttentionMaskKind::Edges, dropout_p, false, c10::nullopt, enable_gqa != 0));
 }
 
 // Scaled dot-product attention with GQA where query and KV sequence lengths may differ.

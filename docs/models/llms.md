@@ -82,6 +82,31 @@ Buffers are preallocated at `[batch, num_kv_heads, maxLen, head_dim]` (`initKVCa
 
 Two families extend it: Qwen3.5's `HybridCache` (`Qwen35/Model.lean:765`) adds per-layer depthwise-conv states `[batch, convDim, kernel]` and recurrent states `[batch, vHeads, kDim, vDim]` for the gated-delta linear-attention layers; Gemma 4's `Gemma4Cache` (`Gemma4/Model.lean:797`) is one KV cache per layer. `QwenAttention.forwardStep` takes a `useTyrFlashAttn : Bool := false` flag that routes eligible decode shapes (BF16, qSeq = 1, head_dim 64 or 128, GQA-valid) through `nn.tyrFlashAttn4d` to a ThunderKittens H100 kernel and falls back to PyTorch SDPA otherwise (`Qwen/Attention.lean:149-157`).
 
+Laguna generation uses `LagunaCacheSession`, an inference-only cache with private
+storage and serialized IO updates. Full-attention layers reserve `maxLen`
+positions; sliding layers reserve `min maxLen sliding_window` positions in a
+ring. Prefill keeps the newest window, and decode writes one K/V position in
+place. Every layer tracks the absolute sequence position separately from its
+physical ring slot. `LagunaModel.initCacheSession`,
+`LagunaForCausalLM.prefillSession`, and `decodeSession` expose this path;
+`LagunaCacheSession.fork` clones storage for independent continuations.
+Aliasing a session shares its state. Invalid positions and table coverage are
+rejected before mutation; a failure during a transition invalidates the session.
+The existing functional Laguna cache methods preserve earlier tensor snapshots.
+
+Full Laguna attention uses implicit causal GQA. The portable SDPA fallback
+processes bounded query chunks and avoids materialized K/V head repeats;
+sliding attention also slices the keys reachable by each chunk. Native fused
+backends remain available without changing process-global backend preferences.
+The bounds concern inference temporaries: training autograd can retain
+intermediates across all chunks. Rectangular cache decode uses non-causal SDPA,
+since every retained key is attendable after its absolute-position RoPE.
+
+`TYR_LAGUNA_CACHE_BENCH=1 lake -R exe LagunaModelTest` runs an optional
+functional/session comparison at capacities 128 and 8192, reporting synchronized
+decode timings and cache tensor bytes. The normal model gate covers ring wrap,
+forks, functional snapshots, and FP32/BF16 parity.
+
 ### Qwen base layer (`torch.qwen`)
 
 `Tyr/Model/Qwen/` contains the shared transformer: `QwenConfig` (defaults are Qwen3-4B; `QwenConfig.fluxKleinTextEncoder` is the 36-layer Flux 2 Klein variant with Q/K norms), `QwenAttention` (GQA with optional per-head Q/K RMSNorm), `QwenMLP` (SwiGLU), `QwenLayer`, and `Qwen3Model cfg` (embedding + `Array QwenLayer` + final `RMSNorm`). `QwenFluxEmbedder` (`Qwen/Embedder.lean:25`) extracts hidden states from selected layers (default `#[8, 17, 26]`) and concatenates them into Flux text embeddings; `loadQwenFluxEmbedderSharded` (`Qwen/Weights.lean:233`) loads it from a sharded checkpoint.

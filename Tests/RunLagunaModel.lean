@@ -212,11 +212,11 @@ private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol :
   let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
   torch.manualSeed 1234
   let model := withStableRoutes cfg (moveModel (← LagunaForCausalLM.init cfg) device bf16)
-  runCacheParityModel cfg device lbl model tol
   if bf16 then
     let reference ← floatReference cfg model
     let referenceTol := match device with | .CPU => 2e-4 | _ => 1e-2
     runCacheParityModel cfg device s!"{deviceLabel device}/fp32-moe-oracle" reference referenceTol
+  runCacheParityModel cfg device lbl model tol
 
 /-! ## (b) Sliding-window invariance -/
 
@@ -284,7 +284,139 @@ private def runGenerateCheck (device : Device) : IO Unit := do
   check (r3.1 == 11) s!"(c) [{lbl}] stream run outSeq={r3.1} == 11"
   check (ncb == 6) s!"(c) [{lbl}] stream callback fired {ncb} == 6 times"
 
+private def expectRejected (action : IO α) (label : String) : IO Unit := do
+  let rejected ← try
+    let _ ← action
+    pure false
+  catch _ => pure true
+  check rejected label
+
+/-- Covers partial and over-window prefill, repeated ring wrap, independent
+forks, preserved functional snapshots, capacity checks, and inference graphs.
+BF16 MoE uses stable expert selection and compares identical decode positions
+against the functional cache. The 0.1 bound permits BF16 reduction rounding
+when ring order permutes paired keys/values; FP32 retains the tight bound. -/
+private def runOwnedCacheCheck (device : Device) (bf16 : Bool := false) : IO Unit := do
+  let cfg := if bf16 then lagunaTiny else denseTiny
+  let lbl := s!"{deviceLabel device}/{if bf16 then "bf16-moe" else "fp32-dense"}"
+  let tol := if bf16 then 0.1 else if device == .CPU then 2e-4 else 1e-2
+  torch.manualSeed 987
+  let model := withStableRoutes cfg (moveModel (← LagunaForCausalLM.init cfg) device bf16)
+  let ids : T #[1, 20] := mkIds baseIds device
+  let tables ← precomputeRotaryTables cfg 20 device
+  for promptLen in #[5, 12] do
+    let session ← model.model.initCacheSession (batch := 1) cfg 20 device
+    let capacities ← session.capacities
+    check (capacities == #[20, 8, 8, 8]) s!"(d) [{lbl}] sliding caches allocate only one window"
+    let promptLenIds : T #[1, promptLen] := data.slice ids 1 0 promptLen
+    let embeds := model.embedTokens promptLenIds
+    let shortTables ← precomputeRotaryTables cfg 1 device
+    expectRejected (model.prefillSession cfg shortTables embeds session)
+      "session rejects short rotary tables without damaging state"
+    let functional0 := model.model.initCache cfg 20 device
+    let (expected, functional) ← model.prefill cfg tables embeds functional0
+    let actual ← model.prefillSession cfg tables embeds session
+    let prefillDiff ← maxAbsDiff (nn.eraseShape actual) (nn.eraseShape expected)
+    check (prefillDiff == 0.0) s!"(d) [{lbl}] owned prefill {promptLen} matches functional exactly"
+    check (!autograd.has_grad_fn actual) s!"(d) [{lbl}] inference output has no autograd graph"
+    expectRejected (model.prefillSession cfg tables embeds session) "session rejects repeated prefill"
+    let tok : T #[1, 1] := data.slice ids 1 promptLen 1
+    expectRejected (model.decodeSession cfg tables (model.embedTokens tok) (promptLen + 1) session)
+      "session rejects skipped positions without damaging state"
+    let forked ← session.fork
+    let mut functional := functional
+    let mut firstLogits : Option (T #[1, cfg.vocab_size]) := none
+    let mut maxDiff := 0.0
+    -- Keep an actual old cache tensor alive across subsequent functional calls.
+    let some oldCache := functional.kvCaches[1]? | throw <| IO.userError "missing sliding cache"
+    let oldK := oldCache.kStoreDyn
+    let oldKCopy := autograd.clone oldK
+    for pos in [promptLen.toNat:20] do
+      let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+      let emb := model.embedTokens tok
+      let (expected, next) ← model.decodeStep cfg tables emb pos.toUInt64 functional
+      functional := next
+      let actual ← model.decodeSession cfg tables emb pos.toUInt64 session
+      let diff ← maxAbsDiff (nn.eraseShape actual) (nn.eraseShape expected)
+      maxDiff := max maxDiff diff
+      if pos == promptLen.toNat then firstLogits := some actual
+    check ((← maxAbsDiff oldK oldKCopy) == 0.0) "functional decode preserves earlier cache snapshots"
+    -- Original ring has wrapped repeatedly. A shallow fork would now read
+    -- overwritten prompt slots and disagree at the fork's first decode step.
+    let forkLogits ← model.decodeSession cfg tables (model.embedTokens tok) promptLen forked
+    let some first := firstLogits | throw <| IO.userError "missing first decode output"
+    check ((← maxAbsDiff (nn.eraseShape forkLogits) (nn.eraseShape first)) == 0.0)
+      s!"(d) [{lbl}] fork owns independent cache storage after ring wrap"
+    expectRejected (model.decodeSession cfg tables (model.embedTokens tok) 20 session)
+      "session rejects capacity overflow"
+    IO.println s!"  [{lbl}] owned cache promptLen={promptLen} decode maxAbs={maxDiff} (tol={tol}), capacities={capacities}"
+    check (maxDiff ≤ tol) s!"(d) [{lbl}] ring decode matches functional cache"
+  expectRejected (model.model.initCacheSession (batch := 1) cfg 0 device)
+    "session rejects zero capacity"
+
+  -- The first layer successfully writes K/V before this second-layer IO error.
+  -- A failure after mutation must invalidate the session rather than expose
+  -- partially advanced buffers, and no-grad must restore the caller's mode.
+  let some second := model.model.layers[1]? | throw <| IO.userError "missing second test layer"
+  let broken := { model with model := { model.model with
+    layers := model.model.layers.set! 1 { second with attnFull := none, attnSliding := none } } }
+  let prompt : T #[1, 5] := data.slice ids 1 0 5
+  let wasEnabled ← autograd.is_grad_enabled
+  try
+    for enabled in #[true, false] do
+      autograd.set_grad_enabled enabled
+      let session ← broken.model.initCacheSession (batch := 1) cfg 20 device
+      expectRejected (broken.prefillSession cfg tables (broken.embedTokens prompt) session)
+        s!"(d) [{lbl}] malformed second layer fails after an earlier cache write"
+      check ((← autograd.is_grad_enabled) == enabled)
+        s!"(d) [{lbl}] failed inference restores caller gradient mode {enabled}"
+      expectRejected session.capacities "partially updated session cannot expose capacities"
+      expectRejected session.fork "partially updated session cannot be forked"
+  finally
+    autograd.set_grad_enabled wasEnabled
+
+/-- Opt-in timing of identical eight-token decode workloads. Allocation and
+prefill are outside the timer; CUDA is synchronized at both boundaries. -/
+private def runCacheBenchmark (device : Device) : IO Unit := autograd.no_grad do
+  let cfg := denseTiny
+  torch.manualSeed 987
+  let model := moveModel (← LagunaForCausalLM.init cfg) device false
+  let ids : T #[1, 20] := mkIds baseIds device
+  let prompt : T #[1, 12] := data.slice ids 1 0 12
+  let synchronize : IO Unit := if device == .CPU then pure () else torch.cuda_synchronize
+  for capacity in #[(128 : UInt64), 8192] do
+    let tables ← precomputeRotaryTables cfg capacity device
+    let mut functionalMs : Nat := 0
+    let mut ownedMs : Nat := 0
+    let mut ownedCapacity : UInt64 := 0
+    for _ in [:3] do
+      let (_, initial) ← model.prefill cfg tables (model.embedTokens prompt)
+        (model.model.initCache cfg capacity device)
+      let mut cache := initial
+      synchronize
+      let start ← IO.monoMsNow
+      for pos in [12:20] do
+        let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+        let (_, next) ← model.decodeStep cfg tables (model.embedTokens tok) pos.toUInt64 cache
+        cache := next
+      synchronize
+      functionalMs := functionalMs + ((← IO.monoMsNow) - start)
+      let session ← model.model.initCacheSession (batch := 1) cfg capacity device
+      ownedCapacity := (← session.capacities).foldl (· + ·) 0
+      let _ ← model.prefillSession cfg tables (model.embedTokens prompt) session
+      synchronize
+      let start ← IO.monoMsNow
+      for pos in [12:20] do
+        let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+        let _ ← model.decodeSession cfg tables (model.embedTokens tok) pos.toUInt64 session
+      synchronize
+      ownedMs := ownedMs + ((← IO.monoMsNow) - start)
+    let bytesPerPosition := 2 * cfg.num_key_value_heads * cfg.head_dim * 4
+    IO.println s!"CACHE_BENCH device={deviceLabel device} capacity={capacity} tokens=24 functional_ms={functionalMs} owned_ms={ownedMs} functional_cache_bytes={capacity * cfg.num_hidden_layers * bytesPerPosition} owned_cache_bytes={ownedCapacity * bytesPerPosition}"
+
 def main : IO Unit := do
+  for name in #["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TYR_LIBTORCH_DIR"] do
+    IO.println s!"runtime {name}={(← IO.getEnv name).getD "<unset>"}"
   checkComparisonFailures
   IO.println "-- (a) KV-cache parity: full forward vs prefill + decode"
   -- fp32 all-dense 4-layer model: tight tolerance on CPU, looser on CUDA
@@ -315,4 +447,17 @@ def main : IO Unit := do
   else
     IO.println "CUDA not available; skipped CUDA (c) cases."
 
+  IO.println "-- (d) owned cache sessions and ring storage"
+  runOwnedCacheCheck Device.CPU
+  runOwnedCacheCheck Device.CPU true
+  if ← torch.cuda_is_available then
+    runOwnedCacheCheck (Device.CUDA 0)
+    runOwnedCacheCheck (Device.CUDA 0) true
+    torch.cuda_synchronize
+  else
+    IO.println "CUDA not available; skipped CUDA (d) cases."
+
+  if (← IO.getEnv "TYR_LAGUNA_CACHE_BENCH") == some "1" then
+    runCacheBenchmark Device.CPU
+    if ← torch.cuda_is_available then runCacheBenchmark (Device.CUDA 0)
   IO.println "All Laguna model tests passed."

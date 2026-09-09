@@ -1217,7 +1217,8 @@ namespace nn
 /-- Scaled dot-product attention with Group-Query Attention (GQA) support.
     Q: [batch, n_head, seq, head_dim]
     K, V: [batch, n_kv_head, seq, head_dim]
-    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+    When enable_gqa=true, each KV head serves a group of query heads. Fused
+    backends consume grouped K/V directly; portable fallback avoids materialized repeats. -/
 @[extern "lean_torch_sdpa_gqa"]
 opaque scaledDotProductAttentionGQA
     {batch n_head n_kv_head seq head_dim : UInt64}
@@ -1232,7 +1233,8 @@ opaque scaledDotProductAttentionGQA
 /-- Scaled dot-product attention with GQA where query and KV sequence lengths may differ.
     Q: [batch, n_head, q_seq, head_dim]
     K, V: [batch, n_kv_head, kv_seq, head_dim]
-    Useful for KV-cache decoding with q_seq=1 and kv_seq growing over time. -/
+    Causality uses upper-left alignment: query i may attend to keys j ≤ i.
+    For KV-cache decoding with q_seq=1, pass is_causal=false to attend to all cached keys. -/
 @[extern "lean_torch_sdpa_gqa_qkv"]
 opaque scaledDotProductAttentionGQAQKV
     {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
@@ -1248,9 +1250,12 @@ opaque scaledDotProductAttentionGQAQKV
     Q: [batch, n_head, seq, head_dim]
     K, V: [batch, n_kv_head, seq, head_dim]
     window_size: number of positions each query can attend to (sliding window).
-    When enable_gqa=true, K/V heads are automatically repeated to match Q heads.
-    Note: This creates a causal mask where each position attends only to the
-    previous window_size positions (including itself). -/
+    When enable_gqa=true, each KV head serves a group of query heads. Fused
+    backends consume grouped K/V directly; portable fallback avoids materialized repeats.
+    This binding is always causal (including when is_causal=false): each position
+    attends only to the previous window_size positions, including itself. A zero
+    window masks every key. Query chunks and reachable KV slices bound temporary
+    fallback work; autograd may retain intermediates from all chunks for backward. -/
 @[extern "lean_torch_sdpa_gqa_window"]
 opaque scaledDotProductAttentionGQAWindow
     {batch n_head n_kv_head seq head_dim : UInt64}
@@ -1267,7 +1272,8 @@ opaque scaledDotProductAttentionGQAWindow
     Q: [batch, n_head, seq, head_dim]
     K, V: [batch, n_kv_head, seq, head_dim]
     attn_mask: [batch, seq] - padding mask (1 for valid, 0 for padding)
-    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+    When enable_gqa=true, each KV head serves a group of query heads. Fused
+    backends consume grouped K/V directly; portable fallback avoids materialized repeats. -/
 @[extern "lean_torch_sdpa_gqa_mask"]
 opaque scaledDotProductAttentionGQAMask
     {batch n_head n_kv_head seq head_dim : UInt64}
@@ -1284,7 +1290,8 @@ opaque scaledDotProductAttentionGQAMask
     Q: [batch, n_head, q_seq, head_dim]
     K, V: [batch, n_kv_head, kv_seq, head_dim]
     attn_mask: [batch, q_seq, kv_seq] with 1 for allowed attention edges and 0 for masked edges.
-    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+    When enable_gqa=true, each KV head serves a group of query heads. Fused
+    backends consume grouped K/V directly; portable fallback avoids materialized repeats. -/
 @[extern "lean_torch_sdpa_gqa_mask_qkv"]
 opaque scaledDotProductAttentionGQAMaskQKV
     {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}

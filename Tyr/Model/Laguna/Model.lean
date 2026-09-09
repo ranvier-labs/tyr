@@ -40,22 +40,18 @@
   - The random-init path (`*.init`) synthesizes NVFP4 expert banks from int64
     "bytes" + F32 scales (dequant only needs `toLong`/`toFloat'`); checkpoint
     loading replaces them with real U8 / F8_E4M3 tensors (see Weights.lean).
-  - SDPA op choice: attention NEVER uses `nn.scaledDotProductAttentionGQA` /
-    `...GQAQKV`. Those bindings route through `tyr_ops::flash_attn_dispatch`,
-    whose CUDA flash-only attempt throws `c10::Error` when flash declines the
-    input (always for fp32; on sm_121 also for bf16 — this torch build's
-    kernels cover ≤ sm_120) and the exception cannot be caught across the
-    vendored libstdc++/libc++ ABI mix, so the process hard-terminates
-    (`libc++abi: terminating`). Instead: full-attention prefill uses
-    `GQAMask` with an all-ones padding mask (identical causal math), sliding
-    prefill uses `GQAWindow`, and decode uses `GQAMaskQKV` with an all-ones
-    qk mask — all of which call `torch::scaled_dot_product_attention`
-    directly with default backends. Same math, works on CPU + CUDA.
-    Caveat: the explicit `[seq, seq]` masks make long-context prefill
-    memory-heavier than flash; revisiting this needs a cc/ change (out of
-    scope for this wave).
+  - Full prefill uses implicit causal GQA. Sliding attention bounds temporary
+    masks and scores by query chunks and reachable window keys. The portable
+    dispatcher consults available backends without changing global flags;
+    its math fallback avoids materialized K/V head repeats. These bounds apply
+    to inference; autograd may retain chunk intermediates for backward.
+  - Generation uses an owned inference session: full layers append in place,
+    sliding layers store one window in a ring, and fork explicitly clones
+    storage. The functional cache APIs retain snapshot semantics.
 -/
 import Tyr.Torch
+import Tyr.Inference.OwnedKV
+import Std.Sync.Mutex
 import Tyr.TensorStruct
 import Tyr.Module.Derive
 import Tyr.Model.Qwen.Attention
@@ -233,12 +229,8 @@ private def gateAndOut {batch seq numHeads : UInt64}
     reshape (attn * gate4) #[batch, seq, numHeads * cfg.head_dim]
   linear3d gated m.o_proj
 
-/-- Uncached full-sequence forward (sliding layers use the window SDPA op).
-
-    SDPA op choice: full layers run through `GQAMask` with an all-ones padding
-    mask (the C++ builds the causal mask internally and calls
-    `torch::scaled_dot_product_attention` directly), NOT the bare `GQA` op —
-    see the module doc for the ABI reason. -/
+/-- Uncached full-sequence forward: implicit causal attention for full layers,
+    bounded window attention for sliding layers. -/
 def forward {batch seq rotaryDim numHeads : UInt64}
     (cfg : Config)
     (m : LagunaAttention cfg numHeads)
@@ -254,9 +246,7 @@ def forward {batch seq rotaryDim numHeads : UInt64}
   let attn : T #[batch, numHeads, seq, cfg.head_dim] :=
     match window with
     | some w => nn.scaledDotProductAttentionGQAWindow qh kh vh 0.0 true true w
-    | none =>
-      let padMask : T #[batch, seq] := onesOn qh.device
-      nn.scaledDotProductAttentionGQAMask qh kh vh padMask 0.0 true true
+    | none => nn.scaledDotProductAttentionGQA qh kh vh 0.0 true true
   let attn : T #[batch, seq, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
   gateAndOut cfg m x attn
 
@@ -291,9 +281,7 @@ def forwardWithCache {batch seq rotaryDim numHeads : UInt64}
   let attn : T #[batch, numHeads, seq, cfg.head_dim] :=
     match window with
     | some w => nn.scaledDotProductAttentionGQAWindow qh kh vh 0.0 true true w
-    | none =>
-      let padMask : T #[batch, seq] := onesOn qh.device
-      nn.scaledDotProductAttentionGQAMask qh kh vh padMask 0.0 true true
+    | none => nn.scaledDotProductAttentionGQA qh kh vh 0.0 true true
   let attn : T #[batch, seq, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
   (gateAndOut cfg m x attn, cache')
 
@@ -334,12 +322,10 @@ def forwardStep {batch rotaryDim numHeads : UInt64}
   let start : UInt64 := kvLen - useLen
   let kAll : T #[batch, cfg.num_key_value_heads, useLen, cfg.head_dim] := data.slice kStore' 2 start useLen
   let vAll : T #[batch, cfg.num_key_value_heads, useLen, cfg.head_dim] := data.slice vStore' 2 start useLen
-  -- All-ones [batch, 1, useLen] qk mask (every cached entry is attendable,
-  -- including inside the truncated sliding window); `GQAMaskQKV` calls
-  -- `torch::scaled_dot_product_attention` directly (see module doc).
-  let qkMask : T #[batch, 1, useLen] := onesOn qh.device
+  -- Every retained key is attendable. Rectangular SDPA must be non-causal:
+  -- its causal mode is upper-left aligned and would expose only key zero.
   let attn : T #[batch, numHeads, 1, cfg.head_dim] :=
-    nn.scaledDotProductAttentionGQAMaskQKV qh kAll vAll qkMask 0.0 true
+    nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
   let attn : T #[batch, 1, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
   let cache' : KVCache cfg batch := {
     kStoreDyn := nn.eraseShape kStore'
@@ -349,6 +335,56 @@ def forwardStep {batch rotaryDim numHeads : UInt64}
   }
   (gateAndOut cfg m x attn, cache')
 
+/-- Internal effectful path. Cache tensors never escape the owning session.
+Sliding stores use absolute-position modulo capacity; paired K/V order is
+irrelevant to single-query attention after RoPE has been applied. -/
+private def forwardOwned {batch seq rotaryDim numHeads : UInt64}
+    (cfg : Config) (m : LagunaAttention cfg numHeads)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, rotaryDim / 2]) (sin : T #[seq, rotaryDim / 2])
+    (window : Option UInt64) (prefill : Bool) (cache : KVCache cfg batch)
+    : IO (T #[batch, seq, cfg.hidden_size] × KVCache cfg batch) := do
+  let (q, k, v) := qkvRope cfg m x cos sin
+  let qh : T #[batch, numHeads, seq, cfg.head_dim] := nn.transpose_for_attention q
+  let kh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention k
+  let vh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention v
+  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike kh (reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike vh (reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  if prefill then
+    -- Retain only the prompt tail, placing each entry at its absolute ring slot.
+    let retained := min seq cache.maxLen
+    let sourceStart := seq - retained
+    let slot := sourceStart % cache.maxLen
+    let first := min retained (cache.maxLen - slot)
+    data.copySliceIO kStore 2 slot (data.slice kh 2 sourceStart first)
+    data.copySliceIO vStore 2 slot (data.slice vh 2 sourceStart first)
+    if first < retained then
+      data.copySliceIO kStore 2 0 (data.slice kh 2 (sourceStart + first) (retained - first))
+      data.copySliceIO vStore 2 0 (data.slice vh 2 (sourceStart + first) (retained - first))
+  else
+    let slot := cache.seq % cache.maxLen
+    data.copySliceIO kStore 2 slot kh
+    data.copySliceIO vStore 2 slot vh
+  let total := if prefill then seq else cache.seq + seq
+  let attn : T #[batch, numHeads, seq, cfg.head_dim] :=
+    if prefill then
+      match window with
+      | some w => nn.scaledDotProductAttentionGQAWindow qh kh vh 0.0 true true w
+      | none => nn.scaledDotProductAttentionGQA qh kh vh 0.0 true true
+    else
+      let useLen := min total cache.maxLen
+      let kAll := data.slice kStore 2 0 useLen
+      let vAll := data.slice vStore 2 0 useLen
+      nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+  let out := gateAndOut cfg m x (nn.transpose_from_attention attn)
+  return (out, {
+    kStoreDyn := nn.eraseShape kStore
+    vStoreDyn := nn.eraseShape vStore
+    seq := total
+    maxLen := cache.maxLen })
+
 end LagunaAttention
 
 /-! ## KV cache -/
@@ -357,6 +393,33 @@ end LagunaAttention
     layers keep a full-length store and truncate reads at decode time). -/
 structure LagunaCache (cfg : Config) (batch : UInt64) where
   kvCaches : Array (LagunaAttention.KVCache cfg batch)
+
+/-- An inference cache with private, mutable storage. Aliases refer to the same
+serialized session; `fork` creates independent storage. Failed transitions
+invalidate the session. Use the functional `LagunaCache` API for training or
+persistent tensor snapshots. Sliding layers allocate only one window. -/
+structure LagunaCacheSession (cfg : Config) (batch : UInt64) where
+  private mk ::
+  private state : Std.Mutex (Option (LagunaCache cfg batch))
+  private maxLen : UInt64
+
+namespace LagunaCacheSession
+
+/-- Copy a session at its current position, including independent K/V buffers. -/
+def fork (session : LagunaCacheSession cfg batch) : IO (LagunaCacheSession cfg batch) :=
+  session.state.atomically do
+    let some cache ← get | throw <| IO.userError "Laguna cache session is invalid"
+    let copied := cache.kvCaches.map fun kv => { kv with
+      kStoreDyn := autograd.clone kv.kStoreDyn, vStoreDyn := autograd.clone kv.vStoreDyn }
+    return ⟨← Std.Mutex.new (some { kvCaches := copied }), session.maxLen⟩
+
+/-- Layer capacities, for memory accounting without exposing mutable tensors. -/
+def capacities (session : LagunaCacheSession cfg batch) : IO (Array UInt64) :=
+  session.state.atomically do
+    let some cache ← get | throw <| IO.userError "Laguna cache session is invalid"
+    return cache.kvCaches.map (·.maxLen)
+
+end LagunaCacheSession
 
 /-! ## Decoder layer -/
 
@@ -552,6 +615,28 @@ def forwardStep {batch : UInt64}
   let ffn ← ffnForward cfg layer h3
   pure (h2 + ffn, cache')
 
+private def forwardOwned {batch seq : UInt64}
+    (cfg : Config) (layer : LagunaLayer cfg)
+    (x : T #[batch, seq, cfg.hidden_size]) (tables : LagunaRotaryTables)
+    (position : UInt64) (prefill : Bool) (kv : LagunaAttention.KVCache cfg batch)
+    : IO (T #[batch, seq, cfg.hidden_size] × LagunaAttention.KVCache cfg batch) := do
+  let h1 := rmsNormWeighted3d layer.input_layernorm x cfg.rms_norm_eps
+  let (mixed, kv') ← match layer.attnFull, layer.attnSliding with
+    | some a, _ =>
+      let cos : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos position seq
+      let sin : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin position seq
+      a.forwardOwned (rotaryDim := cfg.rotaryDimFull) cfg h1 cos sin none prefill kv
+    | _, some a =>
+      let cos : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos position seq
+      let sin : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin position seq
+      a.forwardOwned (rotaryDim := cfg.rotaryDimSliding) cfg h1 cos sin
+        (some cfg.sliding_window) prefill kv
+    | _, _ => throw <| IO.userError "Laguna cache session requires attention in every layer"
+  let h2 := x + mixed
+  let h3 := rmsNormWeighted3d layer.post_attention_layernorm h2 cfg.rms_norm_eps
+  let ffn ← ffnForward cfg layer h3
+  return (h2 + ffn, kv')
+
 end LagunaLayer
 
 /-! ## Model -/
@@ -649,6 +734,62 @@ def forwardStep {batch : UInt64}
     c := cNext
   return (rmsNormWeighted3d m.norm h cfg.rms_norm_eps, c)
 
+/-- Allocate an owned inference session. Full layers reserve `maxLen`; sliding
+layers reserve `min maxLen sliding_window`. No cache tensor is publicly exposed. -/
+def initCacheSession {batch : UInt64} (cfg : Config) (m : LagunaModel cfg)
+    (maxLen : UInt64) (device : Device) : IO (LagunaCacheSession cfg batch) := do
+  if maxLen == 0 || cfg.sliding_window == 0 then
+    throw <| IO.userError "Laguna cache capacity and sliding window must be positive"
+  if m.layers.isEmpty then
+    throw <| IO.userError "Laguna cache session requires at least one layer"
+  let mut caches := #[]
+  for layer in m.layers do
+    let capacity := if layer.attnFull.isSome then maxLen else min maxLen cfg.sliding_window
+    caches := caches.push (qwen.QwenAttention.initKVCache capacity
+      (batch := batch) (num_kv_heads := cfg.num_key_value_heads) (head_dim := cfg.head_dim) device)
+  return ⟨← Std.Mutex.new (some { kvCaches := caches }), maxLen⟩
+
+/-- Execute one serialized inference transition, invalidating on partial failure.
+Only fresh prefill and subsequent single-token steps are supported. -/
+private def forwardSession {batch seq : UInt64} (cfg : Config) (m : LagunaModel cfg)
+    (x : T #[batch, seq, cfg.hidden_size]) (tables : LagunaRotaryTables)
+    (position : UInt64) (prefill : Bool) (session : LagunaCacheSession cfg batch)
+    : IO (T #[batch, seq, cfg.hidden_size]) := session.state.atomically do
+  let some cache ← get | throw <| IO.userError "Laguna cache session is invalid"
+  if seq == 0 || position > session.maxLen || seq > session.maxLen - position then
+    throw <| IO.userError "Laguna cache transition exceeds capacity or has an empty input"
+  if x.runtimeShape != #[batch, seq, cfg.hidden_size] then
+    throw <| IO.userError "Laguna cache input shape mismatch"
+  for (table, dim) in #[(tables.fullCos, cfg.rotaryDimFull / 2),
+      (tables.fullSin, cfg.rotaryDimFull / 2), (tables.slidingCos, cfg.rotaryDimSliding / 2),
+      (tables.slidingSin, cfg.rotaryDimSliding / 2)] do
+    let shape := table.runtimeShape
+    if shape.size != 2 || shape.getD 0 0 < position + seq || shape.getD 1 0 != dim ||
+        table.device != x.device then
+      throw <| IO.userError "Laguna cache rotary table shape, coverage or device mismatch"
+  if cache.kvCaches.size != m.layers.size then
+    throw <| IO.userError "Laguna cache layer count mismatch"
+  if prefill && position != 0 || !prefill && seq != 1 then
+    throw <| IO.userError "Laguna cache expects fresh prefill or single-token decode"
+  for kv in cache.kvCaches do
+    if kv.seq != position || (!prefill && position == 0) then
+      throw <| IO.userError "Laguna cache position mismatch; prefill once before decode"
+  -- Validation failures above leave the session usable. Any failure below may
+  -- have mutated a subset of layers, so no partially updated state is reusable.
+  set (none : Option (LagunaCache cfg batch))
+  let (hidden, updated) ← autograd.no_grad do
+    let mut h := x
+    let mut caches := cache.kvCaches
+    for i in [:m.layers.size] do
+      let some layer := m.layers[i]? | throw <| IO.userError "missing Laguna layer"
+      let some cached := caches[i]? | throw <| IO.userError "missing Laguna cache"
+      let (next, kv) ← layer.forwardOwned cfg h tables position prefill cached
+      h := next
+      caches := caches.set! i kv
+    return (rmsNormWeighted3d m.norm h cfg.rms_norm_eps, { kvCaches := caches : LagunaCache cfg batch })
+  set (some updated)
+  return hidden
+
 end LagunaModel
 
 /-! ## ForCausalLM + generation -/
@@ -712,6 +853,22 @@ def decodeStep {batch : UInt64}
   let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d hidden m.lmHead
   pure (reshape logits3 #[batch, cfg.vocab_size], cache')
 
+/-- Inference-only prefill into an owned cache session. The session must be fresh. -/
+def prefillSession {batch seq : UInt64} (cfg : Config) (m : LagunaForCausalLM cfg)
+    (tables : LagunaRotaryTables) (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
+    (session : LagunaCacheSession cfg batch) : IO (T #[batch, cfg.vocab_size]) := autograd.no_grad do
+  let hidden ← m.model.forwardSession cfg inputsEmbeds tables 0 true session
+  let lastHidden : T #[batch, 1, cfg.hidden_size] := data.slice hidden 1 (seq - 1) 1
+  return reshape (linear3d lastHidden m.lmHead) #[batch, cfg.vocab_size]
+
+/-- Append one token at the next absolute position without copying cache buffers. -/
+def decodeSession {batch : UInt64} (cfg : Config) (m : LagunaForCausalLM cfg)
+    (tables : LagunaRotaryTables) (tokenEmbed : T #[batch, 1, cfg.hidden_size])
+    (position : UInt64) (session : LagunaCacheSession cfg batch)
+    : IO (T #[batch, cfg.vocab_size]) := autograd.no_grad do
+  let hidden ← m.model.forwardSession cfg tokenEmbed tables position false session
+  return reshape (linear3d hidden m.lmHead) #[batch, cfg.vocab_size]
+
 private partial def decodeLoopCached {batch : UInt64}
     (cfg : Config)
     (m : LagunaForCausalLM cfg)
@@ -720,7 +877,7 @@ private partial def decodeLoopCached {batch : UInt64}
     (eosTokenIds : Array UInt64)
     (finished : T #[batch])
     (remaining : Nat)
-    (cache : LagunaCache cfg batch)
+    (cache : LagunaCacheSession cfg batch)
     (lastLogits : T #[batch, cfg.vocab_size])
     (onStep : Option (StreamCallback batch))
     (generatedSoFar : UInt64)
@@ -754,12 +911,12 @@ private partial def decodeLoopCached {batch : UInt64}
       false
     else
       !(any (logical_not finished'))
-  if stop then
+  if stop || remaining == 1 then
     return ⟨curSeq + 1, appended⟩
   else
     let nextEmb : T #[batch, 1, cfg.hidden_size] := m.embedTokens nextCol
-    let (nextLogits, cache') ← decodeStep cfg m tables nextEmb curSeq cache
-    decodeLoopCached cfg m tables strategy eosTokenIds finished' (remaining - 1) cache'
+    let nextLogits ← decodeSession cfg m tables nextEmb curSeq cache
+    decodeLoopCached cfg m tables strategy eosTokenIds finished' (remaining - 1) cache
       nextLogits onStep (generatedSoFar + 1) appended
 
 /-- Exact generation entry point using KV-caching. -/
@@ -771,19 +928,21 @@ private def generateCore {batch seq : UInt64}
     (strategy : SamplingStrategy)
     (eosTokenIds : Array UInt64)
     (onStep : Option (StreamCallback batch))
-    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := autograd.no_grad do
   if seq == 0 then
     throw <| IO.userError "generate requires non-empty prompt sequence"
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
   let inputsEmbeds := m.embedTokens inputIds
+  if maxNewTokens > (0xffffffffffffffff : UInt64) - seq then
+    throw <| IO.userError "Laguna generation length overflow"
   let maxLen := seq + maxNewTokens
   let tables ← precomputeRotaryTables cfg maxLen inputsEmbeds.device
-  let cache := LagunaModel.initCache cfg m.model maxLen inputsEmbeds.device
-  let (logits, caches) ← prefill cfg m tables inputsEmbeds cache
+  let cache ← LagunaModel.initCacheSession cfg m.model maxLen inputsEmbeds.device
+  let logits ← prefillSession cfg m tables inputsEmbeds cache
   let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
   decodeLoopCached cfg m tables strategy eosTokenIds finished0 maxNewTokens.toNat
-    caches logits onStep 0 inputIds
+    cache logits onStep 0 inputIds
 
 /-- Greedy/sampled generation from token ids. Terminates when every row is
     finished (`eosTokenIds`, default `cfg.eos_token_ids`) or the
