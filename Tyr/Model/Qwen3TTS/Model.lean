@@ -45,13 +45,21 @@ def getSupportedSpeakers (_m : Qwen3TTSForConditionalGeneration cfg) : Array Str
   Qwen3TTSConfig.supportedSpeakers cfg
 
 /-- Extract speaker embedding from mel features `[batch, frames, melDim]`.
+    Features are aligned to the speaker encoder's weight dtype and device.
     The caller is responsible for mel preprocessing and sample-rate alignment. -/
 def extractSpeakerEmbedding {batch frames : UInt64}
     (m : Qwen3TTSForConditionalGeneration cfg)
     (mel : T #[batch, frames, cfg.speakerEncoderConfig.melDim])
     : IO (T #[batch, cfg.speakerEncoderConfig.encDim]) := do
   match m.speakerEncoder with
-  | some enc =>
+  | some enc => do
+      let targetDType := enc.tdnn0.weight.dtype
+      let mel ←
+        if mel.dtype == targetDType then pure mel
+        else match targetDType with
+          | .Float32 => pure (toFloat' mel)
+          | .BFloat16 => pure (toBFloat16' mel)
+          | _ => throw <| IO.userError s!"Qwen3-TTS speaker encoder cannot convert mel dtype {mel.dtype} to weight dtype {targetDType}; provide matching features"
       let mel : T #[batch, frames, cfg.speakerEncoderConfig.melDim] :=
         if mel.device == enc.tdnn0.weight.device then mel else mel.to enc.tdnn0.weight.device
       pure (enc.forward mel)

@@ -150,6 +150,40 @@ def testQwen3TTSSpeakerEmbedding : IO Unit := do
   LeanTest.assertTrue (Float.isFinite s) "speaker embedding sum should be finite"
 
 @[test]
+def testQwen3TTSSpeakerEmbeddingAlignsFeatureDType : IO Unit := do
+  -- Small ECAPA blocks exercise the complete speaker path with real convolutions.
+  let cfg : Qwen3TTSConfig := { tinyCfg with speakerEncoderConfig := {
+    tinyCfg.speakerEncoderConfig with
+    encChannels := #[8, 8, 8, 8, 24]
+    encAttentionChannels := 4
+    encRes2NetScale := 2
+    encSeChannels := 4 } }
+  let original ← Qwen3TTSForConditionalGeneration.init cfg
+  let some baseEncoder := original.speakerEncoder
+    | throw <| IO.userError "Missing test speaker encoder"
+  let features : T #[2, 12, cfg.speakerEncoderConfig.melDim] ←
+    randn #[2, 12, cfg.speakerEncoderConfig.melDim]
+  for bf16Weights in #[false, true] do
+    let enc := if bf16Weights then TensorStruct.map (fun t => toBFloat16' t) baseEncoder else baseEncoder
+    let model := { original with speakerEncoder := some enc }
+    for bf16Features in #[false, true] do
+      let mel := if bf16Features then toBFloat16' features else features
+      let originalDType := mel.dtype
+      let explicit := if bf16Weights then toBFloat16' mel else toFloat' mel
+      let expected := enc.forward explicit
+      let actual ← model.extractSpeakerEmbedding mel
+      LeanTest.assertEqual actual.runtimeShape #[2, cfg.speakerEncoderConfig.encDim]
+        "Speaker output shape follows the model configuration"
+      LeanTest.assertEqual actual.dtype enc.tdnn0.weight.dtype
+        "Speaker output uses the loaded weight dtype"
+      LeanTest.assertTrue (actual.device == enc.tdnn0.weight.device)
+        "Speaker output uses the loaded weight device"
+      LeanTest.assertEqual mel.dtype originalDType "Feature alignment does not mutate caller dtype"
+      let error := nn.item (nn.maxAll (nn.abs (sub (toFloat' actual) (toFloat' expected))))
+      LeanTest.assertEqual error 0.0
+        "Automatic feature alignment exactly matches an explicit cast for FP32/BF16 weights and inputs"
+
+@[test]
 def testQwen3TTSSpeakerEmbeddingUnavailableForNonBaseModel : IO Unit := do
   let cfg : Qwen3TTSConfig := {
     tinyCfg with
