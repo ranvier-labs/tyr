@@ -518,7 +518,7 @@ def generateFrame {batch seq : UInt64} (cfg : TalkerConfig)
   if cfg.numCodeGroups == 0 then
     return {
       codes := torch.zeros #[batch, 0] false talkerInputs.device
-      summedEmbedding := torch.zeros #[batch, 1, cfg.hiddenSize] false talkerInputs.device
+      summedEmbedding := castLike talkerInputs (torch.zeros #[batch, 1, cfg.hiddenSize] false talkerInputs.device)
     }
 
   let hidden := TalkerModel.forwardEmbeds cfg m.model talkerInputs attnMask
@@ -628,7 +628,8 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
       if cosRaw.device == cacheDevice then cosRaw else cosRaw.to cacheDevice
     let sinAll : T #[seq + maxFrames + 1, cfg.headDim / 2] :=
       if sinRaw.device == cacheDevice then sinRaw else sinRaw.to cacheDevice
-    let mut lastHidden : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice
+    let mut lastHidden : T #[batch, 1, cfg.hiddenSize] :=
+      castLike talkerInputs (torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice)
     let mut pos : UInt64 := 0
     while pos < seq do
       let xIn : T #[batch, 1, cfg.hiddenSize] := data.slice talkerInputs 1 pos 1
@@ -653,7 +654,8 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
     let mut done : Array Bool := Array.replicate batch.toNat false
     let mut lengths : Array UInt64 := Array.replicate batch.toNat maxFrames
     let mut historyCols : Array (T #[batch, 1]) := #[]
-    let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice
+    let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] :=
+      castLike talkerInputs (torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice)
     let padEmbed : T #[batch, 1, cfg.hiddenSize] := ttsPadEmbed.getD defaultPadEmbed
     let cpMaxSeq : UInt64 := cfg.numCodeGroups + 1
     let (cpCosRaw, cpSinRaw) := rotary.computeFreqsPure cpMaxSeq cfg.codePredictorConfig.headDim cfg.codePredictorConfig.ropeTheta

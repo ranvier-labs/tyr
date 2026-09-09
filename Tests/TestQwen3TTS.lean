@@ -61,6 +61,104 @@ def testQwen3TTSInitAndCapabilities : IO Unit := do
   LeanTest.assertTrue (speakers.contains "speaker_b") "supported speakers should include speaker_b"
 
 @[test]
+def testQwen3TTSRMSNormModelDType : IO Unit := do
+  let input : T #[2, 3, 4] := reshape (data.fromFloatArray
+    #[0.17, -0.41, 0.83, 1.27, 0.9, 0.5, -0.7, 1.1,
+      -0.6, 1.3, 0.2, -0.9, 1.2, 0.4, -0.8, 0.6,
+      0.3, -1.1, 0.7, 0.2, -0.5, 0.8, 1.4, -0.2]) #[2, 3, 4]
+  let weight : T #[4] := reshape (data.fromFloatArray #[0.73, 1.19, -0.67, 1.53]) #[4]
+  for bf16 in #[false, true] do
+    let x := if bf16 then toBFloat16' input else input
+    let w := if bf16 then toBFloat16' weight else weight
+    let norm : RMSNorm 4 := { weight := w, eps := ⟨0.01⟩ }
+    let normalized := nn.rmsNorm x 0.01
+    let expected : T #[2, 3, 4] :=
+      (if bf16 then toBFloat16' normalized else normalized) * w
+    let actual := norm.forward3d x
+    LeanTest.assertEqual actual.dtype x.dtype "RMSNorm preserves matching FP32/BF16 model dtype"
+    LeanTest.assertEqual (nn.item (nn.maxAll (nn.abs (sub actual expected)))) 0.0
+      "RMSNorm restores activation dtype before applying non-unit weights"
+    for output in #[nn.eraseShape (norm.forward2d (reshape x #[6, 4])),
+        nn.eraseShape (norm.forward4d (reshape x #[1, 2, 3, 4])),
+        nn.eraseShape (norm.forward5d (reshape x #[1, 2, 3, 4]))] do
+      LeanTest.assertEqual output.dtype x.dtype "All RMSNorm module layouts preserve model dtype"
+      LeanTest.assertEqual (nn.item (nn.maxAll (nn.abs
+        (sub (reshape output #[2, 3, 4]) expected)))) 0.0
+        "RMSNorm layout wrappers agree"
+    LeanTest.assertEqual (nn.rmsNormWeighted x w 0.01).dtype DType.Float32
+      "Functional RMSNorm keeps its documented Float32 contract"
+
+@[test]
+def testQwen3TTSBFloat16IncrementalCache : IO Unit := autograd.no_grad do
+  torch.manualSeed 7341
+  let raw ← qwen.QwenLayer.init 8 2 1 4 16
+  let base := { raw with
+    self_attn := TensorStruct.scale raw.self_attn 0.25
+    mlp := TensorStruct.scale raw.mlp 0.25 }
+  let inputs : T #[1, 5, 8] := reshape
+    (mul_scalar (nn.sin (toFloat' (torch.arange 0 40 1))) 0.5) #[1, 5, 8]
+  let (cos, sin) := rotary.computeFreqsPure 5 4 10000
+  for bf16 in #[false, true] do
+    let layer := if bf16 then TensorStruct.map (fun t => toBFloat16' t) base else base
+    let x := if bf16 then toBFloat16' inputs else inputs
+    let full := layer.forward x cos sin
+    LeanTest.assertEqual full.dtype x.dtype "Full Qwen layer retains model dtype"
+    let fresh : qwen.QwenAttention.KVCache 1 1 4 := qwen.QwenAttention.initKVCache 5
+    let mut cache := fresh
+    -- Three prompt tokens followed by two decode tokens exercise the Talker cache path.
+    let mut outputs : Array (T #[]) := #[]
+    for pos in [:3] do
+      let (out, next) := layer.forwardStep (data.slice x 1 pos.toUInt64 1)
+        (data.slice cos 0 pos.toUInt64 1) (data.slice sin 0 pos.toUInt64 1) cache
+      LeanTest.assertEqual out.dtype x.dtype "Prefill step retains model dtype"
+      cache := next
+      outputs := outputs.push (nn.eraseShape out)
+    let prefixCache := cache
+    let prefixK ← data.tensorToFloatArray' prefixCache.kStoreDyn
+    let prefixV ← data.tensorToFloatArray' prefixCache.vStoreDyn
+    for pos in [3:5] do
+      let (out, next) := layer.forwardStep (data.slice x 1 pos.toUInt64 1)
+        (data.slice cos 0 pos.toUInt64 1) (data.slice sin 0 pos.toUInt64 1) cache
+      LeanTest.assertEqual out.dtype x.dtype "Decode step retains model dtype"
+      cache := next
+      outputs := outputs.push (nn.eraseShape out)
+    LeanTest.assertEqual cache.seq 5 "All prompt and decode tokens enter the cache"
+    LeanTest.assertEqual cache.kStoreDyn.dtype x.dtype "K cache follows projected key dtype"
+    LeanTest.assertEqual cache.vStoreDyn.dtype x.dtype "V cache follows projected value dtype"
+    LeanTest.assertEqual (← data.tensorToFloatArray' prefixCache.kStoreDyn) prefixK
+      "Later decode leaves the functional K snapshot unchanged"
+    LeanTest.assertEqual (← data.tensorToFloatArray' prefixCache.vStoreDyn) prefixV
+      "Later decode leaves the functional V snapshot unchanged"
+    LeanTest.assertEqual (nn.item (nn.sumAll fresh.kStoreDyn)) 0.0 "Fresh K snapshot remains empty"
+    LeanTest.assertEqual (nn.item (nn.sumAll fresh.vStoreDyn)) 0.0 "Fresh V snapshot remains empty"
+    let stepped : T #[1, 5, 8] := reshape (nn.cat_dyn outputs 1) #[1, 5, 8]
+    let error := nn.item (nn.maxAll (nn.abs (sub (toFloat' stepped) (toFloat' full))))
+    let tolerance := if bf16 then 0.0078125 else 0.00001
+    LeanTest.assertTrue (Float.isFinite error && error <= tolerance)
+      s!"Full and cached Qwen outputs agree at model precision: max error {error}, bound {tolerance}"
+
+@[test]
+def testQwen3TTSBFloat16Generation : IO Unit := do
+  let cfg := tinyCfg.talkerConfig
+  let original ← TalkerForConditionalGeneration.init cfg
+  let talker := TensorStruct.map (fun t => toBFloat16' t) original
+  let ids : T #[1, 3] := torch.full_int #[1, 3] 1
+  let prompt := TalkerModel.buildInputsFromText cfg talker.model ids
+  LeanTest.assertEqual prompt.dtype DType.BFloat16 "Text conditioning follows BF16 weights"
+  -- Both main Talker and the residual-code predictor decode repeatedly. Omitting
+  -- ttsPadEmbed exercises the default padding after each generated codec frame.
+  let out ← TalkerForConditionalGeneration.generateCodesWithLengths cfg talker prompt
+    3 3 1.0 1 1.0 1.0 1 1.0 1.0 0
+  LeanTest.assertEqual out.codes.runtimeShape #[1, 3, cfg.numCodeGroups]
+    "BF16 generation completes the requested frames and code groups"
+  LeanTest.assertEqual out.lengths #[3] "EOS is suppressed for all requested frames"
+  let codes ← data.tensorToUInt64Array' (nn.eraseShape out.codes)
+  LeanTest.assertEqual codes.size (3 * cfg.numCodeGroups.toNat) "Every generated code materializes"
+  for i in [:codes.size] do
+    let upper := if i % cfg.numCodeGroups.toNat == 0 then cfg.vocabSize else cfg.codePredictorConfig.vocabSize
+    LeanTest.assertTrue (codes[i]! < upper) "Generated codes stay within their vocabulary"
+
+@[test]
 def testQwen3TTSGenerateFromText : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3TTSForConditionalGeneration.init cfg
