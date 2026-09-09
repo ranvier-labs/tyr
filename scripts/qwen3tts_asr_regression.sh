@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKIP_EXIT_CODE=2
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]]; then SKIP_EXIT_CODE=1; fi
 CHECK_ONLY=false
 
 usage() {
@@ -24,6 +25,13 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+RUN_ENV=(uv run)
+PYTHON_BIN=python
+if [[ -n "${TYR_QUALIFICATION_PYTHON:-}" ]]; then
+  RUN_ENV=(env)
+  PYTHON_BIN="$TYR_QUALIFICATION_PYTHON"
+fi
 
 TTS_MODEL_DIR="${QWEN3_TTS_MODEL_DIR:-weights/qwen3-tts-0.6b-base}"
 ASR_MODEL_DIR="${QWEN3_ASR_MODEL_DIR:-weights/qwen3-asr-0.6b}"
@@ -68,11 +76,14 @@ fi
 mkdir -p "$OUT_DIR"
 
 echo "[qwen3tts-asr] building executables"
-uv run lake build Qwen3TTSEndToEnd Qwen3ASRTranscribe >/dev/null
+if [[ "${TYR_SKIP_QUALIFICATION_BUILD:-0}" != 1 ]]; then
+  "${RUN_ENV[@]}" lake build Qwen3TTSEndToEnd Qwen3ASRTranscribe >/dev/null
+fi
 
 echo "[qwen3tts-asr] generating audio"
-TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
+TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
   --model-dir "$TTS_MODEL_DIR" \
+  --seed "${TYR_QUALIFICATION_SEED:-0}" \
   --text "Regression audio validation" \
   --max-frames 40 \
   --ref-audio-path "$REF_AUDIO_PATH" \
@@ -88,7 +99,7 @@ if command -v ffprobe >/dev/null 2>&1; then
   ffprobe -v error -show_entries format=duration -show_entries stream=codec_name,sample_rate,channels -of default=noprint_wrappers=1 "$WAV_PATH"
 fi
 
-uv run python - "$WAV_PATH" <<'PY'
+"${RUN_ENV[@]}" "$PYTHON_BIN" - "$WAV_PATH" <<'PY'
 import sys, wave, struct, math
 path = sys.argv[1]
 with wave.open(path, 'rb') as w:
@@ -111,7 +122,7 @@ if rms < 20.0:
 PY
 
 echo "[qwen3tts-asr] transcribing generated audio"
-TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3ASRTranscribe \
+TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake env ./.lake/build/bin/Qwen3ASRTranscribe \
   --model-dir "$ASR_MODEL_DIR" \
   --wav-path "$WAV_PATH" \
   --max-new-tokens 64 > "$ASR_OUT"

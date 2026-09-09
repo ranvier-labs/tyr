@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKIP_EXIT_CODE=2
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]]; then SKIP_EXIT_CODE=1; fi
 CHECK_ONLY=false
 
 usage() {
@@ -24,6 +25,13 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+RUN_ENV=(uv run)
+PYTHON_BIN=python
+if [[ -n "${TYR_QUALIFICATION_PYTHON:-}" ]]; then
+  RUN_ENV=(env)
+  PYTHON_BIN="$TYR_QUALIFICATION_PYTHON"
+fi
 
 MODEL_DIR="${QWEN3_TTS_MODEL_DIR:-weights/qwen3-tts-0.6b-base}"
 if [[ -n "${QWEN3_TTS_PARITY_AUDIO:-}" ]]; then
@@ -78,17 +86,20 @@ fi
 mkdir -p "$OUT_DIR"
 
 echo "[qwen3tts-parity] building Lean executable"
-uv run lake build Qwen3TTSEndToEnd >/dev/null
+if [[ "${TYR_SKIP_QUALIFICATION_BUILD:-0}" != 1 ]]; then
+  "${RUN_ENV[@]}" lake build Qwen3TTSEndToEnd >/dev/null
+fi
 
 echo "[qwen3tts-parity] Lean encode"
-TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
+TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
   --model-dir "$MODEL_DIR" \
+  --seed "${TYR_QUALIFICATION_SEED:-0}" \
   --encode-audio-path "$AUDIO_PATH" \
   --encode-out-codes-path "$LEAN_CODES" \
   --encode-only >/dev/null
 
 echo "[qwen3tts-parity] Python reference encode"
-uv run python scripts/qwen3tts_encode_audio.py \
+"${RUN_ENV[@]}" "$PYTHON_BIN" scripts/qwen3tts_encode_audio.py \
   --speech-tokenizer-dir "$MODEL_DIR/speech_tokenizer" \
   --audio "$AUDIO_PATH" \
   --output-codes "$PY_CODES" \
@@ -101,7 +112,7 @@ PREFIX_ROW_MIN="${QWEN3_TTS_PARITY_PREFIX_ROW_MIN:-0.99}"
 FULL_TOKEN_MIN="${QWEN3_TTS_PARITY_FULL_TOKEN_MIN:-0.10}"
 NONZERO_MIN="${QWEN3_TTS_PARITY_NONZERO_MIN:-0.90}"
 
-uv run python - "$LEAN_CODES" "$PY_CODES" \
+"${RUN_ENV[@]}" "$PYTHON_BIN" - "$LEAN_CODES" "$PY_CODES" \
   "$PREFIX_ROWS" "$PREFIX_TOKEN_MIN" "$PREFIX_ROW_MIN" "$FULL_TOKEN_MIN" "$NONZERO_MIN" <<'PY'
 import sys
 from pathlib import Path
