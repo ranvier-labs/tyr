@@ -13,14 +13,6 @@ private def parseJsonFileOrFail (path : System.FilePath) : IO Lean.Json := do
   | .ok j => pure j
   | .error e => LeanTest.fail s!"JSON parse failed for {path}: {e}"
 
-private def getNatOrZero (j : Lean.Json) (field : String) : Nat :=
-  match (j.getObjValAs? Nat field).toOption with
-  | some n => n
-  | none =>
-    match (j.getObjValAs? Int field).toOption with
-    | some i => if i < 0 then 0 else Int.toNat i
-    | none => 0
-
 private def lcgA : UInt64 := 6364136223846793005
 private def lcgC : UInt64 := 1442695040888963407
 
@@ -40,88 +32,235 @@ private def priorLogitsFromSeed (seed : UInt64) (numActions : Nat) : Array Float
     let k := mix (seed + UInt64.ofNat (i + 1) * 0x9e3779b97f4a7c15)
     signed01 k
 
-private def recurrentForFixture
-    (numActions : Nat)
-    (discount : Float)
-    (zeroReward : Bool)
-    : RecurrentFn Unit UInt64 :=
-  fun _params _rng action emb =>
-    let nextEmb := mix (emb + UInt64.ofNat (action + 1) * 0xbf58476d1ce4e5b9)
-    let reward0 := signed01 (mix (nextEmb + 17))
-    let reward := if zeroReward then 0.0 else reward0
-    ({
-      reward := reward
-      discount := discount
-      priorLogits := priorLogitsFromSeed nextEmb numActions
-      value := signed01 (mix (nextEmb + 31))
-    }, nextEmb)
+/- The reference model and expected statistics come from the unmodified upstream
+   mctx wheel, not from Tyr. See MctxData/README.md for provenance/regeneration. -/
+private structure ReferenceModel where
+  root_state : Nat
+  prior_logits : Array (Array Float)
+  values : Array Float
+  next_states : Array (Array Nat)
+  rewards : Array (Array Float)
+  deriving Lean.FromJson
 
-private def runFixture (path : System.FilePath) : IO Unit := do
-  let json ← parseJsonFileOrFail path
+private structure ReferenceExpected where
+  node_visits : Array Nat
+  raw_values : Array Float
+  node_values : Array Float
+  parents : Array Int
+  action_from_parent : Array Int
+  children_index : Array (Array Int)
+  children_visits : Array (Array Nat)
+  children_rewards : Array (Array Float)
+  children_discounts : Array (Array Float)
+  children_values : Array (Array Float)
+  embeddings : Array Nat
+  prior_probs : Array (Array Float)
+  qvalues : Array (Array Float)
+  action : Nat
+  action_weights : Array Float
+  transformed_root_qvalues : Array Float
+  deriving Lean.FromJson
 
-  let algorithm := ((json.getObjValAs? String "algorithm").toOption).getD ""
-  let some treeJson := (json.getObjVal? "tree").toOption
-    | LeanTest.fail s!"Missing tree object in fixture {path}"
-  let childStats := ((treeJson.getObjValAs? (Array Lean.Json) "child_stats").toOption).getD #[]
-  let numActions := childStats.size
-  LeanTest.assertTrue (numActions > 0) s!"Fixture {path} should define at least one action"
+private structure ReferenceCase where
+  name : String
+  algorithm : String
+  num_simulations : Nat
+  max_depth : Nat
+  seed : Nat
+  discount : Float
+  algorithm_config : Lean.Json
+  expected : ReferenceExpected
+  deriving Lean.FromJson
 
-  let rootVisit := getNatOrZero treeJson "visit"
-  let numSimulations := Nat.max 1 (Nat.min 32 (rootVisit - 1))
+private structure ReferenceFile where
+  schema_version : Nat
+  model : ReferenceModel
+  cases : Array ReferenceCase
+  deriving Lean.FromJson
 
-  let envConfig := ((json.getObjVal? "env_config").toOption).getD (Lean.Json.mkObj [])
-  let discount := ((envConfig.getObjValAs? Float "discount").toOption).getD 1.0
-  let zeroReward := ((envConfig.getObjValAs? Bool "zero_reward").toOption).getD false
+private def checkEqual [BEq α] [Repr α]
+    (label : String) (actual expected : α) : Except String Unit :=
+  if actual == expected then .ok ()
+  else .error s!"{label}: expected {repr expected}, got {repr actual}"
 
-  let root : RootFnOutput UInt64 := {
-    priorLogits := priorLogitsFromSeed 0 numActions
-    value := signed01 (mix 1234)
-    embedding := 0
+private def checkFloats (label : String) (actual expected : Array Float) : Except String Unit := do
+  checkEqual s!"{label}.size" actual.size expected.size
+  for i in [:actual.size] do
+    let a := actual[i]!
+    let e := expected[i]!
+    unless a.isFinite && e.isFinite && Float.abs (a - e) ≤ 1e-10 do
+      throw s!"{label}[{i}]: expected {e}, got {a}"
+
+private def checkFloatRows (label : String)
+    (actual expected : Array (Array Float)) : Except String Unit := do
+  checkEqual s!"{label}.size" actual.size expected.size
+  for i in [:actual.size] do
+    checkFloats s!"{label}[{i}]" actual[i]! expected[i]!
+
+private def checkModel (model : ReferenceModel) : Except String Unit := do
+  let states := model.values.size
+  unless model.root_state < states do throw "model.root_state out of range"
+  checkEqual "model.prior_logits.size" model.prior_logits.size states
+  checkEqual "model.next_states.size" model.next_states.size states
+  checkEqual "model.rewards.size" model.rewards.size states
+  let actions := model.prior_logits[model.root_state]!.size
+  unless actions > 0 do throw "model must have actions"
+  checkFloats "model.values" model.values model.values
+  for state in [:states] do
+    checkEqual "model.prior_logits width" model.prior_logits[state]!.size actions
+    checkEqual "model.next_states width" model.next_states[state]!.size actions
+    checkEqual "model.rewards width" model.rewards[state]!.size actions
+    checkFloats "model.prior_logits" model.prior_logits[state]! model.prior_logits[state]!
+    checkFloats "model.rewards" model.rewards[state]! model.rewards[state]!
+    unless model.next_states[state]!.all (· < states) do
+      throw "model.next_states contains out-of-range state"
+
+private def referenceQTransform (config : Lean.Json) : Except String (QTransform Nat E) := do
+  let name ← config.getObjValAs? String "qtransform"
+  let args ← config.getObjVal? "qtransform_kwargs"
+  match name with
+  | "qtransform_by_min_max" =>
+    let minValue ← args.getObjValAs? Float "min_value"
+    let maxValue ← args.getObjValAs? Float "max_value"
+    pure (fun tree node => qtransformByMinMax tree node minValue maxValue)
+  | "qtransform_by_parent_and_siblings" =>
+    let epsilon ← args.getObjValAs? Float "epsilon"
+    pure (fun tree node => qtransformByParentAndSiblings tree node epsilon)
+  | "qtransform_completed_by_mix_value" =>
+    let valueScale ← args.getObjValAs? Float "value_scale"
+    let maxvisitInit ← args.getObjValAs? Float "maxvisit_init"
+    let rescaleValues ← args.getObjValAs? Bool "rescale_values"
+    let useMixedValue ← args.getObjValAs? Bool "use_mixed_value"
+    let epsilon ← args.getObjValAs? Float "epsilon"
+    pure (fun tree node => qtransformCompletedByMixValue tree node
+      valueScale maxvisitInit rescaleValues useMixedValue epsilon)
+  | _ => throw s!"Unsupported reference qtransform '{name}'"
+
+private def compareReference (expected : ReferenceExpected)
+    (output : PolicyOutput (Tree Nat E)) (qtransform : QTransform Nat E) : Except String Unit := do
+  let tree := output.searchTree
+  checkEqual "action" output.action expected.action
+  checkFloats "action_weights" output.actionWeights expected.action_weights
+  checkEqual "node_visits" tree.nodeVisits expected.node_visits
+  checkEqual "parents" tree.parents expected.parents
+  checkEqual "action_from_parent" tree.actionFromParent expected.action_from_parent
+  checkEqual "children_index" tree.childrenIndex expected.children_index
+  checkEqual "children_visits" (tree.childrenVisits.map (·.map UInt64.toNat)) expected.children_visits
+  checkEqual "embeddings" tree.embeddings expected.embeddings
+  checkFloats "raw_values" tree.rawValues expected.raw_values
+  checkFloats "node_values" tree.nodeValues expected.node_values
+  checkFloatRows "prior_probs" (tree.childrenPriorLogits.map softmax) expected.prior_probs
+  checkFloatRows "children_rewards" tree.childrenRewards expected.children_rewards
+  checkFloatRows "children_discounts" tree.childrenDiscounts expected.children_discounts
+  checkFloatRows "children_values" tree.childrenValues expected.children_values
+  checkFloatRows "qvalues" ((List.range tree.nodeVisits.size).toArray.map tree.qvalues) expected.qvalues
+  checkFloats "transformed_root_qvalues" (qtransform tree ROOT_INDEX) expected.transformed_root_qvalues
+
+private def runReference (model : ReferenceModel) (fixture : ReferenceCase) : Except String Unit := do
+  checkModel model
+  unless fixture.discount.isFinite do throw "Nonfinite fixture discount"
+  let root : RootFnOutput Nat := {
+    priorLogits := model.prior_logits[model.root_state]!
+    value := model.values[model.root_state]!
+    embedding := model.root_state
   }
+  let recurrent : RecurrentFn Unit Nat := fun _ _ action state =>
+    let nextState := model.next_states[state]![action]!
+    ({ reward := model.rewards[state]![action]!, discount := fixture.discount,
+       priorLogits := model.prior_logits[nextState]!, value := model.values[nextState]! }, nextState)
+  let config := fixture.algorithm_config
+  match fixture.algorithm with
+  | "muzero" =>
+    let qtransform ← referenceQTransform (E := Unit) config
+    let dirichletFraction ← config.getObjValAs? Float "dirichlet_fraction"
+    let dirichletAlpha ← config.getObjValAs? Float "dirichlet_alpha"
+    let pbCInit ← config.getObjValAs? Float "pb_c_init"
+    let pbCBase ← config.getObjValAs? Float "pb_c_base"
+    let temperature ← config.getObjValAs? Float "temperature"
+    let output := muzeroPolicy () fixture.seed.toUInt64 root recurrent fixture.num_simulations
+      (maxDepth := some fixture.max_depth) (qtransform := qtransform)
+      (dirichletFraction := dirichletFraction) (dirichletAlpha := dirichletAlpha)
+      (pbCInit := pbCInit) (pbCBase := pbCBase) (temperature := temperature)
+    compareReference fixture.expected output qtransform
+  | "gumbel_muzero" =>
+    let qtransform ← referenceQTransform (E := GumbelMuZeroExtraData) config
+    let maxNumConsideredActions ← config.getObjValAs? Nat "max_num_considered_actions"
+    let gumbelScale ← config.getObjValAs? Float "gumbel_scale"
+    let output := gumbelMuZeroPolicy () fixture.seed.toUInt64 root recurrent fixture.num_simulations
+      (maxDepth := some fixture.max_depth) (qtransform := qtransform)
+      (maxNumConsideredActions := maxNumConsideredActions) (gumbelScale := gumbelScale)
+    compareReference fixture.expected output qtransform
+  | _ => throw s!"Unsupported reference algorithm '{fixture.algorithm}'"
 
-  let recurrent := recurrentForFixture numActions discount zeroReward
+private def loadReference : IO ReferenceFile := do
+  let json ← parseJsonFileOrFail ⟨"Tests/MctxData/deterministic_reference.json"⟩
+  let fixture ← match Lean.fromJson? json with
+    | .ok f => pure (f : ReferenceFile)
+    | .error error => throw (IO.userError s!"Invalid MCTS reference: {error}")
+  LeanTest.assertEqual fixture.schema_version 1 "MCTS reference schema version"
+  pure fixture
 
-  if algorithm = "muzero" then
-    let out := muzeroPolicy
-      (params := ()) (rngKey := 1)
-      (root := root)
-      (recurrentFn := recurrent)
-      (numSimulations := numSimulations)
-      (dirichletFraction := 0.0)
-    let summary := out.searchTree.summary
-    LeanTest.assertEqual summary.visitCounts.size numActions
-      s!"MuZero fixture {path}: visit count width should match action count"
-    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) (UInt64.ofNat numSimulations)
-      s!"MuZero fixture {path}: root visits should match simulation budget"
-  else if algorithm = "gumbel_muzero" then
-    let out := gumbelMuZeroPolicy
-      (params := ()) (rngKey := 1)
-      (root := root)
-      (recurrentFn := recurrent)
-      (numSimulations := numSimulations)
-    let summary := out.searchTree.summary
-    LeanTest.assertEqual summary.visitCounts.size numActions
-      s!"Gumbel MuZero fixture {path}: visit count width should match action count"
-    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) (UInt64.ofNat numSimulations)
-      s!"Gumbel MuZero fixture {path}: root visits should match simulation budget"
-  else
-    LeanTest.fail s!"Unknown algorithm '{algorithm}' in fixture {path}"
+private def findReference (file : ReferenceFile) (name : String) : IO ReferenceCase := do
+  match file.cases.find? (·.name == name) with
+  | some fixture => pure fixture
+  | none => throw (IO.userError s!"Missing MCTS reference '{name}'")
+
+private def runFixture (name : String) : IO Unit := do
+  let file ← loadReference
+  let fixture ← findReference file name
+  match runReference file.model fixture with
+  | .ok () => pure ()
+  | .error error => LeanTest.fail s!"MCTS reference {name}: {error}"
 
 @[test]
-def testMctxTreeFixtureMuZero : IO Unit := do
-  runFixture ⟨"Tests/MctxData/muzero_tree.json"⟩
+def testMctxTreeFixtureMuZero : IO Unit := runFixture "muzero_min_max"
 
 @[test]
-def testMctxTreeFixtureMuZeroQTransform : IO Unit := do
-  runFixture ⟨"Tests/MctxData/muzero_qtransform_tree.json"⟩
+def testMctxTreeFixtureMuZeroQTransform : IO Unit := runFixture "muzero_parent_siblings"
 
 @[test]
-def testMctxTreeFixtureGumbelMuZero : IO Unit := do
-  runFixture ⟨"Tests/MctxData/gumbel_muzero_tree.json"⟩
+def testMctxTreeFixtureGumbelMuZero : IO Unit := runFixture "gumbel_no_rescale"
 
 @[test]
-def testMctxTreeFixtureGumbelMuZeroReward : IO Unit := do
-  runFixture ⟨"Tests/MctxData/gumbel_muzero_reward_tree.json"⟩
+def testMctxTreeFixtureGumbelMuZeroReward : IO Unit := runFixture "gumbel_rescale"
+
+private def expectReferenceFailure (model : ReferenceModel) (fixture : ReferenceCase)
+    (field : String) : IO Unit := do
+  match runReference model fixture with
+  | .ok () => LeanTest.fail s!"Reference accepted mutated {field}"
+  | .error error =>
+    LeanTest.assertTrue (error.contains field)
+      s!"Expected {field} mismatch, got unrelated failure: {error}"
+
+@[test]
+def testMctxTreeReferenceRejectsChangedExpectations : IO Unit := do
+  let file ← loadReference
+  let fixture ← findReference file "muzero_min_max"
+  let expected := fixture.expected
+  expectReferenceFailure file.model
+    { fixture with expected := { expected with action := (expected.action + 1) % 4 } } "action"
+  let visits := expected.children_visits
+  let changedVisits := visits.set! 0 ((visits[0]!).set! 0 (visits[0]![0]! + 1))
+  expectReferenceFailure file.model
+    { fixture with expected := { expected with children_visits := changedVisits } } "children_visits"
+  let qvalues := expected.qvalues
+  let changedQ := qvalues.set! 0 ((qvalues[0]!).set! 0 (qvalues[0]![0]! + 0.25))
+  expectReferenceFailure file.model
+    { fixture with expected := { expected with qvalues := changedQ } } "qvalues"
+
+@[test]
+def testMctxTreeReferenceHonorsAlgorithmConfiguration : IO Unit := do
+  let file ← loadReference
+  let fixture ← findReference file "muzero_min_max"
+  let config := fixture.algorithm_config.setObjVal! "pb_c_init" (Lean.toJson (0.0 : Float))
+  LeanTest.assertTrue (runReference file.model { fixture with algorithm_config := config }).toOption.isNone
+    "Changed PUCT config must change the independently recorded search"
+  let config := fixture.algorithm_config.setObjVal! "qtransform" (Lean.toJson "unsupported")
+  expectReferenceFailure file.model { fixture with algorithm_config := config } "Unsupported reference qtransform"
+  let gumbel ← findReference file "gumbel_rescale"
+  let config := gumbel.algorithm_config.setObjVal! "max_num_considered_actions" (Lean.toJson (1 : Nat))
+  LeanTest.assertTrue (runReference file.model { gumbel with algorithm_config := config }).toOption.isNone
+    "Changed sequential-halving config must change the independently recorded search"
 
 @[test]
 def testMctxGetSubtreeCarriesChildAsRoot : IO Unit := do

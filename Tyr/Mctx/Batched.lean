@@ -29,20 +29,6 @@ def BatchedTree.summary (tree : BatchedTree S E) : BatchedSearchSummary :=
     qvalues := summaries.map (·.qvalues)
   }
 
-private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=
-  if i < xs.size then xs.set! i v else xs
-
-private def updateAt2D (xs : Array (Array α)) (i j : Nat) (v : α) : Array (Array α) :=
-  if i < xs.size then
-    let row := xs.getD i #[]
-    if j < row.size then
-      let row' := row.set! j v
-      xs.set! i row'
-    else
-      xs
-  else
-    xs
-
 private def intToNatNonneg (x : Int) : Nat :=
   if x < 0 then 0 else Int.toNat x
 
@@ -74,27 +60,6 @@ private def batchedRootAt [Inhabited S] (root : BatchedRootFnOutput S) (batchIdx
   embedding := root.embedding.getD batchIdx default
 }
 
-private def expandWithStep [Inhabited S]
-    (tree : Tree S E)
-    (parentIndex : NodeIndex)
-    (action : Action)
-    (nextNodeIndex : NodeIndex)
-    (step : RecurrentFnOutput)
-    (nextEmbedding : S)
-    : Tree S E :=
-  let inBounds := nextNodeIndex < tree.nodeVisits.size
-  let tree :=
-    if inBounds then updateTreeNode tree nextNodeIndex step.priorLogits step.value nextEmbedding
-    else tree
-  let childIdx : Int := if inBounds then Int.ofNat nextNodeIndex else UNVISITED
-  { tree with
-    childrenIndex := updateAt2D tree.childrenIndex parentIndex action childIdx
-    childrenRewards := updateAt2D tree.childrenRewards parentIndex action step.reward
-    childrenDiscounts := updateAt2D tree.childrenDiscounts parentIndex action step.discount
-    parents := updateAt tree.parents nextNodeIndex (Int.ofNat parentIndex)
-    actionFromParent := updateAt tree.actionFromParent nextNodeIndex (Int.ofNat action)
-  }
-
 /-- Batched search continuation from a pre-initialized tree array. -/
 def searchBatchedWithTrees
     [Inhabited S]
@@ -111,32 +76,25 @@ def searchBatchedWithTrees
   let batchSize := trees.size
   let actionSelectionFn :=
     switchingActionSelectionWrapper rootActionSelectionFn interiorActionSelectionFn
-  let depthCutoff :=
-    match trees[0]? with
-    | some t => maxDepth.getD t.numSimulations
-    | none => maxDepth.getD numSimulations
-
   let mut trees := trees
   let mut sim := 0
   while sim < numSimulations do
     let mut parentIndices : Array Nat := Array.mkEmpty batchSize
     let mut actions : Array Action := Array.mkEmpty batchSize
     let mut nextNodeIndices : Array Nat := Array.mkEmpty batchSize
-    let mut backupLeafIndices : Array Nat := Array.mkEmpty batchSize
     let mut parentEmbeddings : Array S := Array.mkEmpty batchSize
 
     for bi in [:batchSize] do
       let tree := treeAt! trees bi
+      let depthCutoff := maxDepth.getD tree.numSimulations
       let simKey := rngKey + UInt64.ofNat ((sim + 1) * 1315423911 + bi)
       let (parentIndex, action) := simulate simKey tree actionSelectionFn depthCutoff
       let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
       let nextNodeIndex :=
         if existing = UNVISITED then tree.nextNodeIndex else intToNatNonneg existing
-      let inBounds := nextNodeIndex < tree.nodeVisits.size
       parentIndices := parentIndices.push parentIndex
       actions := actions.push action
       nextNodeIndices := nextNodeIndices.push nextNodeIndex
-      backupLeafIndices := backupLeafIndices.push (if inBounds then nextNodeIndex else parentIndex)
       parentEmbeddings := parentEmbeddings.push (tree.embeddings.getD parentIndex default)
 
     let recKey := rngKey + UInt64.ofNat (sim + 1)
@@ -147,7 +105,6 @@ def searchBatchedWithTrees
       let parentIndex := parentIndices.getD bi ROOT_INDEX
       let action := actions.getD bi 0
       let nextNodeIndex := nextNodeIndices.getD bi tree.nodeVisits.size
-      let backupLeaf := backupLeafIndices.getD bi parentIndex
       let step : RecurrentFnOutput := {
         reward := stepBatch.reward.getD bi 0.0
         discount := stepBatch.discount.getD bi 0.0
@@ -155,8 +112,7 @@ def searchBatchedWithTrees
         value := stepBatch.value.getD bi 0.0
       }
       let nextEmbedding := nextEmbeddings.getD bi default
-      let tree := expandWithStep tree parentIndex action nextNodeIndex step nextEmbedding
-      let tree := backward tree backupLeaf
+      let tree := expandWithStepAndBackup tree parentIndex action nextNodeIndex step nextEmbedding
       trees := trees.set! bi tree
 
     sim := sim + 1
@@ -386,8 +342,11 @@ def gumbelMuZeroPolicyBatched
   let gumbels := (List.range batchSize).toArray.map fun bi =>
     let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
     Sampling.gumbel (Sampling.splitKey rowKey 0) (maskedPrior.getD bi #[]).size gumbelScale
-  let extras : Array GumbelMuZeroExtraData :=
-    gumbels.map (fun g => { rootGumbel := g })
+  let extras : Array GumbelMuZeroExtraData := gumbels.mapIdx fun bi g =>
+    let numConsidered := countConsideredActions maxNumConsideredActions g.size
+      ((invalidRowOpt invalidActions bi).getD #[])
+    { rootGumbel := g
+      consideredVisitSchedule := some (ConsideredVisitSchedule.create numConsidered numSimulations) }
 
   let rootFn : RootActionSelectionFn S GumbelMuZeroExtraData := fun _ tree nodeIndex =>
     gumbelMuZeroRootActionSelection tree nodeIndex numSimulations maxNumConsideredActions qtransform

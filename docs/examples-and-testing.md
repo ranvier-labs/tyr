@@ -124,8 +124,9 @@ message instead of a bare SIGABRT. It is deliberately not part of any suite;
 - `Tests/fixtures/safetensors/` — `single.safetensors`, `sharded/`,
   `indexed.safetensors`, `indexed_dir/`, `provider_errors/` for the SafeTensors
   loader and type-provider tests (see [serialization.md](serialization.md)).
-- `Tests/MctxData/` — four recorded MuZero/Gumbel search trees as JSON
-  (~9 MB) replayed by the Mctx tests.
+- `Tests/MctxData/` — independent upstream MuZero/Gumbel references checked
+  against complete search statistics. The original large dumps are preserved
+  as historical data; see the [fixture guide](../Tests/MctxData/README.md).
 - GPU kernel examples compare against `.pt` fixtures produced by libtorch
   reference implementations; see `Examples/GPU/FixtureRunner.lean` below.
 

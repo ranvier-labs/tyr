@@ -647,6 +647,11 @@ lean_exe test_runner where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Native tensor-free MCTS search and allocation microbenchmarks. -/
+lean_exe mctx_bench where
+  root := `benchmarks.Mctx
+  moreLinkArgs := commonLinkArgs
+
 /-- Extra link args for `GenerateGpuKernels`. The auto-attached
     `libtyr.static` references CUDA driver API symbols
     (`cuTensorMapEncodeTiled`, `cuGetErrorString`) via `tk_vendor_mha_h100.o`,

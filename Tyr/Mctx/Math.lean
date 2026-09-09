@@ -30,17 +30,19 @@ def argmax (xs : Array Float) : Nat :=
       if xi > acc.2 then (i, xi) else acc
     bestIdx
 
-/-- Argmax with an invalid-action mask (`true` means invalid). -/
-def maskedArgmax (scores : Array Float) (invalid : Option (Array Bool)) : Nat :=
-  let masked :=
-    match invalid with
-    | none => scores
-    | some inv =>
-      (List.range scores.size).toArray.map fun i =>
-        let s := scores.getD i 0.0
-        let isInvalid := inv.getD i false
-        if isInvalid then -1e30 else s
-  argmax masked
+/-- Argmax over valid actions (`true` means invalid). Invalid entries never
+    participate, even when all legal scores are negative infinity. Ties choose
+    the first legal action; empty/all-invalid inputs retain the sentinel 0. -/
+def maskedArgmax (scores : Array Float) (invalid : Option (Array Bool)) : Nat := Id.run do
+  let mut best : Option (Nat × Float) := none
+  for i in [:scores.size] do
+    if !(invalid.getD #[]).getD i false then
+      let score := scores[i]!
+      match best with
+      | none => best := some (i, score)
+      | some (_, value) =>
+        if score > value then best := some (i, score)
+  return (best.map Prod.fst).getD 0
 
 /-- Numerically stable softmax. -/
 def softmax (xs : Array Float) : Array Float :=

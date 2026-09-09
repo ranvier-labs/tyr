@@ -133,7 +133,12 @@ def gumbelMuZeroPolicyDag
   let root := { root with priorLogits := maskInvalidActions root.priorLogits invalidActions }
   let gumbel := torch.mctx.Sampling.gumbel (torch.mctx.Sampling.splitKey rngKey 0)
     root.priorLogits.size gumbelScale
-  let extraData : GumbelMuZeroExtraData := { rootGumbel := gumbel }
+  let numConsidered := torch.mctx.countConsideredActions
+    maxNumConsideredActions root.priorLogits.size (invalidActions.getD #[])
+  let extraData : GumbelMuZeroExtraData := {
+    rootGumbel := gumbel
+    consideredVisitSchedule := some (torch.mctx.ConsideredVisitSchedule.create numConsidered numSimulations)
+  }
 
   let rootFn : RootActionSelectionFn S K GumbelMuZeroExtraData := fun _ tree nodeIndex =>
     gumbelMuZeroRootActionSelection tree nodeIndex numSimulations maxNumConsideredActions qtransform
