@@ -2,12 +2,16 @@
 """Hardware-free regressions for fixture integrity and strict execution gates."""
 import hashlib
 import json
+import io
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
+import wave
 
-from prepare import ensure_file, safe_path, verify
+from prepare import ensure_file, ensure_pcm16, safe_path, verify
+from audio_fixture import TRANSFORM, pcm16_wav
 from gpu_plan import configuration as gpu_configuration
 from cuda_runtime import library_path, loader_libraries
 from readiness import configuration
@@ -16,6 +20,71 @@ from summarize import summarize
 
 
 class QualificationTests(unittest.TestCase):
+    @staticmethod
+    def float_wav(samples, channels=1, rate=24000, kind=3, bits=32):
+        data = struct.pack("<" + "f" * len(samples), *samples)
+        fmt = struct.pack("<HHIIHH", kind, channels, rate, rate * channels * 4, channels * 4, bits)
+        # Include an odd-length unknown chunk to exercise RIFF padding.
+        chunks = b"JUNK\x01\x00\x00\x00x\x00" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+        chunks += b"data" + struct.pack("<I", len(data)) + data
+        return b"RIFF" + struct.pack("<I", len(chunks) + 4) + b"WAVE" + chunks
+
+    @staticmethod
+    def audio_spec(frames, channels=1, rate=24000):
+        return dict(transformation=TRANSFORM, frames=frames, channels=channels,
+                    sample_rate=rate, bits_per_sample=16)
+
+    def test_pcm16_conversion_preserves_frames_and_rounds_saturates_exactly(self):
+        values = [-2.0, -1.0, -0.5, -1.5 / 32768, -0.5 / 32768,
+                  0.0, 0.5 / 32768, 1.5 / 32768, 0.5, 1.0, 2.0, 0.25]
+        spec = self.audio_spec(6, channels=2, rate=16000)
+        converted = pcm16_wav(self.float_wav(values, channels=2, rate=16000), spec)
+        with wave.open(io.BytesIO(converted)) as audio:
+            self.assertEqual((audio.getnchannels(), audio.getframerate(), audio.getnframes(),
+                              audio.getsampwidth(), audio.getcomptype()), (2, 16000, 6, 2, "NONE"))
+            self.assertEqual(struct.unpack("<12h", audio.readframes(6)),
+                (-32768, -32768, -16384, -2, 0, 0, 0, 2, 16384, 32767, 32767, 8192))
+
+    def test_pcm16_conversion_rejects_invalid_dtype_layout_and_values(self):
+        good = self.float_wav([0.25])
+        bad_layout = bytearray(good)
+        struct.pack_into("<H", bad_layout, good.index(b"fmt ") + 8 + 12, 2)
+        for source, spec in [
+            (self.float_wav([float("nan")]), self.audio_spec(1)),
+            (self.float_wav([float("inf")]), self.audio_spec(1)),
+            (self.float_wav([0.25], kind=1), self.audio_spec(1)),
+            (self.float_wav([0.25], bits=64), self.audio_spec(1)),
+            (good, self.audio_spec(1, rate=48000)),
+            (good, self.audio_spec(1, channels=2)),
+            (good, self.audio_spec(2)),
+            (good, dict(self.audio_spec(1), transformation="unknown")),
+            (good[:-1], self.audio_spec(1)),
+            (bad_layout, self.audio_spec(1)),
+        ]:
+            with self.subTest(spec=spec), self.assertRaises(ValueError):
+                pcm16_wav(source, spec)
+
+    def test_derived_audio_requires_its_pinned_checksum_and_preserves_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "float.wav", Path(directory) / "pcm.wav"
+            original = self.float_wav([0.5, -0.5])
+            source.write_bytes(original)
+            spec = self.audio_spec(2)
+            expected = pcm16_wav(original, spec)
+            spec.update(size=len(expected), sha256=hashlib.sha256(expected).hexdigest())
+            with self.assertRaises(RuntimeError):
+                ensure_pcm16(source, target, spec, False)
+            with self.assertRaisesRegex(RuntimeError, "checksum"):
+                ensure_pcm16(source, target, dict(spec, sha256="0" * 64), True)
+            self.assertFalse(target.exists())
+            ensure_pcm16(source, target, spec, True)
+            ensure_pcm16(source, target, spec, False)
+            self.assertEqual(target.read_bytes(), expected)
+            self.assertEqual(source.read_bytes(), original)
+            target.write_bytes(b"corrupt")
+            with self.assertRaises(RuntimeError):
+                ensure_pcm16(source, target, spec, False)
+
     def test_wheel_cuda_dependencies_precede_host_toolkit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

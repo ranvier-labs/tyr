@@ -131,7 +131,17 @@
     "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav",
     "path": "clone_2.wav",
     "size": 775738,
-    "sha256": "480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c"
+    "sha256": "480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c",
+    "derived_pcm16": {
+      "path": "clone_2.pcm16.wav",
+      "transformation": "ieee_float32_to_pcm16_rne_v1",
+      "sample_rate": 24000,
+      "channels": 1,
+      "frames": 193920,
+      "bits_per_sample": 16,
+      "size": 387884,
+      "sha256": "1fcde36ed1a9519adb27dbafa4443156068cf3b4affed5dbc1dbfa37ba2d33f2"
+    }
   },
   "cuda_version": "13.0",
   "python_packages_by_arch": {

@@ -12,6 +12,8 @@ from pathlib import Path
 import subprocess
 import urllib.request
 
+from audio_fixture import pcm16_wav
+
 MANIFEST = Path(__file__).with_name("fixtures.json")
 
 
@@ -53,6 +55,23 @@ def ensure_file(path, spec, url, download):
         partial.unlink(missing_ok=True)
 
 
+def ensure_pcm16(source, path, spec, create):
+    if verify(path, spec):
+        return
+    if not create:
+        raise RuntimeError(f"Missing or corrupt derived PCM16 fixture: {path}")
+    converted = pcm16_wav(source.read_bytes(), spec)
+    if len(converted) != spec["size"] or hashlib.sha256(converted).hexdigest() != spec["sha256"]:
+        raise RuntimeError("Derived PCM16 fixture failed pinned checksum")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
+    try:
+        partial.write_bytes(converted)
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
 def prepare(cache, manifest, download=False):
     paths = {}
     for model in manifest["models"]:
@@ -64,7 +83,11 @@ def prepare(cache, manifest, download=False):
     audio = manifest["audio"]
     audio_path = safe_path(cache, audio["path"])
     ensure_file(audio_path, audio, audio["url"], download)
-    paths["audio"] = str(audio_path.resolve())
+    derived = audio["derived_pcm16"]
+    pcm_path = safe_path(cache, derived["path"])
+    ensure_pcm16(audio_path, pcm_path, derived, download)
+    paths["audio-source"] = str(audio_path.resolve())
+    paths["audio"] = str(pcm_path.resolve())
     reference = manifest["qwen_repository"]
     directory = cache / ("qwen-reference-" + reference["revision"])
     if not directory.exists() and download:

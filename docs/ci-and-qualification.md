@@ -103,6 +103,14 @@ The real-model phase uses immutable inputs from
 Every required model file has its upstream LFS SHA-256 or Git blob SHA-1 recorded
 and verified, including cache hits. The official Qwen `clone_2.wav` example is
 pinned to SHA-256 `480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c`.
+That download uses IEEE float32 WAV, while Lean's audio reader accepts PCM.
+Preparation preserves the original and creates `clone_2.pcm16.wav` with the
+versioned `ieee_float32_to_pcm16_rne_v1` transformation: scale each finite sample
+by 32768, round to the nearest integer with ties to even, and saturate to signed
+16-bit. It preserves mono, 24000 Hz and all 193920 frames. The derived file is
+pinned to SHA-256 `1fcde36ed1a9519adb27dbafa4443156068cf3b4affed5dbc1dbfa37ba2d33f2`;
+Lean and Python receive this same PCM16 input. Reports retain both paths,
+checksums and the transformation specification.
 Downloads total approximately 4.4 GB and live in the dedicated qualification
 cache, outside the candidate checkout. The model gates check tokenizer codes
 against the pinned Python reference, then generated-audio energy and a nonempty

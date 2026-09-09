@@ -162,6 +162,11 @@ def main():
                 raise ValueError("--cache is required for pinned model qualification")
             paths = prepare(args.cache, manifest)
             report["fixture_paths"] = paths
+            audio = manifest["audio"]
+            report["audio_fixture"] = {
+                "source": dict(audio, path=paths["audio-source"]),
+                "derived": dict(audio["derived_pcm16"], path=paths["audio"])}
+            del report["audio_fixture"]["source"]["derived_pcm16"]
             env.update(QWEN3_TTS_MODEL_DIR=paths["qwen3-tts"], QWEN3_ASR_MODEL_DIR=paths["qwen3-asr"],
                        QWEN3_TTS_REPO=paths["qwen-reference"], QWEN3_TTS_PARITY_AUDIO=paths["audio"],
                        QWEN3_TTS_REF_AUDIO=paths["audio"], TYR_QUALIFICATION_SEED="0",
