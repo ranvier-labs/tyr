@@ -950,10 +950,10 @@ lean_object* lean_torch_affine(
 
 // Linear projection for 3D input: [batch, seq, in] @ [out, in]^T -> [batch, seq, out]
 lean_object* lean_torch_linear3d(
-  lean_obj_arg /*batch*/,
-  lean_obj_arg /*seq*/,
-  lean_obj_arg /*in_dim*/,
-  lean_obj_arg /*out_dim*/,
+  uint64_t /*batch*/,
+  uint64_t /*seq*/,
+  uint64_t /*in_dim*/,
+  uint64_t /*out_dim*/,
   b_lean_obj_arg x,
   b_lean_obj_arg weight
 ) {
