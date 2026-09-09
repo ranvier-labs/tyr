@@ -340,6 +340,7 @@ private def runOwnedCacheCheck (device : Device) (bf16 : Bool := false) : IO Uni
       let diff ← maxAbsDiff (nn.eraseShape actual) (nn.eraseShape expected)
       maxDiff := max maxDiff diff
       if pos == promptLen.toNat then firstLogits := some actual
+    IO.println s!"  [{lbl}] owned decode maxAbs={maxDiff} before fork comparison"
     check ((← maxAbsDiff oldK oldKCopy) == 0.0) "functional decode preserves earlier cache snapshots"
     -- Original ring has wrapped repeatedly. A shallow fork would now read
     -- overwritten prompt slots and disagree at the fork's first decode step.

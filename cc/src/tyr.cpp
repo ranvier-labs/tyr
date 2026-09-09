@@ -2371,6 +2371,19 @@ lean_object* lean_torch_slice_scatter_along_dim_inplace(
   return input;
 }
 
+// Allocation is effectful so separate mutable buffers cannot be commoned by Lean.
+lean_object* lean_torch_clone_inference_io(lean_obj_arg shape, b_lean_obj_arg src) {
+  lean_dec(shape);
+  try {
+    torch::NoGradGuard guard;
+    return lean_io_result_mk_ok(fromTorchTensor(borrowTensor(src).clone()));
+  } catch (const c10::Error& e) {
+    return mkC10IoError("cloneInferenceIO", e);
+  } catch (const std::exception& e) {
+    return mkStdIoError("cloneInferenceIO", e);
+  }
+}
+
 // Effectful inference cache write: no clone and no autograd history.
 lean_object* lean_torch_copy_slice_io(
   lean_obj_arg shape, lean_obj_arg src_shape, b_lean_obj_arg input,

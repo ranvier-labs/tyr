@@ -409,8 +409,10 @@ namespace LagunaCacheSession
 def fork (session : LagunaCacheSession cfg batch) : IO (LagunaCacheSession cfg batch) :=
   session.state.atomically do
     let some cache ← get | throw <| IO.userError "Laguna cache session is invalid"
-    let copied := cache.kvCaches.map fun kv => { kv with
-      kStoreDyn := autograd.clone kv.kStoreDyn, vStoreDyn := autograd.clone kv.vStoreDyn }
+    let copied ← cache.kvCaches.mapM fun kv => do
+      let k ← data.cloneInferenceIO kv.kStoreDyn
+      let v ← data.cloneInferenceIO kv.vStoreDyn
+      return { kv with kStoreDyn := k, vStoreDyn := v }
     return ⟨← Std.Mutex.new (some { kvCaches := copied }), session.maxLen⟩
 
 /-- Layer capacities, for memory accounting without exposing mutable tensors. -/
@@ -745,8 +747,13 @@ def initCacheSession {batch : UInt64} (cfg : Config) (m : LagunaModel cfg)
   let mut caches := #[]
   for layer in m.layers do
     let capacity := if layer.attnFull.isSome then maxLen else min maxLen cfg.sliding_window
-    caches := caches.push (qwen.QwenAttention.initKVCache capacity
-      (batch := batch) (num_kv_heads := cfg.num_key_value_heads) (head_dim := cfg.head_dim) device)
+    -- Pure zero/clone calls can be commoned by Lean. Allocate both mutable
+    -- buffers through IO, even when they have identical shape and contents.
+    let template := qwen.QwenAttention.initKVCache capacity
+      (batch := batch) (num_kv_heads := cfg.num_key_value_heads) (head_dim := cfg.head_dim) device
+    let k ← data.cloneInferenceIO template.kStoreDyn
+    let v ← data.cloneInferenceIO template.vStoreDyn
+    caches := caches.push { template with kStoreDyn := k, vStoreDyn := v }
   return ⟨← Std.Mutex.new (some { kvCaches := caches }), maxLen⟩
 
 /-- Execute one serialized inference transition, invalidating on partial failure.

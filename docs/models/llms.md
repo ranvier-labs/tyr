@@ -102,6 +102,12 @@ The bounds concern inference temporaries: training autograd can retain
 intermediates across all chunks. Rectangular cache decode uses non-causal SDPA,
 since every retained key is attendable after its absolute-position RoPE.
 
+The low-level `torch.Generator.KVCache` API also allocates through IO so Lean
+cannot merge identical K/V allocations. `Cache.init`, append/attention calls,
+views, and sequence advancement now return IO results. This cache remains
+shared and mutable: callers serialize access and discard earlier cache values
+after updates. Use Laguna sessions for locking and independent forks.
+
 `TYR_LAGUNA_CACHE_BENCH=1 lake -R exe LagunaModelTest` runs an optional
 functional/session comparison at capacities 128 and 8192, reporting synchronized
 decode timings and cache tensor bytes. The normal model gate covers ring wrap,

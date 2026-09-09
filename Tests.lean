@@ -1,5 +1,6 @@
 import Tests.Test
 import Tests.TestDataLoader
+import Tests.TestInferenceCache
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint
 import Tests.TestCheckpointPersistence

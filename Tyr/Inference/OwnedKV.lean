@@ -10,4 +10,9 @@ The native operation disables autograd for the copy. -/
 opaque copySliceIO {s src : Shape} (dst : @& T s) (dim start : UInt64)
     (src : @& T src) : IO Unit
 
+/-- Allocate an independent inference tensor copy. The IO effect prevents Lean
+from merging identical allocations when distinct mutable buffers are required. -/
+@[extern "lean_torch_clone_inference_io"]
+opaque cloneInferenceIO {s : Shape} (src : @& T s) : IO (T s)
+
 end torch.data

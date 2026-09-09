@@ -6,6 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+lean_object* lean_torch_clone_inference_io(lean_object*, lean_object*);
 lean_object* lean_torch_copy_slice_io(lean_object*, lean_object*, lean_object*, uint64_t, uint64_t, lean_object*);
 #ifdef __cplusplus
 }
