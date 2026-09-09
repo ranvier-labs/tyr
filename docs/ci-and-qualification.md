@@ -29,7 +29,10 @@ The `CUDA smoke` workflow retains labelled-PR and GPU-path push triggers and
 adds a weekly Monday schedule. Scheduled runs require both GPU and real-model
 qualification; manual runs default to both, with a `real_models` input for a
 GPU-only diagnostic. Missing prerequisites fail the selected qualification.
-The required CPU workflow no longer reports optional model tests as skipped.
+Optional pretrained-model runners are a separate tier. Four existing ASR WAV
+frontend test bodies still return early on macOS and Linux CI, although LeanTest
+counts them as passed. Hosted test totals therefore do not establish WAV frontend
+execution; the strict Spark model phase checks the real audio path separately.
 
 Spark's existing `spark-e626-gb10` runner belongs to `cpehle/tyr`, with labels
 `self-hosted,Linux,ARM64,gpu,gb10,aarch64`. A separate upstream runner can use

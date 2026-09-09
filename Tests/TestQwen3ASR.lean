@@ -1013,6 +1013,74 @@ def testQwen3ASRForwardVariableFeatureMask : IO Unit := do
   LeanTest.assertTrue (Float.isFinite s) "variable feature mask forward should be finite"
 
 @[test]
+def testQwen3ASRAudioEncoderFeatureDType : IO Unit := autograd.no_grad do
+  let cfg : AudioEncoderConfig :=
+    { tinyChunkedCfg.thinkerConfig.audioConfig with nWindow := 8, nWindowInfer := 32 }
+  let original ← AudioEncoder.init cfg
+  let features : T #[3, cfg.numMelBins, 32] := reshape
+    (nn.sin (toFloat' (torch.arange 0 (3 * cfg.numMelBins * 32) 1))) #[3, cfg.numMelBins, 32]
+  for bf16Weights in #[false, true] do
+    let encoder := if bf16Weights then TensorStruct.map (fun t => toBFloat16' t) original else original
+    for bf16Features in #[false, true] do
+      let mel := if bf16Features then toBFloat16' features else features
+      let expectedInput := if bf16Weights then toBFloat16' mel else toFloat' mel
+      -- Full and partial convolution chunks, output padding, and an empty sample.
+      let audio := encoder.forwardVarLen mel #[25, 13, 0]
+      let expected := encoder.forwardVarLen expectedInput #[25, 13, 0]
+      LeanTest.assertEqual audio.runtimeShape #[3, 4, cfg.outputDim] "Varlen encoder output shape"
+      LeanTest.assertEqual audio.dtype encoder.conv2d1Weight.dtype "Varlen output uses model dtype"
+      LeanTest.assertTrue (audio.device == encoder.conv2d1Weight.device) "Varlen output uses model device"
+      let error := nn.item (nn.maxAll (nn.abs (sub (toFloat' audio) (toFloat' expected))))
+      LeanTest.assertEqual error 0.0 "Automatic feature conversion equals an explicit model-dtype cast"
+      LeanTest.assertTrue (Float.isFinite (nn.item (nn.sumAll (toFloat' audio))))
+        "Varlen audio features are finite"
+      let empty : T #[1, 4, cfg.outputDim] := data.slice audio 0 2 1
+      LeanTest.assertEqual (nn.item (nn.maxAll (nn.abs empty))) 0.0 "Zero-length sample stays zero"
+      let short : T #[1, 4, cfg.outputDim] := data.slice audio 0 1 1
+      let padding : T #[1, 2, cfg.outputDim] := data.slice short 1 2 2
+      LeanTest.assertEqual (nn.item (nn.maxAll (nn.abs padding))) 0.0 "Short-sample output padding stays zero"
+      let dense := encoder.forward mel
+      let denseExpected := encoder.forward expectedInput
+      LeanTest.assertEqual dense.dtype encoder.conv2d1Weight.dtype "Dense encoder output uses model dtype"
+      LeanTest.assertEqual (nn.item (nn.maxAll (nn.abs (sub (toFloat' dense) (toFloat' denseExpected))))) 0.0
+        "Dense path also aligns features and positional embeddings"
+    let noBatch : T #[0, cfg.numMelBins, 32] := torch.zeros #[0, cfg.numMelBins, 32]
+    let empty := encoder.forwardVarLen noBatch #[]
+    LeanTest.assertEqual empty.runtimeShape #[0, 4, cfg.outputDim] "Empty batch has the declared shape"
+    LeanTest.assertEqual empty.dtype encoder.conv2d1Weight.dtype "Empty batch keeps model dtype"
+
+@[test]
+def testQwen3ASRBFloat16VariableLengthGeneration : IO Unit := autograd.no_grad do
+  let cfg : Qwen3ASRConfig := { tinyChunkedCfg with thinkerConfig := {
+    tinyChunkedCfg.thinkerConfig with audioConfig := {
+      tinyChunkedCfg.thinkerConfig.audioConfig with nWindow := 8, nWindowInfer := 32 } } }
+  let original ← Qwen3ASRForConditionalGeneration.init cfg
+  let model := TensorStruct.map (fun t => toBFloat16' t) original
+  let aTok := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let ids : T #[2, 6] := reshape (data.fromInt64Array
+    #[aTok, aTok, aTok, aTok, 7, 9, aTok, aTok, 3, 5, 7, 9]) #[2, 6]
+  let mel : T #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32] := reshape
+    (nn.sin (toFloat' (torch.arange 0 (2 * cfg.thinkerConfig.audioConfig.numMelBins * 32) 1)))
+    #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32]
+  let mask : T #[2, 32] := reshape (data.fromInt64Array
+    ((List.range 32).toArray.map (fun i => if i < 25 then (1 : Int64) else 0) ++
+     (List.range 32).toArray.map (fun i => if i < 13 then (1 : Int64) else 0))) #[2, 32]
+  let logits ← model.forward ids (some mel) (some mask) none
+  LeanTest.assertEqual logits.dtype DType.BFloat16 "Audio insertion and full decoder retain BF16"
+  LeanTest.assertTrue (Float.isFinite (nn.item (nn.sumAll (toFloat' logits)))) "BF16 ASR logits are finite"
+  -- Exercise actual masked audio insertion, prompt prefill, and three decoder steps.
+  let generated ← model.generateGreedy ids (some mel) (some mask) 3 #[]
+  let explicit ← model.generateGreedy ids (some (toBFloat16' mel)) (some mask) 3 #[]
+  LeanTest.assertEqual generated.1 9 "Greedy decoding appends all requested tokens"
+  LeanTest.assertEqual generated.2.runtimeShape #[2, 9] "Both variable-length rows complete decoding"
+  LeanTest.assertEqual (← data.tensorToUInt64Array' (nn.eraseShape generated.2))
+    (← data.tensorToUInt64Array' (nn.eraseShape explicit.2))
+    "Float32 frontend features produce the same tokens as an explicit BF16 cast"
+  let prefixIds : T #[2, 6] := data.slice generated.2 1 0 6
+  LeanTest.assertEqual (← data.tensorToUInt64Array' (nn.eraseShape prefixIds))
+    (← data.tensorToUInt64Array' (nn.eraseShape ids)) "Generation preserves both prompts"
+
+@[test]
 def testQwen3ASRVarLenAudioEncoderChunkedPath : IO Unit := do
   let cfg := tinyChunkedCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
