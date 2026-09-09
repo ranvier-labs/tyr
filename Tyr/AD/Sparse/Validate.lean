@@ -4,10 +4,17 @@ import Tyr.AD.Sparse.Transform
 /-!
 # Tyr.AD.Sparse.Validate
 
-Structural validation utilities for sparse linear maps.
+Structural and finite-value validation for sparse linear maps.
 -/
 
 namespace Tyr.AD.Sparse
+
+/-- Reject nonfinite coefficients before they can enter sparse arithmetic or
+    disappear during zero removal. This also applies to uncoalesced entries. -/
+def validateFiniteEntries (entries : Array SparseEntry) : Except String Unit := do
+  for entry in entries do
+    unless entry.weight.isFinite do
+      throw s!"Sparse entry has nonfinite weight: src={entry.src}, dst={entry.dst}, weight={entry.weight}."
 
 private def entryInBounds (m : SparseLinearMap) (e : SparseEntry) : Bool :=
   let srcOk :=
@@ -51,10 +58,11 @@ private def validateDeclaredShape (m : SparseLinearMap) : Except String Unit :=
       .error s!"Invalid sparse map shape: inDim={s.inDim}, outDim={s.outDim}."
   | none => .ok ()
 
-/-- Full sparse-map validation for structural correctness. -/
+/-- Validate map dimensions, coordinates, and finite coefficients. -/
 def validateMap (m : SparseLinearMap) : Except String Unit := do
   validateDeclaredShape m
   validateEntriesInBounds m
+  validateFiniteEntries m.entries
   validateNoDuplicateCoords m
 
 end Tyr.AD.Sparse

@@ -178,6 +178,18 @@ structure AudioEncoder (cfg : AudioEncoderConfig) where
 
 namespace AudioEncoder
 
+/-- The frontend computes mel features in Float32. Match the first convolution's
+    FP32/BF16 dtype and device before padding or convolution; matching dtypes are
+    left unchanged. Positional frequencies are still computed in Float32. -/
+private def alignFeatures {batch frames : UInt64} (m : AudioEncoder cfg)
+    (features : T #[batch, cfg.numMelBins, frames]) : T #[batch, cfg.numMelBins, frames] :=
+  let features :=
+    if features.dtype == m.conv2d1Weight.dtype then features
+    else if m.conv2d1Weight.dtype == DType.Float32 then toFloat' features
+    else castLike m.conv2d1Weight features
+  if features.device == m.conv2d1Weight.device then features
+  else features.to m.conv2d1Weight.device
+
 def init (cfg : AudioEncoderConfig) : IO (AudioEncoder cfg) := do
   if cfg.dModel % cfg.encoderAttentionHeads != 0 then
     throw <| IO.userError
@@ -284,7 +296,8 @@ private def padRightFrames {cfg : AudioEncoderConfig} {frames maxFrames : UInt64
     (x : T #[1, cfg.numMelBins, frames])
     : T #[1, cfg.numMelBins, maxFrames] :=
   let padFrames := if maxFrames >= frames then maxFrames - frames else 0
-  let pad : T #[1, cfg.numMelBins, padFrames] := torch.zeros #[1, cfg.numMelBins, padFrames] false x.device
+  let pad : T #[1, cfg.numMelBins, padFrames] :=
+    castLike x (torch.zeros #[1, cfg.numMelBins, padFrames] false x.device)
   let cat := nn.cat x pad 2
   reshape cat #[1, cfg.numMelBins, maxFrames]
 
@@ -330,7 +343,7 @@ private def runLayersChunkLocal {seq : UInt64}
           start := start + len
       out
     if parts.isEmpty then
-      torch.zeros #[1, seq, cfg.dModel] false hidden.device
+      castLike hidden (torch.zeros #[1, seq, cfg.dModel] false hidden.device)
     else
       reshape (nn.cat_dyn parts 1) #[1, seq, cfg.dModel]
 
@@ -342,7 +355,7 @@ private def encodeOneSampleVarLen {frames : UInt64}
   let outSeq := AudioEncoderConfig.framesAfterConv3 cfg frames
   let featureLen := if featureLen <= frames then featureLen else frames
   if featureLen == 0 then
-    torch.zeros #[1, outSeq, cfg.outputDim] false sample.device
+    castLike sample (torch.zeros #[1, outSeq, cfg.outputDim] false sample.device)
   else
     let chunkLens := buildChunkLengths cfg #[featureLen]
     let maxChunkLen := maxOr chunkLens 1
@@ -364,7 +377,7 @@ private def encodeOneSampleVarLen {frames : UInt64}
           let padded : T #[1, cfg.numMelBins, maxChunkLen] :=
             padRightFrames (cfg := cfg) (frames := len) (maxFrames := maxChunkLen) chunk
           let emb : T #[1, tChunk, cfg.dModel] := encodePaddedChunk m padded
-          let embPos := emb + posBatch
+          let embPos := emb + castLike emb posBatch
           let availLen := if desiredLen <= tChunk then desiredLen else tChunk
           let seg0 : T #[1, availLen, cfg.dModel] := data.slice embPos 1 0 availLen
           let segDyn : T #[] :=
@@ -372,7 +385,8 @@ private def encodeOneSampleVarLen {frames : UInt64}
               nn.eraseShape seg0
             else
               let extraLen := desiredLen - availLen
-              let extra : T #[1, extraLen, cfg.dModel] := torch.zeros #[1, extraLen, cfg.dModel] false seg0.device
+              let extra : T #[1, extraLen, cfg.dModel] :=
+                castLike seg0 (torch.zeros #[1, extraLen, cfg.dModel] false seg0.device)
               nn.eraseShape (reshape (nn.cat seg0 extra 1) #[1, desiredLen, cfg.dModel])
           out := out.push segDyn
           start := start + len
@@ -381,7 +395,7 @@ private def encodeOneSampleVarLen {frames : UInt64}
     let totalValid := sumU64 chunkLensAfterCnn
     let hiddenValid : T #[1, totalValid, cfg.dModel] :=
       if hiddenParts.isEmpty then
-        torch.zeros #[1, totalValid, cfg.dModel] false sample.device
+        castLike sample (torch.zeros #[1, totalValid, cfg.dModel] false sample.device)
       else
         reshape (nn.cat_dyn hiddenParts 1) #[1, totalValid, cfg.dModel]
 
@@ -398,7 +412,8 @@ private def encodeOneSampleVarLen {frames : UInt64}
       data.slice hidden 1 0 outSeq
     else
       let padLen := outSeq - totalValid
-      let pad : T #[1, padLen, cfg.outputDim] := torch.zeros #[1, padLen, cfg.outputDim] false hidden.device
+      let pad : T #[1, padLen, cfg.outputDim] :=
+        castLike hidden (torch.zeros #[1, padLen, cfg.outputDim] false hidden.device)
       reshape (nn.cat hidden pad 1) #[1, outSeq, cfg.outputDim]
 
 /-- Varlen/chunked execution path mirroring reference `cu_seqlens` behavior:
@@ -409,9 +424,10 @@ def forwardVarLen {batch frames : UInt64}
     (inputFeatures : T #[batch, cfg.numMelBins, frames])
     (featureLens : Array UInt64)
     : T #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  let inputFeatures := alignFeatures m inputFeatures
   let outSeq := AudioEncoderConfig.framesAfterConv3 cfg frames
   if batch == 0 then
-    torch.zeros #[batch, outSeq, cfg.outputDim] false inputFeatures.device
+    castLike inputFeatures (torch.zeros #[batch, outSeq, cfg.outputDim] false inputFeatures.device)
   else
     let rows : Array (T #[]) := Id.run do
       let mut out : Array (T #[]) := #[]
@@ -428,6 +444,7 @@ def forward {batch frames : UInt64}
     (inputFeatures : T #[batch, cfg.numMelBins, frames])
     (attnMask : Option (T #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames]) := none)
     : T #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  let inputFeatures := alignFeatures m inputFeatures
   let t1 := AudioEncoderConfig.downsampleOnce frames
   let t2 := AudioEncoderConfig.downsampleTwice frames
   let t3 := AudioEncoderConfig.framesAfterConv3 cfg frames
@@ -453,7 +470,7 @@ def forward {batch frames : UInt64}
 
   let pos : T #[t3, cfg.dModel] := sinusoidPosition (seq := t3) (dim := cfg.dModel) (device := xEmb.device)
   let posBatch : T #[batch, t3, cfg.dModel] := nn.expand (reshape pos #[1, t3, cfg.dModel]) #[batch, t3, cfg.dModel]
-  let hidden0 := xEmb + posBatch
+  let hidden0 := xEmb + castLike xEmb posBatch
 
   let hidden := match attnMask with
     | some mask => m.layers.foldl (fun h layer => layer.forward h (some mask)) hidden0

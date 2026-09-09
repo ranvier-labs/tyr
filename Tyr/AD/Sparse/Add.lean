@@ -8,27 +8,34 @@ Sparse additive merge and coalescing.
 
 namespace Tyr.AD.Sparse
 
-private def entryLt (a b : SparseEntry) : Bool :=
-  if a.src = b.src then a.dst < b.dst else a.src < b.src
+private def entryLe (a b : SparseEntry) : Bool :=
+  if a.src = b.src then a.dst ≤ b.dst else a.src < b.src
 
 private def sortEntries (entries : Array SparseEntry) : Array SparseEntry :=
-  (entries.toList.mergeSort entryLt).toArray
+  -- A non-strict comparator preserves input order within duplicate coordinates.
+  (entries.toList.mergeSort entryLe).toArray
 
-/-- Coalesce duplicate `(src,dst)` entries by summing weights and dropping zeros. -/
-def coalesceEntries (entries : Array SparseEntry) : Array SparseEntry := Id.run do
+/-- Coalesce duplicate `(src,dst)` entries and drop only exact floating-point
+    zeros. Nonzero coefficients are never pruned by a magnitude threshold.
+    Reject nonfinite inputs and overflowing intermediate sums. -/
+def coalesceEntries (entries : Array SparseEntry) : Except String (Array SparseEntry) := do
+  validateFiniteEntries entries
   let sorted := sortEntries entries
   let mut out : Array SparseEntry := #[]
   for e in sorted do
     match out.back? with
     | some last =>
       if last.src = e.src && last.dst = e.dst then
-        let merged : SparseEntry := { src := last.src, dst := last.dst, weight := last.weight + e.weight }
+        let weight := last.weight + e.weight
+        unless weight.isFinite do
+          throw s!"Sparse coalescing produced a nonfinite weight: src={e.src}, dst={e.dst}."
+        let merged : SparseEntry := { src := last.src, dst := last.dst, weight := weight }
         out := out.pop.push merged
       else
         out := out.push e
     | none =>
       out := out.push e
-  return out.filter (fun e => Float.abs e.weight > 1e-12)
+  return out.filter (fun e => e.weight != 0.0)
 
 /-- Add two sparse maps with strict shape compatibility checks. -/
 def add (lhs rhs : SparseLinearMap) : Except String SparseLinearMap := do
@@ -36,11 +43,14 @@ def add (lhs rhs : SparseLinearMap) : Except String SparseLinearMap := do
   validateMap rhs
   let inDim? ← mergeDim? "input" lhs.inDim? rhs.inDim?
   let outDim? ← mergeDim? "output" lhs.outDim? rhs.outDim?
-  pure {
+  let entries ← coalesceEntries (lhs.entries ++ rhs.entries)
+  let result : SparseLinearMap := {
     repr := .add lhs.repr rhs.repr
     inDim? := inDim?
     outDim? := outDim?
-    entries := coalesceEntries (lhs.entries ++ rhs.entries)
+    entries := entries
   }
+  validateMap result
+  return result
 
 end Tyr.AD.Sparse

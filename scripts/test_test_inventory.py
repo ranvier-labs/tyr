@@ -2,10 +2,13 @@
 """Regression checks for orphaned Lean tests and standalone test executables."""
 
 from pathlib import Path
+import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from test_inventory import validate
+import test_inventory
 
 
 class InventoryTests(unittest.TestCase):
@@ -36,6 +39,22 @@ class InventoryTests(unittest.TestCase):
     def test_missing_main_is_rejected(self):
         (self.root / "Tests/Run.lean").write_text("import Tests.TestA\n")
         self.assertTrue(any("no main" in error for error in validate(self.root, self.manifest)))
+
+    def test_failed_suite_preserves_exit_status_log_and_report(self):
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/test_suites.json").write_text(json.dumps(self.manifest))
+        binary = self.root / ".lake/build/bin/suite"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\necho retained-diagnostic\nexit 7\n")
+        binary.chmod(0o755)
+        report = self.root / "reports/suites.json"
+        with patch.object(test_inventory, "REPO", self.root), \
+                patch("sys.argv", ["test_inventory.py", "--run", "--report", str(report)]):
+            self.assertEqual(test_inventory.main(), 7)
+        entry = json.loads(report.read_text())["suites"]["suite"]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["exit_code"], 7)
+        self.assertIn("retained-diagnostic", (report.parent / "suite.log").read_text())
 
 
 if __name__ == "__main__":

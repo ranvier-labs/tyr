@@ -1,5 +1,6 @@
 import Tests.Test
 import Tests.TestDataLoader
+import Tests.TestInferenceCache
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint
 import Tests.TestCheckpointPersistence
@@ -28,6 +29,7 @@ import Tests.TestADFrontendElab
 import Tests.TestADGraphaxAlphaGradParity
 import Tests.TestADGraphaxAlphaGradCoverageGate
 import Tests.TestADSparse
+import Tests.TestADSparseNumerics
 import Tests.TestADElimGraph
 import Tests.TestADElimOrderPolicy
 import Tests.TestADElimFromJaxpr
@@ -129,6 +131,7 @@ import Tests.TestQwen3ASR
 import Tests.TestSileroVAD
 import Tests.TestQwen3Model
 import Tests.TestQwen3TTS
+import Tests.TestSpeechTokenizerConfig
 import Tests.TestKittenTTS
 import Tests.TestQwen35Model
 import Tests.TestQwen35Multimodal

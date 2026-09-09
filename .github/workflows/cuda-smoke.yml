@@ -1,31 +1,23 @@
 name: CUDA smoke
 
-# Self-hosted GPU runner CI for the Tyr GPU DSL. Catches regressions in the
-# generated kernels and the dispatch glue. Runs on PRs that touch GPU code,
-# plus manual `workflow_dispatch`.
-#
-# Setup notes (see dev/issues.md R1.3):
-#   - Register a self-hosted runner with labels `[self-hosted, gpu]` against
-#     the repo. Any GPU works for the CPU-side IR tests; for the parity tests
-#     a CUDA-capable device is required and the runner host needs the
-#     environment vars below set in `~/.bashrc` or a `.env` file:
-#       GPU=GB10            (or H100, B200, etc. — see cc/Makefile)
-#       TYR_GPU_FAMILY=BLACKWELL   (only needed on GB10 to override the default
-#                                   HOPPER family for true Blackwell kernels)
-#   - Pre-install: nvcc (CUDA 12.x or newer), python3 (for libtorch headers),
-#     elan, libsoxr-dev. LibTorch is downloaded by the workflow per-run and
-#     cached.
-#   - The workflow opts in via the `gpu-ci` label on a PR so it doesn't block
-#     CI when the runner is offline.
-
+# Spark has independent cpehle/tyr and ranvier-labs/tyr runner registrations.
+# The dedicated upstream label avoids consuming old generic GPU jobs. Every
+# qualification acquires the same host-wide lock; see docs/ci-and-qualification.md.
 on:
   push:
     branches: [main]
     paths:
       - 'Tyr/GPU/**'
+      - 'Tyr/Torch.lean'
       - 'Tests/*GPU*.lean'
       - 'Examples/GPU/**'
       - 'Examples/NanoChat/Generator/KVCache.lean'
+      - 'Tyr/Inference/**'
+      - 'Tyr/Model/Laguna/**'
+      - 'Tests/RunLagunaModel.lean'
+      - 'scripts/qualification/**'
+      - 'scripts/ci/environment.sh'
+      - 'scripts/test_native_attention.sh'
       - 'scripts/gpu/**'
       - 'cc/include/**'
       - 'cc/tools/**'
@@ -40,9 +32,16 @@ on:
     types: [labeled, opened, synchronize, reopened]
     paths:
       - 'Tyr/GPU/**'
+      - 'Tyr/Torch.lean'
       - 'Tests/*GPU*.lean'
       - 'Examples/GPU/**'
       - 'Examples/NanoChat/Generator/KVCache.lean'
+      - 'Tyr/Inference/**'
+      - 'Tyr/Model/Laguna/**'
+      - 'Tests/RunLagunaModel.lean'
+      - 'scripts/qualification/**'
+      - 'scripts/ci/environment.sh'
+      - 'scripts/test_native_attention.sh'
       - 'scripts/gpu/**'
       - 'cc/include/**'
       - 'cc/tools/**'
@@ -53,168 +52,99 @@ on:
       - 'lakefile.lean'
       - 'lean-toolchain'
       - '.github/workflows/cuda-smoke.yml'
+  schedule:
+    - cron: '23 5 * * 1'
   workflow_dispatch:
+    inputs:
+      real_models:
+        description: Run pinned Qwen tokenizer parity and TTS/ASR qualification
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 concurrency:
   group: cuda-smoke-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gpu-smoke:
-    # Skip for unlabelled PRs so we don't block CI when the GPU runner is offline.
-    # Maintainers add the `gpu-ci` label to opt a PR in.
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
-    runs-on: [self-hosted, gpu]
-    timeout-minutes: 60
-    env:
-      LIBTORCH_VERSION: 2.10.0
-      # GPU defaults expected on the runner; override here if a runner
-      # serves a different device.
-      GPU: ${{ vars.TYR_GPU || 'GB10' }}
-      TYR_GPU_FAMILY: ${{ vars.TYR_GPU_FAMILY }}
-      TYR_GPU_TEST_STRICT: '1'
-
+  readiness:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'gpu-ci')
+    runs-on: ubuntu-latest
+    outputs:
+      runner_labels: ${{ steps.configuration.outputs.runner_labels }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify repository runner configuration
+        id: configuration
+        env:
+          TYR_LIBTORCH_DIR: ${{ vars.TYR_LIBTORCH_DIR }}
+          TYR_QUALIFICATION_RUNNER_LABELS: ${{ vars.TYR_QUALIFICATION_RUNNER_LABELS }}
+        run: python3 scripts/qualification/readiness.py
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          submodules: false
+          name: qualification-readiness-${{ github.run_attempt }}
+          path: output/qualification/readiness.json
+          retention-days: 14
 
+  gpu-smoke:
+    needs: readiness
+    runs-on: ${{ fromJSON(needs.readiness.outputs.runner_labels) }}
+    timeout-minutes: 180
+    env:
+      GPU: ${{ vars.TYR_GPU || 'GB10' }}
+      TYR_LIBTORCH_DIR: ${{ vars.TYR_LIBTORCH_DIR }}
+      TYR_QUALIFICATION_ROOT: ${{ vars.TYR_QUALIFICATION_ROOT || '/home/pehle/tyr-qualification' }}
+      TYR_QUALIFICATION_BOOTSTRAP_PYTHON: ${{ vars.TYR_QUALIFICATION_BOOTSTRAP_PYTHON || '/home/pehle/dev/tyr/.venv-gpu/bin/python' }}
+      TYR_QUALIFY_MODELS: ${{ github.event_name == 'schedule' || inputs.real_models }}
+      CUDA_HOME: ${{ vars.TYR_CUDA_HOME || '/usr/local/cuda' }}
+    steps:
+      - uses: actions/checkout@v4
       - name: Initialize required submodules
+        run: git submodule update --init --depth 1 external/soxr thirdparty/ThunderKittens
+      - name: Install pinned Lean toolchain
         run: |
-          git submodule update --init --depth 1 external/soxr
-          git submodule update --init --depth 1 thirdparty/ThunderKittens
-
-      - name: Cache elan toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/.elan
-          key: elan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
-
-      - name: Install elan if missing
-        run: |
-          if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
-          fi
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-
-      - name: Set up Lean toolchain
-        run: |
-          toolchain="$(cat lean-toolchain)"
-          # `elan toolchain install` errors with exit 1 when the toolchain
-          # is already installed (which is normal on a long-lived
-          # self-hosted runner). Skip the install in that case.
-          if ! elan toolchain list | grep -q "^${toolchain}\b"; then
-            elan toolchain install "${toolchain}"
-          fi
-          elan default "${toolchain}"
-
-      - name: Set up LibTorch
-        run: |
-          mkdir -p external
-          # Prefer a runner-host-provided libtorch if `TYR_LIBTORCH_DIR` is
-          # set in repo vars (recommended for self-hosted GPU runners — the
-          # full libtorch CUDA build with all headers is non-trivial to
-          # download per-run, especially on aarch64 where there's no
-          # canonical tarball).
-          if [ -n "${{ vars.TYR_LIBTORCH_DIR }}" ] && [ -d "${{ vars.TYR_LIBTORCH_DIR }}" ]; then
-            ln -sfn "${{ vars.TYR_LIBTORCH_DIR }}" external/libtorch
-            echo "Using runner-provided libtorch at ${{ vars.TYR_LIBTORCH_DIR }}"
-          elif [ "$(uname -m)" = "aarch64" ]; then
-            # Fallback for aarch64: pip-install pytorch wheel. Note the
-            # pip-installed wheel is missing some headers (e.g.
-            # `c10/cuda/impl/cuda_cmake_macros.h`) so this fallback may not
-            # be sufficient for full builds; prefer the
-            # `vars.TYR_LIBTORCH_DIR` path for a real CUDA libtorch.
-            python3 -m pip install --break-system-packages --target external/_torch_pip "torch==${LIBTORCH_VERSION}" 2>/dev/null || \
-              python3 -m pip install --break-system-packages --target external/_torch_pip torch
-            ln -sfn "$(realpath external/_torch_pip/torch)" external/libtorch
-          else
-            URL="https://download.pytorch.org/libtorch/cu124/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu124.zip"
-            curl --fail -L -o libtorch.zip "${URL}"
-            unzip -q libtorch.zip -d external/
-            rm libtorch.zip
-          fi
-          ls -la external/libtorch | head -3
-
-      - name: Set up CUDA path
-        run: |
-          cuda_home="${CUDA_HOME:-/usr/local/cuda}"
-          if [ ! -x "${cuda_home}/bin/nvcc" ]; then
-            for candidate in /usr/local/cuda-13.0 /usr/local/cuda-12.6; do
-              if [ -x "${candidate}/bin/nvcc" ]; then
-                cuda_home="${candidate}"
-                break
-              fi
-            done
-          fi
-          echo "CUDA_HOME=${cuda_home}" >> "${GITHUB_ENV}"
-          echo "${cuda_home}/bin" >> "${GITHUB_PATH}"
-          echo "LD_LIBRARY_PATH=${cuda_home}/lib64:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
-
-      - name: Verify NVCC
-        run: nvcc --version
-
-      - name: Verify GPU
-        run: |
-          nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
-          case "$GPU" in
-            H100) expected_family=HOPPER ;;
-            GB10|B200|B300) expected_family=BLACKWELL ;;
-            *) echo "No strict smoke suite configured for GPU=$GPU" >&2; exit 1 ;;
-          esac
-          family="${TYR_GPU_FAMILY:-$expected_family}"
-          if [ "$family" != "$expected_family" ]; then
-            echo "GPU=$GPU requires TYR_GPU_FAMILY=$expected_family, got $family" >&2
+          export PATH="$HOME/.elan/bin:$PATH"
+          if ! command -v elan >/dev/null; then
+            echo 'The qualification runner must have elan installed.' >&2
             exit 1
           fi
-          echo "TYR_GPU_TARGET=$GPU" >> "$GITHUB_ENV"
-          echo "TYR_GPU_FAMILY=$family" >> "$GITHUB_ENV"
-
-      - name: Build Blackwell E2E test runner
-        if: env.GPU != 'H100'
-        env:
-          # GB10 needs the Blackwell-family kernels emitted; the default
-          # codegen module is the Hopper MhaH100 set which won't link the
-          # `tkFlashAttnGb10*` / `tkFusedLayerNormResidual1024Blackwell*` /
-          # `tkFusedRMSNormResidual1024Blackwell*` symbols the GB10 e2e
-          # test invokes.
-          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample'
+          toolchain="$(cat lean-toolchain)"
+          if ! elan toolchain list | grep -Fxq "$toolchain"; then elan toolchain install "$toolchain"; fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Link runner-provided pinned CUDA runtime
         run: |
-          # Two-phase build to break the codegen circular dependency:
-          # (1) Build the Lean .oleans for the kernel modules with
-          #     codegen disabled — the codegen step needs .oleans for
-          #     these modules, which on a fresh checkout don't exist yet.
-          # (2) Re-run with codegen enabled — now the .oleans are present
-          #     and codegen + libTyrC.a + the test exe build cleanly.
-          TYR_SKIP_GPU_CODEGEN=1 lake -R build \
-            Tyr.GPU.Kernels.MhaGB10 \
-            Tyr.GPU.Kernels.FusedRMSNorm \
-            Tyr.GPU.Kernels.FusedLayerNorm \
-            Tyr.GPU.Kernels.MhaH100Decode \
-            Tyr.GPU.Kernels.RKCombine \
-            Tyr.GPU.Kernels.BrownianSample
-          lake -R build TestGPUGB10E2E
-
-      - name: Run strict Blackwell parity smoke
-        if: env.GPU != 'H100'
-        env:
-          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample'
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          source = Path(os.environ['TYR_LIBTORCH_DIR'])
+          if not (source / 'share/cmake/Torch/TorchConfigVersion.cmake').is_file():
+              raise SystemExit('Configured CUDA LibTorch directory is missing')
+          target = Path('external/libtorch')
+          if target.is_symlink():
+              target.unlink()
+          elif target.exists():
+              raise SystemExit('Refusing to replace an existing LibTorch directory; use a clean checkout')
+          target.symlink_to(source.resolve(), target_is_directory=True)
+          PYTHON
+      - name: Build and run strict qualification with exclusive GPU access
         run: |
-          lake -R env ./.lake/build/bin/TestGPUGB10E2E --fail-fast
-
-      - name: Build and run strict Hopper parity and cached decode
-        if: env.GPU == 'H100'
-        env:
-          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.Copy Tyr.GPU.Kernels.Rotary Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode'
+          mkdir -p "$TYR_QUALIFICATION_ROOT"
+          flock --timeout 3600 "$TYR_QUALIFICATION_ROOT/gpu.lock" bash scripts/qualification/job.sh
+      - name: Require executed qualification reports
+        if: always()
         run: |
-          TYR_SKIP_GPU_CODEGEN=1 lake -R build \
-            Tyr.GPU.Kernels.Copy Tyr.GPU.Kernels.Rotary \
-            Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm \
-            Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode
-          lake -R build TestGPUE2E RunMhaH100Decode
-          # Vendored references have separate optional prerequisites; every
-          # selected TorchParity case must execute actual CUDA parity here.
-          lake -R env ./.lake/build/bin/TestGPUE2E --filter TorchParity --fail-fast
-          lake -R env ./.lake/build/bin/RunMhaH100Decode
+          reports=(gpu)
+          if [[ "$TYR_QUALIFY_MODELS" == true ]]; then reports+=(models); fi
+          python3 scripts/qualification/summarize.py --directory output/qualification "${reports[@]}"
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-${{ runner.name }}-${{ github.run_attempt }}
+          path: output/qualification/
+          if-no-files-found: error
+          retention-days: 30

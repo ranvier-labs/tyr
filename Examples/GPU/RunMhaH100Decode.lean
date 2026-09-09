@@ -176,7 +176,7 @@ def runCacheParityOnce : IO Bool := do
     nn.scaledDotProductAttentionGQAQKV qAll kAll vAll 0.0 true true
 
   -- Build a 1-layer cache, append tokens one at a time, run cached attention.
-  let mut cache := Generator.KVCache.Cache.init 1 batch maxLen kvHeads headDim (device := device)
+  let mut cache ← Generator.KVCache.Cache.init 1 batch maxLen kvHeads headDim (device := device)
   -- Accumulate per-step kernel outputs into a list, then stack.
   let mut acc : Array (T #[batch, qHeads, 1, headDim]) := #[]
   for i in [:totalLen.toNat] do
@@ -187,9 +187,9 @@ def runCacheParityOnce : IO Bool := do
       torch.data.slice kAll 2 pos 1
     let vStep : T #[batch, kvHeads, 1, headDim] :=
       torch.data.slice vAll 2 pos 1
-    let (cache', out) := cache.attendLayer (numQHeads := qHeads)
+    let (cache', out) ← cache.attendLayer (numQHeads := qHeads)
         0 qStep kStep vStep (enableGqa := true)
-    cache := cache'.incrementSeqLens
+    cache ← cache'.incrementSeqLens
     acc := acc.push out
 
   let _ ← torch.cuda_synchronize

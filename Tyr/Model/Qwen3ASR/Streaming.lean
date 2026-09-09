@@ -988,7 +988,7 @@ def decodeStreamingChunkWithModelStateCached
                 else
                   let padLen := audioLen - reuseAudioLen
                   let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                    torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false prefixAudio.device
+                    castLike prefixAudio (torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false prefixAudio.device)
                   reshape (nn.cat prefixAudio pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
               let nextAudioCache :=
                 if decodeMode == .fullAccumulation then
@@ -1027,7 +1027,7 @@ def decodeStreamingChunkWithModelStateCached
                     reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
                   let padLen := audioLen - combinedLen
                   let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                    torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false combined.device
+                    castLike combined (torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false combined.device)
                   reshape (nn.cat combined pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
               let nextAudioCache :=
                 if decodeMode == .fullAccumulation then

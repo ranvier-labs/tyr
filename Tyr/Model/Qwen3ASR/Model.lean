@@ -361,6 +361,8 @@ private def buildInputsEmbeds {batch seq frames : UInt64}
       match featureAttentionMask with
       | some fm =>
         let validMask ← audioValidMaskFromFeatureMask cfg (audioSeq := audioSeq) fm
+        let validMask :=
+          if validMask.device == audioFeatures.device then validMask else validMask.to audioFeatures.device
         pure (nn.masked_select audioFeatures validMask)
       | none =>
         pure (reshape audioFeatures #[batch * audioSeq * cfg.textConfig.hiddenSize])

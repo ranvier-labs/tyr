@@ -1,12 +1,4 @@
-/-
-  TestDataLoader.lean
-
-  Tests for the DataLoader module including:
-  - Sequential data loading (Shakespeare style)
-  - BOS token finding
-  - Epoch iteration
--/
-import Tyr
+/- Generated-fixture regression tests for token coverage, document order and resume. -/
 import Tyr.DataLoader
 import Examples.GPT.GPTDataLoader
 import LeanTest
@@ -14,221 +6,191 @@ import LeanTest
 open torch
 open torch.DataLoader
 
-private def shakespeareTrainPath : String := "data/shakespeare_char/train.bin"
-private def nanochatFixtureDir : String := "data/nanochat"
+private def writeTokens (path : System.FilePath) (tokens : Array UInt64) : IO Unit := do
+  let mut bytes := ByteArray.empty
+  for token in tokens do
+    bytes := bytes.push token.toUInt8
+    bytes := bytes.push (token >>> 8).toUInt8
+  IO.FS.writeBinFile path bytes
 
-private def skipMissingFixture (testName path : String) : IO Unit := do
-  IO.println s!"[skip] {testName}: missing fixture {path}"
+private def readTokens (tokens : T #[]) : IO (Array UInt64) :=
+  data.tensorToUInt64Array' (reshape tokens #[])
 
-private def requireFixture (testName path : String) : IO Bool := do
-  let fixtureExists ← data.fileExists path
-  if fixtureExists then
-    pure true
-  else
-    skipMissingFixture testName path
-    pure false
+private def withSmallFixture (action : String → IO Unit) : IO Unit :=
+  IO.FS.withTempDir fun dir => do
+    let path := dir / "tokens.bin"
+    writeTokens path ((List.range 8192).toArray.map fun n => (n % 127 + 1).toUInt64)
+    action path.toString
 
-private def requireNanochatFixtures (testName : String) : IO Bool := do
-  let dirPath : System.FilePath := ⟨nanochatFixtureDir⟩
-  let dirExists ← dirPath.pathExists
-  if !dirExists then
-    skipMissingFixture testName nanochatFixtureDir
-    return false
-  let trainPath := s!"{nanochatFixtureDir}/fineweb_train_1m.bin"
-  let valPath := s!"{nanochatFixtureDir}/fineweb_val_1m.bin"
-  let trainExists ← data.fileExists trainPath
-  let valExists ← data.fileExists valPath
-  if !trainExists then
-    skipMissingFixture testName trainPath
-  if !valExists then
-    skipMissingFixture testName valPath
-  return trainExists && valExists
+private def assertRejected (action : IO Unit) (label : String) : IO Unit := do
+  let rejected ← try action; pure false catch _ => pure true
+  LeanTest.assertTrue rejected label
 
-@[test]
-def testSequentialLoader : IO Unit := do
-  if !(← requireFixture "testSequentialLoader" shakespeareTrainPath) then
-    return
+@[test] def testSequentialLoader : IO Unit := withSmallFixture fun path => do
+  let ⟨n, _⟩ ← SequentialLoader.fromFile path
+  LeanTest.assertEqual n 8192
 
-  -- Load the data
-  let ⟨n, _loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
-  LeanTest.assertTrue (n >= 1000) s!"Expected at least 1000 tokens, got {n}"
+@[test] def testRandomBatchSampling : IO Unit := withSmallFixture fun path => do
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile path
+  let (input, target) ← loader.sampleRandomBatch 4 32
+  LeanTest.assertTrue (nn.itemInt (nn.sumAll input) > 0) "Nonempty input"
+  LeanTest.assertEqual (← readTokens (input.slice 1 1 32))
+    (← readTokens (target.slice 1 0 31)) "Targets are shifted inputs"
 
-@[test]
-def testRandomBatchSampling : IO Unit := do
-  if !(← requireFixture "testRandomBatchSampling" shakespeareTrainPath) then
-    return
-
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
-
-  -- Sample a random batch with explicit types
-  let batchSize : UInt64 := 4
-  let blockSize : UInt64 := 32
-
-  let result ← loader.sampleRandomBatch batchSize blockSize
-  let input : T #[4, 32] := result.1
-  let target : T #[4, 32] := result.2
-
-  -- Compute sum to verify we got valid tensors (mean requires float, tokens are int64)
-  let inputSum := nn.itemInt (nn.sumAll input)
-  let targetSum := nn.itemInt (nn.sumAll target)
-  
-  LeanTest.assertTrue (inputSum > 0) "Input sum positive"
-  LeanTest.assertTrue (targetSum > 0) "Target sum positive"
-
-@[test]
-def testBosFinderInit : IO Unit := do
-  if !(← requireFixture "testBosFinderInit" shakespeareTrainPath) then
-    return
-
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
-
-  -- Use newline (token 0 in Shakespeare vocab) as BOS equivalent
-  let bosToken : UInt64 := 0
-  let finder ← BOSFinder.init loader.tokens bosToken
-
-  LeanTest.assertTrue (finder.bosPositions.size > 0) "Found BOS positions"
-
-@[test]
-def testSequentialBatchIterator : IO Unit := do
-  if !(← requireFixture "testSequentialBatchIterator" shakespeareTrainPath) then
-    return
-
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
-
-  let batchSize : UInt64 := 4
-  let seqLen : UInt64 := 32
-  let iter := SequentialBatchIterator.new loader batchSize seqLen
-
-  -- Get a few batches
-  let mut currentIter := iter
-  let mut batchCount : Nat := 0
+@[test] def testSequentialBatchIterator : IO Unit := withSmallFixture fun path => do
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile path
+  let mut iter := SequentialBatchIterator.new loader 4 32
   for _ in [:5] do
-    let (maybeBatch, nextIter) := currentIter.next
-    match maybeBatch with
-    | none =>
-      pure ()
-    | some _ =>
-      batchCount := batchCount + 1
-    currentIter := nextIter
+    let (batch, next) := iter.next
+    LeanTest.assertTrue batch.isSome "Generated fixture has five batches"
+    iter := next
 
-  LeanTest.assertEqual batchCount 5
+@[test] def testEpochReset : IO Unit := withSmallFixture fun path => do
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile path
+  let mut iter := SequentialBatchIterator.new loader 4 32
+  let mut ended := false
+  for _ in [:100] do
+    let (batch, next) := iter.next
+    iter := next
+    if batch.isNone then
+      ended := true
+      break
+  LeanTest.assertTrue ended "Finite generated fixture reaches epoch end"
+  LeanTest.assertEqual iter.epoch 1
 
-@[test]
-def testEpochReset : IO Unit := do
-  if !(← requireFixture "testEpochReset" shakespeareTrainPath) then
-    return
+private def documentTokens : Array UInt64 :=
+  #[91, 92, 0, 101, 102, 0, 201, 202, 203, 0, 301, 302, 0, 401, 402, 0, 501, 502]
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
+@[test] def testBosFinderInit : IO Unit := do
+  let tokens : T #[documentTokens.size.toUInt64] := data.fromInt64Array (documentTokens.map UInt64.toInt64)
+  let finder ← BOSFinder.init tokens 0
+  LeanTest.assertEqual finder.bosPositions #[0, 2, 5, 9, 12, 15]
+    "BOS boundaries include the initial partition fragment"
 
-  -- Use large batch to quickly exhaust data
-  let batchSize : UInt64 := 100
-  let seqLen : UInt64 := 64
-  let iter := SequentialBatchIterator.new loader batchSize seqLen
+@[test] def testDocumentAwareLoader : IO Unit := do
+  let tokens : T #[documentTokens.size.toUInt64] := data.fromInt64Array (documentTokens.map UInt64.toInt64)
+  let finder := (← BOSFinder.init tokens 0).shuffle 42
+  let (batch, next) ← finder.getBatch tokens 1 documentTokens.size.toUInt64
+  let some batch := batch | throw <| IO.userError "Missing document batch"
+  let values ← readTokens batch
+  LeanTest.assertEqual (values.qsort (· < ·)) (documentTokens.qsort (· < ·))
+    "Every real token appears exactly once"
+  for pair in #[(91, 92), (101, 102), (201, 202), (202, 203), (301, 302), (401, 402), (501, 502)] do
+    let i := values.toList.idxOf pair.1
+    LeanTest.assertEqual (values[i + 1]?) (some pair.2) "Document-internal order is preserved"
+  LeanTest.assertEqual next.currentPos documentTokens.size.toUInt64
 
-  -- Iterate until we hit epoch boundary
-  let mut currentIter := iter
-  let mut batchCount : Nat := 0
-  let mut sawEpochEnd := false
+@[test] def testShuffleDeterminism : IO Unit := do
+  let tokens : T #[documentTokens.size.toUInt64] := data.fromInt64Array (documentTokens.map UInt64.toInt64)
+  let finder ← BOSFinder.init tokens 0
+  let (a, _) ← (finder.shuffle 42).take tokens finder.dataLen
+  let (b, _) ← (finder.shuffle 42).take tokens finder.dataLen
+  let (c, _) ← (finder.shuffle 43).take tokens finder.dataLen
+  LeanTest.assertEqual (← readTokens a) (← readTokens b) "Same seed reproduces actual batches"
+  LeanTest.assertTrue ((← readTokens a) != (← readTokens c)) "Different seeds change actual token order"
 
-  for _ in [:10000] do  -- Safety limit
-    if sawEpochEnd then break
-    let (maybeBatch, nextIter) := currentIter.next
-    match maybeBatch with
-    | none =>
-      sawEpochEnd := true
-    | some _ =>
-      batchCount := batchCount + 1
-    currentIter := nextIter
+@[test] def testResolveShardPathsDirectoryAndPrefix : IO Unit := IO.FS.withTempDir fun dir => do
+  writeTokens (dir / "fineweb_train_0.bin") #[1, 2]
+  writeTokens (dir / "fineweb_train_1.bin") #[3, 4]
+  writeTokens (dir / "fineweb_val_0.bin") #[5, 6]
+  let train ← resolveShardPaths dir.toString .train
+  let val ← resolveShardPaths dir.toString .val
+  LeanTest.assertEqual train.size 2
+  LeanTest.assertEqual val.size 1
+  LeanTest.assertEqual (← resolveShardPaths (dir / "fineweb_train").toString .train) train
 
-  LeanTest.assertTrue sawEpochEnd "Did not see epoch end (data might be very large)"
-  LeanTest.assertEqual currentIter.epoch 1 "Expected epoch 1 after reset"
+@[test] def testDistributedGeneratorRotatesAcrossTrainShards : IO Unit := IO.FS.withTempDir fun dir => do
+  writeTokens (dir / "fineweb_train_0.bin") #[1, 2, 3]
+  writeTokens (dir / "fineweb_train_1.bin") #[4, 5, 6, 7, 8, 9, 10]
+  let cfg : Config := { dataPath := dir.toString, bosToken := 65535, shuffle := false }
+  let mut gen ← DistributedDataGenerator.initForRank cfg 1 4 0 1
+  LeanTest.assertEqual gen.iterator.numTokens 3 "Small files keep their real length"
+  for expected in #[#[1, 2, 3, 4], #[5, 6, 7, 8], #[9, 10, 1, 2]] do
+    let (batch, next) ← gen.nextBatch
+    let some batch := batch | throw <| IO.userError "Missing stream batch"
+    LeanTest.assertEqual (← readTokens batch) expected "File tails are packed before epoch rollover"
+    gen := next
+  LeanTest.assertEqual gen.iterator.epoch 1 "Only a complete file cycle advances the epoch"
+  LeanTest.assertEqual gen.globalStep 3
 
-@[test]
-def testDocumentAwareLoader : IO Unit := do
-  if !(← requireFixture "testDocumentAwareLoader" shakespeareTrainPath) then
-    return
+@[test] def testDataLoaderRetainsLargeRankPartitionTails : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := dir / "fineweb_train_0.bin"
+  let partition : Nat := 1000006
+  let mut bytes := ByteArray.empty
+  for i in [:partition * 2] do
+    let token : UInt8 := if i % partition < 1000000 then 7 else if i < partition then 101 else 201
+    bytes := (bytes.push token).push 0
+  IO.FS.writeBinFile path bytes
+  let cfg : Config := { dataPath := path.toString, bosToken := 65535, shuffle := false }
+  for rank in #[0, 1] do
+    let gen ← DistributedDataGenerator.initForRank cfg 1 1 rank 2
+    LeanTest.assertEqual gen.iterator.numTokens partition.toUInt64 "Full rank partition survives loading"
+    let (_, gen) ← gen.nextTokens 1000000
+    let (tail, gen) ← gen.nextTokens 6
+    LeanTest.assertEqual (← readTokens tail) (Array.replicate 6 (if rank == 0 then 101 else 201))
+      "Tokens beyond the former one-million limit are consumed"
+    LeanTest.assertEqual gen.iterator.shard.bosFinder.currentPos partition.toUInt64
 
-  -- Load shard (single process, so shard 0 of 1)
-  let ⟨_, shard⟩ ← DataShard.loadFromFile shakespeareTrainPath 0 1 0  -- bosToken = 0 (newline)
+@[test] def testDataLoaderRankPartitionsCoverUnequalFiles : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := dir / "tokens.bin"
+  writeTokens path #[1, 2, 3, 4, 5, 6, 7]
+  let mut joined : Array UInt64 := #[]
+  for rank in #[0, 1, 2] do
+    let ⟨_, shard⟩ ← DataShard.load path.toString rank 3 65535
+    joined := joined ++ (← readTokens shard.tokens)
+  LeanTest.assertEqual joined #[1, 2, 3, 4, 5, 6, 7] "Rank partitions cover every token without overlap"
+  assertRejected (do let _ ← DataShard.load path.toString 0 0 0; pure ()) "Zero world size is rejected"
+  assertRejected (do let _ ← DataShard.load path.toString 3 3 0; pure ()) "Invalid rank is rejected"
 
-  -- Test batch extraction
-  let batchSize : UInt64 := 4
-  let seqLen : UInt64 := 32
+@[test] def testDataLoaderSeededGPTResume : IO Unit := IO.FS.withTempDir fun dir => do
+  writeTokens (dir / "fineweb_train_0.bin") documentTokens
+  writeTokens (dir / "fineweb_train_1.bin") #[0, 601, 602, 0, 701, 702, 703]
+  let cfg : Config := { dataPath := dir.toString, bosToken := 0, seed := 42 }
+  let initial ← DistributedDataGenerator.initForRank cfg 1 4 0 1
+  let (_, advanced) ← initial.nextTokens 7
+  let saved := advanced.cursor
+  let json := Lean.toJson saved
+  let decoded ← match Lean.fromJson? (α := StreamCursor) json with
+    | .ok cursor => pure cursor
+    | .error msg => throw <| IO.userError msg
+  let mut continued := advanced
+  let mut restored ← initial.restoreCursor decoded
+  for _ in [:8] do
+    let (a, nextA) ← continued.nextBatchGPT
+    let (b, nextB) ← restored.nextBatchGPT
+    let some (ai, targetA) := a | throw <| IO.userError "Missing continued GPT batch"
+    let some (bi, bt) := b | throw <| IO.userError "Missing restored GPT batch"
+    LeanTest.assertEqual (← readTokens ai) (← readTokens bi) "Resume reproduces GPT inputs through file/epoch changes"
+    LeanTest.assertEqual (← readTokens targetA) (← readTokens bt) "Resume reproduces shifted GPT targets"
+    continued := nextA
+    restored := nextB
+  LeanTest.assertEqual continued.cursor.position restored.cursor.position
+  LeanTest.assertEqual continued.cursor.epoch restored.cursor.epoch
+  LeanTest.assertTrue (continued.iterator.epoch > 0) "Resume test traverses a shuffled epoch boundary"
+  assertRejected (do let _ ← initial.restoreCursor { saved with seed := 43 }; pure ()) "Seed mismatch is rejected"
+  assertRejected (do let _ ← initial.restoreCursor { saved with worldSize := 2 }; pure ()) "World-size mismatch is rejected"
+  assertRejected (do let _ ← initial.restoreCursor { saved with position := 999 }; pure ()) "Invalid position is rejected"
+  assertRejected (do let _ ← initial.restoreCursor { saved with trainPathIdx := 99 }; pure ()) "Invalid file index is rejected"
 
-  let (maybeBatch, _) ← shard.bosFinder.getBatch shard.tokens batchSize seqLen
-  LeanTest.assertTrue maybeBatch.isSome "Could not get batch"
+@[test] def testDataLoaderEmptyRankFailsWithoutLooping : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := dir / "tokens.bin"
+  writeTokens path #[1]
+  let cfg : Config := { dataPath := path.toString }
+  let gen ← DistributedDataGenerator.initForRank cfg 1 1 0 2
+  assertRejected (do let _ ← gen.nextBatch; pure ()) "An empty rank reports no tokens instead of looping"
 
-@[test]
-def testShuffleDeterminism : IO Unit := do
-  if !(← requireFixture "testShuffleDeterminism" shakespeareTrainPath) then
-    return
-
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
-  let finder ← BOSFinder.init loader.tokens 0  -- Use newline as BOS
-
-  -- Shuffle with same seed twice
-  let seed : UInt64 := 42
-  let shuffled1 := finder.shuffle seed
-  let shuffled2 := finder.shuffle seed
-
-  -- Check first few positions match
-  let match1 := shuffled1.bosPositions.toList.take 10
-  let match2 := shuffled2.bosPositions.toList.take 10
-
-  LeanTest.assertEqual match1 match2 "Shuffle not deterministic!"
-
-@[test]
-def testResolveShardPathsDirectoryAndPrefix : IO Unit := do
-  if !(← requireNanochatFixtures "testResolveShardPathsDirectoryAndPrefix") then
-    return
-
-  let trainFromDir ← resolveShardPaths nanochatFixtureDir .train
-  let valFromDir ← resolveShardPaths nanochatFixtureDir .val
-
-  LeanTest.assertTrue (trainFromDir.size >= 2)
-    s!"Expected at least two train shards, got {trainFromDir.size}"
-  LeanTest.assertTrue (!valFromDir.isEmpty)
-    s!"Expected at least one validation shard in {nanochatFixtureDir}"
-
-  let trainFromPrefix ← resolveShardPaths s!"{nanochatFixtureDir}/fineweb_train" .train
-  let valFromPrefix ← resolveShardPaths s!"{nanochatFixtureDir}/fineweb_val" .val
-
-  LeanTest.assertEqual trainFromPrefix trainFromDir
-  LeanTest.assertEqual valFromPrefix valFromDir
-
-@[test]
-def testDistributedGeneratorRotatesAcrossTrainShards : IO Unit := do
-  if !(← requireNanochatFixtures "testDistributedGeneratorRotatesAcrossTrainShards") then
-    return
-
-  let cfg : Config := {
-    dataPath := nanochatFixtureDir
-    valPath := none
-    seqLen := 128
-    bosToken := 50256
-    numWorkers := 1
-    bufferSize := 1
-    seed := 42
-  }
-
-  let gen ← DistributedDataGenerator.init cfg 8 128
-  if gen.trainPaths.size < 2 then
-    LeanTest.fail s!"Expected at least two train shards, got {gen.trainPaths.size}"
-    return
-
-  let oldIdx := gen.trainPathIdx
-  let exhaustedFinder := {
-    gen.iterator.shard.bosFinder with
-      currentPos := gen.iterator.shard.bosFinder.dataLen
-  }
-  let exhaustedShard := { gen.iterator.shard with bosFinder := exhaustedFinder }
-  let exhaustedIter := { gen.iterator with shard := exhaustedShard }
-  let exhaustedGen := { gen with iterator := exhaustedIter }
-
-  let (maybeBatch, rotatedGen) ← exhaustedGen.nextBatch
-  LeanTest.assertTrue maybeBatch.isSome "Expected a batch after rotating to next shard"
-
-  let expectedIdx := (oldIdx + 1) % gen.trainPaths.size
-  LeanTest.assertEqual rotatedGen.trainPathIdx expectedIdx
-  LeanTest.assertTrue (gen.trainPaths[oldIdx]! != rotatedGen.trainPaths[rotatedGen.trainPathIdx]!)
-    "Expected rotation to switch the active shard path"
+@[test] def testDataLoaderRejectsInvalidBatchSizes : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := dir / "tokens.bin"
+  writeTokens path #[1, 2, 3, 4]
+  let cfg : Config := { dataPath := path.toString, shuffle := false }
+  let gen ← DistributedDataGenerator.initForRank cfg 1 1 0 1
+  let huge : UInt64 := 18446744073709551615
+  for dims in #[(0, 1), (1, 0), (huge, 2)] do
+    assertRejected (do let _ ← gen.iterator.updateParams dims.1 dims.2; pure ())
+      "Parameter updates reject zero sizes and overflowing products"
+    let invalid := { gen with iterator := { gen.iterator with batchSize := dims.1, seqLen := dims.2 } }
+    assertRejected (do let _ ← invalid.nextBatch; pure ()) "Direct record updates cannot bypass size validation"
+    assertRejected (do let _ ← invalid.nextBatchGPT; pure ()) "GPT batches validate dimensions before allocating"
+  let extraOverflow := { gen with iterator := { gen.iterator with seqLen := huge } }
+  assertRejected (do let _ ← extraOverflow.nextBatchGPT; pure ()) "GPT extra target token cannot wrap sequence length"
+  assertRejected (do let _ ← extraOverflow.iterator.nextGPT; pure ()) "Finite GPT iterators reject target-token overflow"

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -71,6 +72,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--build", action="store_true")
     mode.add_argument("--run", action="store_true")
+    parser.add_argument("--report", type=Path, help="Write per-suite status, timing and logs (with --run)")
     args = parser.parse_args()
     manifest = json.loads((REPO / "scripts/test_suites.json").read_text())
     errors = validate(REPO, manifest)
@@ -82,9 +84,29 @@ def main() -> int:
     if args.build:
         return subprocess.call(["lake", "-R", "build", *targets], cwd=REPO)
     if args.run:
+        report = {"suites": {target: {"status": "not_run"} for target in targets}}
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, indent=2) + "\n")
         for target, arguments in targets.items():
             print(f"Running required suite: {target}", flush=True)
-            result = subprocess.call([str(REPO / ".lake/build/bin" / target), *arguments], cwd=REPO)
+            started = time.monotonic()
+            command = [str(REPO / ".lake/build/bin" / target), *arguments]
+            if args.report:
+                log_path = args.report.parent / (target + ".log")
+                with log_path.open("w") as log:
+                    with subprocess.Popen(command, cwd=REPO, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True) as process:
+                        for line in process.stdout:
+                            print(line, end="", flush=True)
+                            log.write(line)
+                        result = process.wait()
+            else:
+                result = subprocess.call(command, cwd=REPO)
+            report["suites"][target] = {"status": "passed" if result == 0 else "failed",
+                                       "exit_code": result, "seconds": time.monotonic() - started}
+            if args.report:
+                args.report.write_text(json.dumps(report, indent=2) + "\n")
             if result:
                 return result
     return 0

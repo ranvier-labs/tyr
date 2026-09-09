@@ -2,20 +2,35 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: Ignore compiled-output caches for this run
+        type: boolean
+        default: true
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-test:
     env:
       LIBTORCH_VERSION: 2.9.1
+      # Main remains a clean project/dependency/native compilation gate.
+      TYR_CI_CLEAN: ${{ github.event_name == 'push' || inputs.clean_build }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -28,10 +43,19 @@ jobs:
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
+      - name: Cache pinned Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: lean-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
+
       - name: Set up Lean toolchain
         run: |
-          elan toolchain install $(cat lean-toolchain)
-          elan default $(cat lean-toolchain)
+          toolchain="$(cat lean-toolchain)"
+          if ! elan toolchain list | grep -Fxq "$toolchain"; then
+            elan toolchain install "$toolchain"
+          fi
+          elan default "$toolchain"
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -82,113 +106,92 @@ jobs:
           test -f "${cfg}"
           grep -F "set(PACKAGE_VERSION \"${LIBTORCH_VERSION}\")" "${cfg}"
 
+      - name: Compute binary compatibility keys
+        id: cache-key
+        run: |
+          source scripts/ci/environment.sh
+          python3 scripts/ci/cache_key.py --output output/ci/cache-identity.json >> "$GITHUB_OUTPUT"
+
+      - name: Restore compatible dependency builds
+        id: dependency-cache
+        if: env.TYR_CI_CLEAN != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake/packages
+          key: ${{ steps.cache-key.outputs.dependencies }}
+
+      - name: Restore compatible project and native builds
+        id: build-cache
+        if: env.TYR_CI_CLEAN != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .lake/build
+            cc/build
+            cc/src/generated
+          key: ${{ steps.cache-key.outputs.build }}
+          restore-keys: ${{ steps.cache-key.outputs.build_prefix }}
+
+      # A cache hit never bypasses Lake/Make's dependency checks or the ABI gate.
       - name: Build required test runners
         run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            lean_prefix="$(lean --print-prefix)"
-            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
-            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
-            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
-            export LEAN_CC_GCC="/usr/bin/gcc"
-            export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
-            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
-          fi
+          source scripts/ci/environment.sh
           python3 scripts/test_inventory.py --build
 
       - name: Verify audited FFI ABI declarations
-        run: python3 scripts/check_ffi_abi.py
+        run: |
+          python3 scripts/check_ffi_abi.py
+          python3 scripts/check_ffi_abi.py --header cc/src/tyr_owned_kv_abi.h --generated .lake/build/ir/Tyr/Inference/OwnedKV.c
+
+      - name: Test native attention CPU semantics
+        run: |
+          source scripts/ci/environment.sh
+          bash scripts/test_native_attention.sh cpu
 
       - name: Typecheck required example surfaces
         run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            lean_prefix="$(lean --print-prefix)"
-            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
-            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
-            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
-            export LEAN_CC_GCC="/usr/bin/gcc"
-            export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
-            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
-          fi
+          source scripts/ci/environment.sh
           lake -R build Examples BranchingFlowsMoleculeTrainGenerate mctx_bench
-          # Key example files that are not covered by `Examples.lean`.
           lake -R env lean Examples/NanoChat/Generator/TypedState.lean
           lake -R env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
 
+      # Save before tests: retrying a failed CPU suite can reuse its successful
+      # build, even when the preceding workflow's test step failed.
+      - name: Save compatible dependency builds
+        if: steps.dependency-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .lake/packages
+          key: ${{ steps.cache-key.outputs.dependencies }}
+
+      - name: Save validated project and native builds
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .lake/build
+            cc/build
+            cc/src/generated
+          key: ${{ steps.cache-key.outputs.build }}
+
       - name: Run required CPU test suites
         run: |
-          lean_prefix="$(lean --print-prefix)"
-          LEAN_LIB="${lean_prefix}/lib/lean"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            export DYLD_LIBRARY_PATH="$PWD/external/libtorch/lib:/opt/homebrew/opt/libomp/lib:$LEAN_LIB"
-          else
-            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
-            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
-            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
-            export LEAN_CC_GCC="/usr/bin/gcc"
-            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
-          fi
-          lake -R env python3 scripts/test_inventory.py --run
+          source scripts/ci/environment.sh
+          lake -R env python3 scripts/test_inventory.py --run --report output/ci/suites.json
           lake -R env python3 scripts/test_branching_checkpoint_resume.py
-          # Verify equivalent MCTS statistics; timings have no pass/fail threshold.
           lake -R env ./.lake/build/bin/mctx_bench
 
-      - name: Evaluate Qwen3-TTS parity regression gate
-        if: runner.os == 'macOS'
-        id: qwen3tts-parity-gate
-        run: |
-          set +e
-          ./scripts/qwen3tts_parity_regression.sh --check-prereqs
-          status=$?
-          set -e
-          case "$status" in
-            0)
-              echo "status=ready" >> "$GITHUB_OUTPUT"
-              ;;
-            2)
-              echo "status=skip" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "[qwen3tts-parity] FAIL: prerequisite check exited with status $status"
-              exit "$status"
-              ;;
-          esac
+      - name: Upload CPU test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-diagnostics-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: output/ci/
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Run Qwen3-TTS parity regression
-        if: runner.os == 'macOS' && steps.qwen3tts-parity-gate.outputs.status == 'ready'
-        run: ./scripts/qwen3tts_parity_regression.sh
-
-      - name: Record Qwen3-TTS parity regression skip
-        if: runner.os == 'macOS' && steps.qwen3tts-parity-gate.outputs.status == 'skip'
-        run: echo "[qwen3tts-parity] skipped due to missing optional prerequisites"
-
-      - name: Evaluate Qwen3-TTS ASR regression gate
-        if: runner.os == 'macOS'
-        id: qwen3tts-asr-gate
-        run: |
-          set +e
-          ./scripts/qwen3tts_asr_regression.sh --check-prereqs
-          status=$?
-          set -e
-          case "$status" in
-            0)
-              echo "status=ready" >> "$GITHUB_OUTPUT"
-              ;;
-            2)
-              echo "status=skip" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "[qwen3tts-asr] FAIL: prerequisite check exited with status $status"
-              exit "$status"
-              ;;
-          esac
-
-      - name: Run Qwen3-TTS ASR audio regression
-        if: runner.os == 'macOS' && steps.qwen3tts-asr-gate.outputs.status == 'ready'
-        run: ./scripts/qwen3tts_asr_regression.sh
-
-      - name: Record Qwen3-TTS ASR regression skip
-        if: runner.os == 'macOS' && steps.qwen3tts-asr-gate.outputs.status == 'skip'
-        run: echo "[qwen3tts-asr] skipped due to missing optional prerequisites"
+      # Real-model Qwen tests are provisioned and required in cuda-smoke.yml's
+      # scheduled/manual qualification tier, rather than silently skipped here.
 
   lint:
     runs-on: ubuntu-latest
@@ -199,6 +202,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check commit subject format
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           zero40="0000000000000000000000000000000000000000"
@@ -224,10 +228,24 @@ jobs:
             ./scripts/check-commit-messages.sh "${commit}^!"
           done
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Prepare tokenizer parity regression dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/qualification-tests"
+          numpy_version=$(python3 -c 'import json; print(json.load(open("scripts/qualification/fixtures.json"))["python_packages"]["numpy"])')
+          "$RUNNER_TEMP/qualification-tests/bin/python" -m pip install --disable-pip-version-check "numpy==$numpy_version"
+
       - name: Check test routing and native build dependencies
         run: |
           python3 scripts/test_inventory.py
           python3 scripts/test_test_inventory.py
+          python3 scripts/ci/test_cache_key.py
+          python3 scripts/qualification/test_qualification.py
+          python3 scripts/test_qwen3tts_asr_wrapper.py
+          "$RUNNER_TEMP/qualification-tests/bin/python" scripts/test_qwen3tts_parity_wrapper.py
           python3 scripts/test_native_build.py
           python3 scripts/test_branching_checkpoint_snapshot.py
           bash scripts/nanochat/test_checkpoint_paths.sh

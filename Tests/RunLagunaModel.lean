@@ -20,9 +20,16 @@
   (a) KV-cache parity: logits from a single full-sequence forward == logits
       from prefill + step-by-step decode (seq 20 > window 8, so sliding-layer
       decode-time KV truncation is exercised). CPU fp32 dense (tol 2e-4),
-      CUDA fp32 dense (tol 1e-2), CPU + CUDA bf16 MoE (tol 0.1 — bf16 has
-      ~3 decimal digits; prefill (causal seq SDPA) and decode (q_seq=1 SDPA)
-      kernels round differently; random-weight logits are O(1)). The cache
+      CUDA fp32 dense (tol 1e-2). BF16 attention-cache parity is also checked
+      layer by layer: full/prefill/decode receive identical normalized hidden
+      states from the uncached reference. This checks the actual KV-cache
+      block before residual/FFN: BF16 FFN matmul shapes introduce additional
+      rounding unrelated to cache storage or attention history, which can be
+      amplified through successive layers. Every attention output must satisfy
+      |got-ref| <= 0.05 + 0.02*|ref|. Erased cached-history controls must fail
+      this gate. Whole-model BF16 cross-shape differences are diagnostic;
+      same-prefix cached/uncached equality remains exact, and FP32 cache
+      parity remains tightly gated. The cache
       fixture gives MoE selection scores a guaranteed margin, so rounding
       cannot switch experts. The same dequantized weights also run through
       a tight FP32 MoE cache oracle. Unconstrained routing remains covered
@@ -108,6 +115,68 @@ private def maxAbsDiff (a b : T #[]) : IO Float := do
     throw <| IO.userError "Non-finite tensor comparison"
   pure diff
 
+private structure MixedErrorStats where
+  count : Nat := 0
+  maxAbs : Float := 0.0
+  referenceAtMaxAbs : Float := 0.0
+  maxReference : Float := 0.0
+  maxRatio : Float := 0.0
+  worstIndex : Nat := 0
+  worstGot : Float := 0.0
+  worstReference : Float := 0.0
+  worstError : Float := 0.0
+  worstBound : Float := 0.0
+  violations : Nat := 0
+
+private def MixedErrorStats.merge (a b : MixedErrorStats) : MixedErrorStats :=
+  let worst := if b.count > 0 && (a.count == 0 || b.maxRatio > a.maxRatio)
+    then { b with worstIndex := a.count + b.worstIndex } else a
+  { count := a.count + b.count
+    maxAbs := max a.maxAbs b.maxAbs
+    referenceAtMaxAbs := if b.maxAbs >= a.maxAbs then b.referenceAtMaxAbs else a.referenceAtMaxAbs
+    maxReference := max a.maxReference b.maxReference
+    maxRatio := max a.maxRatio b.maxRatio
+    worstIndex := worst.worstIndex
+    worstGot := worst.worstGot
+    worstReference := worst.worstReference
+    worstError := worst.worstError
+    worstBound := worst.worstBound
+    violations := a.violations + b.violations }
+
+/-- A per-element bound, never a fraction of the largest logit in the tensor.
+The small test tensors are copied to CPU so validation and diagnostics use
+the same scalar calculation, including explicit input/arithmetic checks. -/
+private def mixedErrorStats (got expected : T #[]) (rtol := 0.02) (atol := 0.05) : IO MixedErrorStats := do
+  if got.runtimeShape != expected.runtimeShape then
+    throw <| IO.userError "Tensor comparison runtime shape mismatch"
+  if !rtol.isFinite || !atol.isFinite || rtol < 0.0 || atol <= 0.0 then
+    throw <| IO.userError "Invalid tensor comparison tolerance"
+  let values ← data.tensorToFloatArray' (toFloat' got)
+  let references ← data.tensorToFloatArray' (toFloat' expected)
+  if values.size != references.size then
+    throw <| IO.userError "Tensor comparison element count mismatch"
+  let mut stats : MixedErrorStats := {}
+  for i in [:values.size] do
+    let value := values[i]!
+    let reference := references[i]!
+    let diff := (value - reference).abs
+    let bound := atol + rtol * reference.abs
+    let ratio := diff / bound
+    if !value.isFinite || !reference.isFinite || !diff.isFinite ||
+        !bound.isFinite || !ratio.isFinite then
+      throw <| IO.userError "Non-finite tensor comparison"
+    stats := stats.merge {
+      count := 1, maxAbs := diff, referenceAtMaxAbs := reference.abs,
+      maxReference := reference.abs, maxRatio := ratio,
+      worstGot := value, worstReference := reference,
+      worstError := diff, worstBound := bound,
+      violations := if diff > bound then 1 else 0 }
+  pure stats
+
+private def reportMixedErrors (stats : MixedErrorStats) (label : String) : IO Unit := do
+  IO.println s!"  {label}: maxAbs={stats.maxAbs} |ref|@maxAbs={stats.referenceAtMaxAbs} max|ref|={stats.maxReference} max(error/bound)={stats.maxRatio} violations={stats.violations} (atol=0.05 rtol=0.02)"
+  IO.println s!"    worst flat_index={stats.worstIndex}/{stats.count} got={stats.worstGot} ref={stats.worstReference} error={stats.worstError} bound={stats.worstBound}"
+
 private def checkComparisonFailures : IO Unit := do
   for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
     let rejected ← try
@@ -120,6 +189,46 @@ private def checkComparisonFailures : IO Unit := do
     pure false
   catch _ => pure true
   check rejected "comparison rejects broadcastable shape mismatch"
+  let accepted ← mixedErrorStats (data.fromFloatArray #[0.046875, 10.125])
+    (data.fromFloatArray #[0.0, 10.0])
+  check (accepted.violations == 0 && accepted.maxAbs == 0.125)
+    "mixed comparison permits bounded BF16 rounding at zero and larger scales"
+  check (accepted.worstIndex == 0 && accepted.worstGot == 0.046875 &&
+      accepted.worstReference == 0.0 && accepted.worstError == 0.046875 &&
+      accepted.worstBound == 0.05)
+    "mixed comparison identifies worst normalized error rather than largest absolute error"
+  let nearZero ← mixedErrorStats (data.fromFloatArray #[1000.0, 0.0546875])
+    (data.fromFloatArray #[1000.0, 0.0])
+  check (nearZero.violations == 1 && nearZero.maxRatio > 1.0)
+    "mixed comparison rejects a near-zero error despite an unrelated large logit"
+  let merged := accepted.merge nearZero
+  check (merged.count == 4 && merged.worstIndex == 3 && merged.worstReference == 0.0)
+    "mixed comparison preserves worst-element index across decode chunks"
+  let relative ← mixedErrorStats (data.fromFloatArray #[10.5]) (data.fromFloatArray #[10.0])
+  check (relative.violations == 1) "mixed comparison rejects excessive relative error"
+  for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
+    for pair in #[(full #[1] invalid, zeros #[1]), (zeros #[1], full #[1] invalid)] do
+      let rejected ← try
+        let _ ← mixedErrorStats pair.1 pair.2
+        pure false
+      catch _ => pure true
+      check rejected "mixed comparison rejects non-finite values on either side"
+  let rejected ← try
+    let _ ← mixedErrorStats (zeros #[1]) (zeros #[2])
+    pure false
+  catch _ => pure true
+  check rejected "mixed comparison rejects broadcastable shape mismatch"
+  for tolerances in #[(0.02, 0.0), (-0.02, 0.05), (0.02, Float.ofBits 0x7ff0000000000000)] do
+    let rejected ← try
+      let _ ← mixedErrorStats (zeros #[1]) (zeros #[1]) tolerances.1 tolerances.2
+      pure false
+    catch _ => pure true
+    check rejected "mixed comparison rejects invalid tolerance"
+  let rejected ← try
+    let _ ← mixedErrorStats (full #[1] 100.0) (full #[1] 100.0) 1e308
+    pure false
+  catch _ => pure true
+  check rejected "mixed comparison rejects overflow in a finite tolerance bound"
 
 /-- Deterministic int64 token-id tensor `[1, seq]` on `device`. -/
 private def mkIds (vals : Array Int64) (device : Device) : T #[1, vals.size.toUInt64] :=
@@ -161,7 +270,7 @@ private def floatReference (cfg : Config) (m : LagunaForCausalLM cfg) : IO (Lagu
   pure (TensorStruct.map (fun t => toFloat' t) { m with model := { m.model with layers } })
 
 private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
-    (model : LagunaForCausalLM cfg) (tol : Float) : IO Unit := do
+    (model : LagunaForCausalLM cfg) (tol : Float) (bf16Diagnostic := false) : IO Unit := do
   let seq : UInt64 := 20
   let ids : T #[1, seq] := mkIds baseIds device
 
@@ -203,20 +312,100 @@ private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
     let d ← maxAbsDiff (nn.eraseShape logitsStep) (nn.eraseShape logitsRef)
     if d > dStep then dStep := d
 
-  IO.println s!"  [{lbl}] prefill-20 maxAbs={dPrefill}  prefill-12 maxAbs={dPrefillPart}  decode maxAbs={dStep}  (tol={tol})"
+  let crossShapeStatus := if bf16Diagnostic then "diagnostic" else s!"tol={tol}"
+  IO.println s!"  [{lbl}] prefill-20 maxAbs={dPrefill} (same-shape tol={tol}); prefill-12 maxAbs={dPrefillPart} decode maxAbs={dStep} (cross-shape {crossShapeStatus})"
   check (dPrefill ≤ tol) s!"(a) [{lbl}] prefill-20 logits match full forward (maxAbs={dPrefill})"
-  check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
-  check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
+  if !bf16Diagnostic then
+    check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
+    check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
+
+/-- Check the public attention-cache block before the residual/FFN. Inputs,
+normalization and RoPE rows are shared between all three operation shapes.
+Return numeric violations and undetected erased-history controls separately;
+the caller reports every layer before asserting their aggregate counts. -/
+private def runBf16AttentionCacheParity {numHeads rotaryDim : UInt64}
+    (cfg : Config) (lbl : String) (attention : LagunaAttention cfg numHeads)
+    (inputs : T #[1, 20, cfg.hidden_size])
+    (cos sin : T #[20, rotaryDim / 2]) (window : Option UInt64)
+    (fresh : LagunaAttention.KVCache cfg 1) : IO (Nat × Nat) := do
+  let full := attention.forward (rotaryDim := rotaryDim) cfg inputs cos sin window
+  let inputsPre : T #[1, 12, cfg.hidden_size] := data.slice inputs 1 0 12
+  let cosPre : T #[12, rotaryDim / 2] := data.slice cos 0 0 12
+  let sinPre : T #[12, rotaryDim / 2] := data.slice sin 0 0 12
+  let (prefill, initialCache) := attention.forwardWithCache
+    (rotaryDim := rotaryDim) cfg inputsPre cosPre sinPre window fresh
+  let expectedPre : T #[1, 12, cfg.hidden_size] := data.slice full 1 0 12
+  let preStats ← mixedErrorStats (nn.eraseShape prefill) (nn.eraseShape expectedPre)
+  reportMixedErrors preStats s!"(a) [{lbl}] attention prefill"
+  let mut cache := initialCache
+  let mut stepStats : MixedErrorStats := {}
+  let mut undetected : Nat := 0
+  for pos in [12:20] do
+    let input : T #[1, 1, cfg.hidden_size] := data.slice inputs 1 pos.toUInt64 1
+    let expected : T #[1, 1, cfg.hidden_size] := data.slice full 1 pos.toUInt64 1
+    let cosStep : T #[1, rotaryDim / 2] := data.slice cos 0 pos.toUInt64 1
+    let sinStep : T #[1, rotaryDim / 2] := data.slice sin 0 pos.toUInt64 1
+    if pos == 12 then
+      let erased := { cache with vStoreDyn := torch.zeros_like cache.vStoreDyn }
+      let (bad, _) := attention.forwardStep
+        (rotaryDim := rotaryDim) cfg input cosStep sinStep window erased
+      let badStats ← mixedErrorStats (nn.eraseShape bad) (nn.eraseShape expected)
+      IO.println s!"  (a) [{lbl}] erased cached history: violations={badStats.violations} (must be positive)"
+      if badStats.violations == 0 then undetected := undetected + 1
+    let (out, next) := attention.forwardStep
+      (rotaryDim := rotaryDim) cfg input cosStep sinStep window cache
+    cache := next
+    stepStats := stepStats.merge (← mixedErrorStats (nn.eraseShape out) (nn.eraseShape expected))
+  reportMixedErrors stepStats s!"(a) [{lbl}] attention decode positions 12..19"
+  pure (preStats.violations + stepStats.violations, undetected)
+
+/-- Isolate cache arithmetic within each BF16 attention block. Every path
+receives the same normalized states from the full reference, never a previous
+cached layer's rounded outputs. The complete layer forward only supplies the
+next layer's reference inputs; its residual/FFN is outside this cache gate. -/
+private def runBf16LayerCacheParity (cfg : Config) (device : Device) (lbl : String)
+    (model : LagunaForCausalLM cfg) : IO Unit := do
+  let ids : T #[1, 20] := mkIds baseIds device
+  let tables ← precomputeRotaryTables cfg 20 device
+  let mut inputs : T #[1, 20, cfg.hidden_size] := model.embedTokens ids
+  let mut violations : Nat := 0
+  let mut undetected : Nat := 0
+  let fresh := model.model.initCache (batch := 1) cfg 20 device
+  for layerIdx in [:model.model.layers.size] do
+    let some layer := model.model.layers[layerIdx]? |
+      throw <| IO.userError "Missing layer in BF16 cache reference"
+    let normalized : T #[1, 20, cfg.hidden_size] := toBFloat16'
+      (nn.rmsNormWeighted inputs (toFloat' layer.input_layernorm) cfg.rms_norm_eps)
+    let some kv := fresh.kvCaches[layerIdx]? |
+      throw <| IO.userError "Missing layer cache in BF16 attention reference"
+    let (count, missed) ← match layer.attnFull, layer.attnSliding with
+      | some attention, _ =>
+        let cos : T #[20, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos 0 20
+        let sin : T #[20, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin 0 20
+        runBf16AttentionCacheParity (rotaryDim := cfg.rotaryDimFull) cfg
+          s!"{lbl} layer {layerIdx} full" attention normalized cos sin none kv
+      | _, some attention =>
+        let cos : T #[20, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos 0 20
+        let sin : T #[20, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin 0 20
+        runBf16AttentionCacheParity (rotaryDim := cfg.rotaryDimSliding) cfg
+          s!"{lbl} layer {layerIdx} sliding" attention normalized cos sin (some cfg.sliding_window) kv
+      | _, _ => throw <| IO.userError "Missing attention in BF16 cache reference"
+    violations := violations + count
+    undetected := undetected + missed
+    inputs ← layer.forward cfg inputs tables
+  check (undetected == 0) s!"(a) [{lbl}] every attention layer rejects erased cached history"
+  check (violations == 0) s!"(a) [{lbl}] every attention cache output satisfies the BF16 mixed bound ({violations} violations)"
 
 private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol : Float) : IO Unit := do
   let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
   torch.manualSeed 1234
   let model := withStableRoutes cfg (moveModel (← LagunaForCausalLM.init cfg) device bf16)
-  runCacheParityModel cfg device lbl model tol
   if bf16 then
     let reference ← floatReference cfg model
     let referenceTol := match device with | .CPU => 2e-4 | _ => 1e-2
     runCacheParityModel cfg device s!"{deviceLabel device}/fp32-moe-oracle" reference referenceTol
+  runCacheParityModel cfg device lbl model tol bf16
+  if bf16 then runBf16LayerCacheParity cfg device lbl model
 
 /-! ## (b) Sliding-window invariance -/
 
@@ -284,13 +473,146 @@ private def runGenerateCheck (device : Device) : IO Unit := do
   check (r3.1 == 11) s!"(c) [{lbl}] stream run outSeq={r3.1} == 11"
   check (ncb == 6) s!"(c) [{lbl}] stream callback fired {ncb} == 6 times"
 
+private def expectRejected (action : IO α) (label : String) : IO Unit := do
+  let rejected ← try
+    let _ ← action
+    pure false
+  catch _ => pure true
+  check rejected label
+
+/-- Covers partial and over-window prefill, repeated ring wrap, independent
+forks, preserved functional snapshots, capacity checks, and inference graphs.
+BF16 MoE uses stable expert selection and compares identical decode positions
+against the functional cache. The 0.1 bound permits BF16 reduction rounding
+when ring order permutes paired keys/values; FP32 retains the tight bound. -/
+private def runOwnedCacheCheck (device : Device) (bf16 : Bool := false) : IO Unit := do
+  let cfg := if bf16 then lagunaTiny else denseTiny
+  let lbl := s!"{deviceLabel device}/{if bf16 then "bf16-moe" else "fp32-dense"}"
+  let tol := if bf16 then 0.1 else if device == .CPU then 2e-4 else 1e-2
+  torch.manualSeed 987
+  let model := withStableRoutes cfg (moveModel (← LagunaForCausalLM.init cfg) device bf16)
+  let ids : T #[1, 20] := mkIds baseIds device
+  let tables ← precomputeRotaryTables cfg 20 device
+  for promptLen in #[5, 12] do
+    let session ← model.model.initCacheSession (batch := 1) cfg 20 device
+    let capacities ← session.capacities
+    check (capacities == #[20, 8, 8, 8]) s!"(d) [{lbl}] sliding caches allocate only one window"
+    let promptLenIds : T #[1, promptLen] := data.slice ids 1 0 promptLen
+    let embeds := model.embedTokens promptLenIds
+    let shortTables ← precomputeRotaryTables cfg 1 device
+    expectRejected (model.prefillSession cfg shortTables embeds session)
+      "session rejects short rotary tables without damaging state"
+    let functional0 := model.model.initCache cfg 20 device
+    let (expected, functional) ← model.prefill cfg tables embeds functional0
+    let actual ← model.prefillSession cfg tables embeds session
+    let prefillDiff ← maxAbsDiff (nn.eraseShape actual) (nn.eraseShape expected)
+    check (prefillDiff == 0.0) s!"(d) [{lbl}] owned prefill {promptLen} matches functional exactly"
+    check (!autograd.has_grad_fn actual) s!"(d) [{lbl}] inference output has no autograd graph"
+    expectRejected (model.prefillSession cfg tables embeds session) "session rejects repeated prefill"
+    let tok : T #[1, 1] := data.slice ids 1 promptLen 1
+    expectRejected (model.decodeSession cfg tables (model.embedTokens tok) (promptLen + 1) session)
+      "session rejects skipped positions without damaging state"
+    let forked ← session.fork
+    let mut functional := functional
+    let mut firstLogits : Option (T #[1, cfg.vocab_size]) := none
+    let mut maxDiff := 0.0
+    -- Keep an actual old cache tensor alive across subsequent functional calls.
+    let some oldCache := functional.kvCaches[1]? | throw <| IO.userError "missing sliding cache"
+    let oldK := oldCache.kStoreDyn
+    let oldKCopy := autograd.clone oldK
+    for pos in [promptLen.toNat:20] do
+      let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+      let emb := model.embedTokens tok
+      let (expected, next) ← model.decodeStep cfg tables emb pos.toUInt64 functional
+      functional := next
+      let actual ← model.decodeSession cfg tables emb pos.toUInt64 session
+      let diff ← maxAbsDiff (nn.eraseShape actual) (nn.eraseShape expected)
+      maxDiff := max maxDiff diff
+      if pos == promptLen.toNat then firstLogits := some actual
+    IO.println s!"  [{lbl}] owned decode maxAbs={maxDiff} before fork comparison"
+    check ((← maxAbsDiff oldK oldKCopy) == 0.0) "functional decode preserves earlier cache snapshots"
+    -- Original ring has wrapped repeatedly. A shallow fork would now read
+    -- overwritten prompt slots and disagree at the fork's first decode step.
+    let forkLogits ← model.decodeSession cfg tables (model.embedTokens tok) promptLen forked
+    let some first := firstLogits | throw <| IO.userError "missing first decode output"
+    check ((← maxAbsDiff (nn.eraseShape forkLogits) (nn.eraseShape first)) == 0.0)
+      s!"(d) [{lbl}] fork owns independent cache storage after ring wrap"
+    expectRejected (model.decodeSession cfg tables (model.embedTokens tok) 20 session)
+      "session rejects capacity overflow"
+    IO.println s!"  [{lbl}] owned cache promptLen={promptLen} decode maxAbs={maxDiff} (tol={tol}), capacities={capacities}"
+    check (maxDiff ≤ tol) s!"(d) [{lbl}] ring decode matches functional cache"
+  expectRejected (model.model.initCacheSession (batch := 1) cfg 0 device)
+    "session rejects zero capacity"
+
+  -- The first layer successfully writes K/V before this second-layer IO error.
+  -- A failure after mutation must invalidate the session rather than expose
+  -- partially advanced buffers, and no-grad must restore the caller's mode.
+  let some second := model.model.layers[1]? | throw <| IO.userError "missing second test layer"
+  let broken := { model with model := { model.model with
+    layers := model.model.layers.set! 1 { second with attnFull := none, attnSliding := none } } }
+  let prompt : T #[1, 5] := data.slice ids 1 0 5
+  let wasEnabled ← autograd.is_grad_enabled
+  try
+    for enabled in #[true, false] do
+      autograd.set_grad_enabled enabled
+      let session ← broken.model.initCacheSession (batch := 1) cfg 20 device
+      expectRejected (broken.prefillSession cfg tables (broken.embedTokens prompt) session)
+        s!"(d) [{lbl}] malformed second layer fails after an earlier cache write"
+      check ((← autograd.is_grad_enabled) == enabled)
+        s!"(d) [{lbl}] failed inference restores caller gradient mode {enabled}"
+      expectRejected session.capacities "partially updated session cannot expose capacities"
+      expectRejected session.fork "partially updated session cannot be forked"
+  finally
+    autograd.set_grad_enabled wasEnabled
+
+/-- Opt-in timing of identical eight-token decode workloads. Allocation and
+prefill are outside the timer; CUDA is synchronized at both boundaries. -/
+private def runCacheBenchmark (device : Device) : IO Unit := autograd.no_grad do
+  let cfg := denseTiny
+  torch.manualSeed 987
+  let model := moveModel (← LagunaForCausalLM.init cfg) device false
+  let ids : T #[1, 20] := mkIds baseIds device
+  let prompt : T #[1, 12] := data.slice ids 1 0 12
+  let synchronize : IO Unit := if device == .CPU then pure () else torch.cuda_synchronize
+  for capacity in #[(128 : UInt64), 8192] do
+    let tables ← precomputeRotaryTables cfg capacity device
+    let mut functionalMs : Nat := 0
+    let mut ownedMs : Nat := 0
+    let mut ownedCapacity : UInt64 := 0
+    for _ in [:3] do
+      let (_, initial) ← model.prefill cfg tables (model.embedTokens prompt)
+        (model.model.initCache cfg capacity device)
+      let mut cache := initial
+      synchronize
+      let start ← IO.monoMsNow
+      for pos in [12:20] do
+        let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+        let (_, next) ← model.decodeStep cfg tables (model.embedTokens tok) pos.toUInt64 cache
+        cache := next
+      synchronize
+      functionalMs := functionalMs + ((← IO.monoMsNow) - start)
+      let session ← model.model.initCacheSession (batch := 1) cfg capacity device
+      ownedCapacity := (← session.capacities).foldl (· + ·) 0
+      let _ ← model.prefillSession cfg tables (model.embedTokens prompt) session
+      synchronize
+      let start ← IO.monoMsNow
+      for pos in [12:20] do
+        let tok : T #[1, 1] := data.slice ids 1 pos.toUInt64 1
+        let _ ← model.decodeSession cfg tables (model.embedTokens tok) pos.toUInt64 session
+      synchronize
+      ownedMs := ownedMs + ((← IO.monoMsNow) - start)
+    let bytesPerPosition := 2 * cfg.num_key_value_heads * cfg.head_dim * 4
+    IO.println s!"CACHE_BENCH device={deviceLabel device} capacity={capacity} tokens=24 functional_ms={functionalMs} owned_ms={ownedMs} functional_cache_bytes={capacity * cfg.num_hidden_layers * bytesPerPosition} owned_cache_bytes={ownedCapacity * bytesPerPosition}"
+
 def main : IO Unit := do
+  for name in #["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TYR_LIBTORCH_DIR"] do
+    IO.println s!"runtime {name}={(← IO.getEnv name).getD "<unset>"}"
   checkComparisonFailures
   IO.println "-- (a) KV-cache parity: full forward vs prefill + decode"
   -- fp32 all-dense 4-layer model: tight tolerance on CPU, looser on CUDA
   -- (different SDPA kernels between causal prefill and q_seq=1 decode).
   runCacheParity denseTiny Device.CPU false 2e-4
-  -- bf16 MoE model on CPU (production dtype; wider documented tolerance).
+  -- BF16 layer cache paths use identical incoming reference hidden states.
   runCacheParity lagunaTiny Device.CPU true 0.1
   if ← torch.cuda_is_available then
     runCacheParity denseTiny (Device.CUDA 0) false 1e-2
@@ -315,4 +637,17 @@ def main : IO Unit := do
   else
     IO.println "CUDA not available; skipped CUDA (c) cases."
 
+  IO.println "-- (d) owned cache sessions and ring storage"
+  runOwnedCacheCheck Device.CPU
+  runOwnedCacheCheck Device.CPU true
+  if ← torch.cuda_is_available then
+    runOwnedCacheCheck (Device.CUDA 0)
+    runOwnedCacheCheck (Device.CUDA 0) true
+    torch.cuda_synchronize
+  else
+    IO.println "CUDA not available; skipped CUDA (d) cases."
+
+  if (← IO.getEnv "TYR_LAGUNA_CACHE_BENCH") == some "1" then
+    runCacheBenchmark Device.CPU
+    if ← torch.cuda_is_available then runCacheBenchmark (Device.CUDA 0)
   IO.println "All Laguna model tests passed."

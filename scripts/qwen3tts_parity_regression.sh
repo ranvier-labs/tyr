@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKIP_EXIT_CODE=2
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]]; then SKIP_EXIT_CODE=1; fi
 CHECK_ONLY=false
 
 usage() {
@@ -25,6 +26,15 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+RUN_ENV=(uv run)
+PYTHON_BIN=python
+BRIDGE_PYTHON=uv
+if [[ -n "${TYR_QUALIFICATION_PYTHON:-}" ]]; then
+  RUN_ENV=(env)
+  PYTHON_BIN="$TYR_QUALIFICATION_PYTHON"
+  BRIDGE_PYTHON="$TYR_QUALIFICATION_PYTHON"
+fi
+
 MODEL_DIR="${QWEN3_TTS_MODEL_DIR:-weights/qwen3-tts-0.6b-base}"
 if [[ -n "${QWEN3_TTS_PARITY_AUDIO:-}" ]]; then
   AUDIO_PATH="${QWEN3_TTS_PARITY_AUDIO}"
@@ -37,6 +47,8 @@ QWEN_REPO="${QWEN3_TTS_REPO:-../Qwen3-TTS}"
 OUT_DIR="${QWEN3_TTS_PARITY_OUT_DIR:-output/parity_regression}"
 LEAN_CODES="$OUT_DIR/lean.codes"
 PY_CODES="$OUT_DIR/python.codes"
+LEAN_LOG="$OUT_DIR/lean-encode.log"
+PY_LOG="$OUT_DIR/python-encode.log"
 TYR_DEVICE="${TYR_DEVICE:-mps}"
 DEVICE_MAP="${QWEN3_TTS_DEVICE_MAP:-mps}"
 
@@ -76,24 +88,37 @@ if [[ "$CHECK_ONLY" == "true" ]]; then
 fi
 
 mkdir -p "$OUT_DIR"
+# Only codec files produced by this invocation may satisfy the comparison.
+rm -f "$LEAN_CODES" "$PY_CODES"
 
 echo "[qwen3tts-parity] building Lean executable"
-uv run lake build Qwen3TTSEndToEnd >/dev/null
+if [[ "${TYR_SKIP_QUALIFICATION_BUILD:-0}" != 1 ]]; then
+  "${RUN_ENV[@]}" lake -R build Qwen3TTSEndToEnd >/dev/null
+fi
 
 echo "[qwen3tts-parity] Lean encode"
-TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
+TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake -R env ./.lake/build/bin/Qwen3TTSEndToEnd \
   --model-dir "$MODEL_DIR" \
+  --seed "${TYR_QUALIFICATION_SEED:-0}" \
   --encode-audio-path "$AUDIO_PATH" \
   --encode-out-codes-path "$LEAN_CODES" \
-  --encode-only >/dev/null
+  --python "$BRIDGE_PYTHON" \
+  --qwen-repo "$QWEN_REPO" \
+  --encode-only 2>&1 | tee "$LEAN_LOG"
+
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]] && \
+    ! grep -Eq '^Target device: torch\.Device\.CUDA [0-9]+$' "$LEAN_LOG"; then
+  echo "[qwen3tts-parity] FAIL: missing Lean CUDA execution evidence in $LEAN_LOG"
+  exit 1
+fi
 
 echo "[qwen3tts-parity] Python reference encode"
-uv run python scripts/qwen3tts_encode_audio.py \
+"${RUN_ENV[@]}" "$PYTHON_BIN" scripts/qwen3tts_encode_audio.py \
   --speech-tokenizer-dir "$MODEL_DIR/speech_tokenizer" \
   --audio "$AUDIO_PATH" \
   --output-codes "$PY_CODES" \
   --device-map "$DEVICE_MAP" \
-  --qwen3-tts-repo "$QWEN_REPO" >/dev/null
+  --qwen3-tts-repo "$QWEN_REPO" 2>&1 | tee "$PY_LOG"
 
 PREFIX_ROWS="${QWEN3_TTS_PARITY_PREFIX_ROWS:-125}"
 PREFIX_TOKEN_MIN="${QWEN3_TTS_PARITY_PREFIX_TOKEN_MIN:-0.99}"
@@ -101,7 +126,7 @@ PREFIX_ROW_MIN="${QWEN3_TTS_PARITY_PREFIX_ROW_MIN:-0.99}"
 FULL_TOKEN_MIN="${QWEN3_TTS_PARITY_FULL_TOKEN_MIN:-0.10}"
 NONZERO_MIN="${QWEN3_TTS_PARITY_NONZERO_MIN:-0.90}"
 
-uv run python - "$LEAN_CODES" "$PY_CODES" \
+"${RUN_ENV[@]}" "$PYTHON_BIN" - "$LEAN_CODES" "$PY_CODES" \
   "$PREFIX_ROWS" "$PREFIX_TOKEN_MIN" "$PREFIX_ROW_MIN" "$FULL_TOKEN_MIN" "$NONZERO_MIN" <<'PY'
 import sys
 from pathlib import Path
@@ -113,11 +138,20 @@ prefix_tok_min = float(p_tok_s)
 prefix_row_min = float(p_row_s)
 full_tok_min = float(full_tok_s)
 nonzero_min = float(nonzero_s)
+if prefix_rows <= 0 or not all(np.isfinite(x) and 0.0 <= x <= 1.0
+                              for x in (prefix_tok_min, prefix_row_min, full_tok_min, nonzero_min)):
+    sys.exit("[qwen3tts-parity] FAIL: require positive prefix rows and finite thresholds in [0, 1]")
 
 def read_codes(path: str) -> np.ndarray:
-    lines = [ln.strip() for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    rows = [[int(x) for x in ln.split()] for ln in lines]
-    return np.asarray(rows, dtype=np.int64)
+    try:
+        lines = [ln.strip() for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
+        rows = [[int(x) for x in ln.split()] for ln in lines]
+        codes = np.asarray(rows, dtype=np.int64)
+    except (OSError, ValueError, OverflowError) as error:
+        sys.exit(f"[qwen3tts-parity] FAIL: invalid codec matrix {path}: {error}")
+    if codes.ndim != 2 or codes.size == 0 or not np.isfinite(codes).all():
+        sys.exit(f"[qwen3tts-parity] FAIL: expected a nonempty finite 2D codec matrix at {path}; shape={codes.shape}")
+    return codes
 
 lean = read_codes(lean_path)
 py = read_codes(py_path)

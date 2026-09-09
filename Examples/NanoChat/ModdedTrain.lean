@@ -420,7 +420,7 @@ structure ValidationResult where
 def validate {cfg : moddedGpt.Config}
     (params : ModdedGPTParams cfg)
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
-    (valData : DataShard)
+    (valData : Σ n, DataShard n)
     (batchSize seqLen : UInt64)
     (device : Device := Device.CPU)
     (numBatches : UInt64 := 10)
@@ -430,7 +430,7 @@ def validate {cfg : moddedGpt.Config}
   let mut numValid := 0
 
   -- Create iterator
-  let mut iter := BatchIterator.new valData batchSize seqLen
+  let mut iter := BatchIterator.new valData.2 batchSize seqLen
 
   for _ in [:numBatches.toNat] do
     let (maybeBatch, newIter) ← iter.nextGPT
@@ -481,6 +481,9 @@ structure DataCursor where
   batchCount : UInt64
   /-- Current BOS-finder token offset inside the current shard. -/
   bosCurrentPos : UInt64
+  /-- Versioned full-partition document-stream cursor. Legacy offsets cannot
+      identify the new shuffled stream and are rejected on exact resume. -/
+  streamCursor? : Option StreamCursor := none
   deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Training metadata stored alongside tensor checkpoints. -/
@@ -691,35 +694,16 @@ private def captureDataCursor (gen : DistributedDataGenerator) : DataCursor := {
   epoch := gen.iterator.epoch
   batchCount := gen.iterator.batchCount
   bosCurrentPos := gen.iterator.shard.bosFinder.currentPos
+  streamCursor? := some gen.cursor
 }
 
 private def restoreDataCursor (gen : DistributedDataGenerator) (cursor : DataCursor)
     : IO DistributedDataGenerator := do
-  if gen.trainPaths.isEmpty then
-    return gen
-  let pathIdx := cursor.trainPathIdx % gen.trainPaths.size
-  let path := gen.trainPaths[pathIdx]!
-  let shard ← DataShard.load path gen.rank gen.worldSize gen.config.bosToken
-  let baseFinder :=
-    if cursor.epoch == 0 then
-      shard.bosFinder
-    else
-      shard.bosFinder.shuffle (cursor.epoch - 1)
-  let cursorPos := min cursor.bosCurrentPos baseFinder.dataLen
-  let finder := { baseFinder with currentPos := cursorPos }
-  let iter : BatchIterator := {
-    shard := { shard with bosFinder := finder }
-    batchSize := gen.iterator.batchSize
-    seqLen := gen.iterator.seqLen
-    batchCount := cursor.batchCount
-    epoch := cursor.epoch
-  }
-  return {
-    gen with
-    iterator := iter
-    globalStep := cursor.globalStep
-    trainPathIdx := pathIdx
-  }
+  if gen.worldSize != 1 then
+    throw <| IO.userError "Exact distributed data resume requires per-rank cursors; this checkpoint stores only rank 0"
+  let some streamCursor := cursor.streamCursor?
+    | throw <| IO.userError "Legacy data cursor used truncated, unshuffled shards; restart the data stream explicitly instead of exact resume"
+  gen.restoreCursor streamCursor
 
 private def mergedResumeHyperparameters (requested saved : Hyperparameters) : Hyperparameters :=
   { saved with
@@ -898,7 +882,7 @@ structure TrainState (cfg : moddedGpt.Config) where
   /-- Data generator -/
   dataGen : DistributedDataGenerator
   /-- Validation data -/
-  valData : Option DataShard
+  valData : Option (Σ n, DataShard n)
   /-- Current step -/
   step : UInt64
   /-- Best validation loss -/
@@ -1279,10 +1263,8 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
     let gradAccum := effectiveGradAccumSteps hp 1
-    let dataGen := {
-      state.dataGen with
-      iterator := state.dataGen.iterator.updateParams batchSize seqLen
-    }
+    let iterator ← state.dataGen.iterator.updateParams batchSize seqLen
+    let dataGen := { state.dataGen with iterator }
     let mut microBatches : Array (T #[batchSize, seqLen] × T #[batchSize, seqLen]) := #[]
     let mut newDataGen := dataGen
     let device := state.params.embed.device
@@ -1550,10 +1532,8 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
     let gradAccum := effectiveGradAccumSteps hp state.worldSize
-    let dataGen := {
-      state.dataGen with
-      iterator := state.dataGen.iterator.updateParams batchSize seqLen
-    }
+    let iterator ← state.dataGen.iterator.updateParams batchSize seqLen
+    let dataGen := { state.dataGen with iterator }
     let mut microBatches : Array (T #[batchSize, seqLen] × T #[batchSize, seqLen]) := #[]
     let mut newDataGen := dataGen
     let device := state.params.embed.device

@@ -209,33 +209,12 @@ private def loadEncodeRVQ
     codebooks := codebooks.push cb
   pure { inputProj, codebooks }
 
-/-- Validation for Lean encoder support of tokenizer v2/12Hz family.
-    Allows variable quantizer counts while keeping architecture constants fixed. -/
-private def validateEncoderVariantSupported (cfg : SpeechTokenizer12HzConfig) : IO Unit := do
-  let d := cfg.decoder
-  requireTrue (d.codebookSize == 2048) s!"Unsupported speech tokenizer codebook_size={d.codebookSize} (expected 2048)"
-  requireTrue (d.codebookDim == 512) s!"Unsupported speech tokenizer codebook_dim={d.codebookDim} (expected 512)"
-  requireTrue (d.latentDim == 1024) s!"Unsupported speech tokenizer latent_dim={d.latentDim} (expected 1024)"
-  requireTrue (d.hiddenSize == 512) s!"Unsupported speech tokenizer hidden_size={d.hiddenSize} (expected 512)"
-  requireTrue (d.intermediateSize == 1024) s!"Unsupported speech tokenizer intermediate_size={d.intermediateSize} (expected 1024)"
-  requireTrue (d.headDim == 64) s!"Unsupported speech tokenizer head_dim={d.headDim} (expected 64)"
-  requireTrue (d.numAttentionHeads == 8) s!"Unsupported speech tokenizer num_attention_heads={d.numAttentionHeads} (expected 8)"
-  requireTrue (d.numKeyValueHeads == 8) s!"Unsupported speech tokenizer num_key_value_heads={d.numKeyValueHeads} (expected 8)"
-  requireTrue (d.numHiddenLayers == 8) s!"Unsupported speech tokenizer num_hidden_layers={d.numHiddenLayers} (expected 8)"
-  requireTrue (d.slidingWindow == 250) s!"Unsupported speech tokenizer sliding_window={d.slidingWindow} (expected 250)"
-  requireTrue (d.upsampleRates == #[8, 5, 4, 3]) s!"Unsupported speech tokenizer upsample_rates={d.upsampleRates} (expected #[8,5,4,3])"
-  requireTrue (d.upsamplingRatios == #[2, 2]) s!"Unsupported speech tokenizer upsampling_ratios={d.upsamplingRatios} (expected #[2,2])"
-  requireTrue (d.decoderDim == 1536) s!"Unsupported speech tokenizer decoder_dim={d.decoderDim} (expected 1536)"
-  requireTrue (cfg.decodeUpsampleRate == 1920) s!"Unsupported decode_upsample_rate={cfg.decodeUpsampleRate} (expected 1920)"
-  requireTrue (d.numQuantizers >= 1) s!"Unsupported speech tokenizer num_quantizers={d.numQuantizers} (must be >= 1)"
-  requireTrue (d.numSemanticQuantizers >= 1) s!"Unsupported speech tokenizer num_semantic_quantizers={d.numSemanticQuantizers} (must be >= 1)"
-  requireTrue (d.numSemanticQuantizers < d.numQuantizers)
-    s!"Unsupported tokenizer quantizer split: semantic={d.numSemanticQuantizers}, total={d.numQuantizers} (need semantic < total)"
-
 /-- Load 12Hz speech-tokenizer encoder weights from `speech_tokenizer` directory. -/
 def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzEncoder := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
-  SpeechTokenizer12HzConfig.validateSupported cfg
+  let counts ← cfg.encoderCodebookCounts
+  requireTrue (counts == (1, 15))
+    "Fixed 16-group encoder requires encoder_valid_num_quantizers=16 and one semantic quantizer"
 
   let weightsPath := s!"{speechTokenizerDir}/model.safetensors"
 
@@ -300,11 +279,9 @@ def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : 
     tokenizer variants with different quantizer counts. -/
 def loadFromDirFlexible (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzEncoder := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
-  validateEncoderVariantSupported cfg
+  let (semanticLayers, acousticLayers) ← cfg.encoderCodebookCounts
 
   let weightsPath := s!"{speechTokenizerDir}/model.safetensors"
-  let semanticLayers : Nat := cfg.decoder.numSemanticQuantizers.toNat
-  let acousticLayers : Nat := (cfg.decoder.numQuantizers - cfg.decoder.numSemanticQuantizers).toNat
 
   let conv0Weight ← loadFrozen weightsPath "encoder.encoder.layers.0.conv.weight" #[64, 1, 7]
   let conv0Bias ← loadFrozen weightsPath "encoder.encoder.layers.0.conv.bias" #[64]
@@ -357,8 +334,8 @@ def loadFromDirFlexible (speechTokenizerDir : String) (device : Device := Device
     downsampleWeight
     semanticRVQ
     acousticRVQ
-    inputSampleRate := cfg.outputSampleRate
-    encodeDownsampleRate := cfg.decodeUpsampleRate
+    inputSampleRate := cfg.inputSampleRate
+    encodeDownsampleRate := cfg.encodeDownsampleRate
   }
   pure (TensorStruct.map (fun t => t.to device) enc)
 

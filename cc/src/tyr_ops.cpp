@@ -10,6 +10,7 @@
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#include "tyr_attention.h"
 
 #ifndef TYR_OPS_HAS_CUDA_TOOLKIT
 #define TYR_OPS_HAS_CUDA_TOOLKIT 0
@@ -218,20 +219,6 @@ struct LeanTensorRef {
 
 static inline double default_scale_for_dim(int64_t head_dim) {
   return 1.0 / std::sqrt(static_cast<double>(head_dim));
-}
-
-static inline torch::Tensor scale_query_if_needed(
-    const torch::Tensor& query,
-    const c10::optional<double>& scale) {
-  if (!scale.has_value()) {
-    return query;
-  }
-  const double default_scale = default_scale_for_dim(query.size(-1));
-  if (std::abs(scale.value() - default_scale) <= 1.0e-6) {
-    return query;
-  }
-  const double factor = scale.value() / default_scale;
-  return query * factor;
 }
 
 static inline bool scale_matches_default(
@@ -647,22 +634,6 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> vendored_tk_backw
   return {result[0], result[1], result[2]};
 }
 
-static torch::Tensor expand_kv_heads_for_gqa(
-    const torch::Tensor& tensor,
-    int64_t q_heads,
-    int64_t kv_heads,
-    bool enable_gqa,
-    const char* which) {
-  if (!enable_gqa || q_heads == kv_heads) {
-    return tensor;
-  }
-  TORCH_CHECK(kv_heads > 0, "tyr::flash_attn: ", which, " has zero KV heads");
-  TORCH_CHECK(q_heads % kv_heads == 0,
-    "tyr::flash_attn: enable_gqa=true requires q_heads to be divisible by kv_heads");
-  auto repeat_factor = q_heads / kv_heads;
-  return tensor.repeat_interleave(repeat_factor, 1);
-}
-
 static torch::Tensor portable_flash_attn(
     const torch::Tensor& query,
     const torch::Tensor& key,
@@ -672,69 +643,8 @@ static torch::Tensor portable_flash_attn(
     bool is_causal,
     const c10::optional<double>& scale,
     bool enable_gqa) {
-  auto q = scale_query_if_needed(query, scale);
-  auto k = expand_kv_heads_for_gqa(key, q.size(1), key.size(1), enable_gqa, "key");
-  auto v = expand_kv_heads_for_gqa(value, q.size(1), value.size(1), enable_gqa, "value");
-
-  if (!attn_mask.has_value() || !attn_mask->defined()) {
-    // On CUDA, prefer native grouped-query flash attention: pass the unexpanded
-    // K/V with enable_gqa and scope the SDP backend to flash, avoiding the
-    // (n_head/n_kv_head)x KV blow-up that head expansion costs at long context.
-    // Restore the backend flags afterwards; fall back to the expanded portable
-    // path on CPU or if flash declines these inputs.
-    // NOTE: the backend flags are process-global; this assumes attention calls
-    // are not issued concurrently from other threads (server runs serially).
-    if (query.is_cuda()) {
-      auto& ctx = at::globalContext();
-      const bool savedMath = ctx.userEnabledMathSDP();
-      const bool savedMem = ctx.userEnabledMemEfficientSDP();
-      const bool savedCudnn = ctx.userEnabledCuDNNSDP();
-      ctx.setSDPUseMath(false);
-      ctx.setSDPUseMemEfficient(false);
-      ctx.setSDPUseCuDNN(false);
-      try {
-        auto out = torch::scaled_dot_product_attention(
-            query, key, value, c10::nullopt, dropout_p, is_causal, scale, enable_gqa);
-        ctx.setSDPUseMath(savedMath);
-        ctx.setSDPUseMemEfficient(savedMem);
-        ctx.setSDPUseCuDNN(savedCudnn);
-        return out;
-      } catch (const std::exception&) {
-        ctx.setSDPUseMath(savedMath);
-        ctx.setSDPUseMemEfficient(savedMem);
-        ctx.setSDPUseCuDNN(savedCudnn);
-      }
-    }
-    return torch::scaled_dot_product_attention(
-        q, k, v, c10::nullopt, dropout_p, is_causal);
-  }
-
-  auto padding_mask = attn_mask->to(q.device());
-  auto kv_seq = k.size(2);
-  auto q_seq = q.size(2);
-  TORCH_CHECK(padding_mask.size(1) == kv_seq,
-    "tyr::flash_attn: attn_mask kv dimension must match K/V sequence length");
-
-  auto key_mask = padding_mask.unsqueeze(1).unsqueeze(2);
-  torch::Tensor expanded_mask;
-  if (is_causal) {
-    auto row_idx = torch::arange(q_seq, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
-    auto col_idx = torch::arange(kv_seq, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);
-    auto causal_mask = col_idx > row_idx;
-    auto combined_mask = causal_mask.unsqueeze(0).unsqueeze(0) | (key_mask == 0);
-    expanded_mask = torch::where(
-        combined_mask,
-        torch::full(combined_mask.sizes(), -std::numeric_limits<float>::infinity(), q.options()),
-        torch::zeros(combined_mask.sizes(), q.options()));
-  } else {
-    expanded_mask = torch::where(
-        key_mask == 0,
-        torch::full(key_mask.sizes(), -std::numeric_limits<float>::infinity(), q.options()),
-        torch::zeros(key_mask.sizes(), q.options()));
-  }
-
-  return torch::scaled_dot_product_attention(
-      q, k, v, expanded_mask, dropout_p, false);
+  return bounded_sdpa(query, key, value, attn_mask, AttentionMaskKind::Padding,
+      dropout_p, is_causal, scale, enable_gqa);
 }
 
 template <FlashAttnRoute Route, FlashAttnImpl Impl>
