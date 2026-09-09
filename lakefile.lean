@@ -271,7 +271,9 @@ package tyr where
 require LeanTest from git "https://github.com/cpehle/lean_test.git" @ "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c"
 require LeanBenchmark from git "https://github.com/cpehle/lean-benchmark.git" @
   "9ab68a2e976aef3791b5b5630be8f5f1e8f79fe9"
-require LeanUrdfTypeProvider from "../lean-urdf-typeprovider"
+require LeanUrdfTypeProvider from git
+  "https://github.com/ranvier-labs/lean-urdf-typeprovider.git" @
+  "5712c1fcdf4462d1e7a216f12159651381410149"
 
 /-! ## Platform Detection
 
@@ -429,7 +431,6 @@ def gpuMakeEnv : IO (Array (String × Option String)) := do
 extern_lib libtyr pkg := do
   let tyrCLib := pkg.dir / "cc" / "build" / "libTyrC.a"
   let gpuIrRoot := pkg.buildDir / "ir" / "Tyr" / "GPU"
-  let gpuKernelSrcRoot := pkg.dir / "Tyr" / "GPU" / "Kernels"
   let generatedCudaDir := pkg.dir / "cc" / "src" / "generated"
   let gpuCodegenConfigPath := pkg.buildDir / "libtyr_gpu_codegen.env"
   -- TYR_GPU_CODEGEN_MODULE may be a single module name OR a space-separated
@@ -457,21 +458,54 @@ extern_lib libtyr pkg := do
     IO.FS.createDirAll pkg.buildDir
     IO.FS.writeFile gpuCodegenConfigPath gpuCodegenConfig
 
+  let sysroot ← getLeanSysroot
+  let gpuEnv ← gpuMakeEnv
+  let extraEnv :=
+    if System.Platform.isOSX then
+      #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
+    else
+      #[]
+  let nativeEnv := #[
+    ("LEAN_HOME", some sysroot.toString),
+    ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
+  ] ++ gpuEnv ++ extraEnv
+  -- Refresh content-stable manifests before Lake checks its native trace. Make
+  -- owns effective compiler/GPU detection; the stub inventory also notices new
+  -- kernel declarations without invalidating every native object on body edits.
+  let nativeConfigOut ← IO.Process.output {
+    cmd := "make"
+    args := #["-s", "-C", (pkg.dir / "cc").toString, "native-config", "gpu-stubs"]
+    env := nativeEnv
+  }
+  if nativeConfigOut.exitCode != 0 then
+    error s!"Failed to refresh native build inputs:\n{nativeConfigOut.stderr}"
+
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
   let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
   let gpuCodegenConfigJob ← inputTextFile gpuCodegenConfigPath
+  let nativeConfigJob ← inputTextFile <| pkg.dir / "cc" / "build" / "native-build.json"
+  let nativeDependenciesPath := pkg.dir / "cc" / "build" / "native-dependencies.txt"
+  let nativeDependenciesManifestJob ← inputTextFile nativeDependenciesPath
+  let mut nativeDependenciesJob := Job.mixArray #[nativeDependenciesManifestJob]
+  -- Consume compiler-discovered dependencies too (including vendor headers).
+  -- Make exports absolute, existing paths; removed headers change this manifest.
+  for path in (← IO.FS.readFile nativeDependenciesPath).splitOn "\n" do
+    if !path.isEmpty then
+      let header ← inputTextFile (FilePath.mk path)
+      nativeDependenciesJob := nativeDependenciesJob.mix header
   let srcJob ← inputDir (pkg.dir / "cc" / "src") (text := true) fun p =>
     p.toString.endsWith ".cpp" || p.toString.endsWith ".mm" ||
-      p.toString.endsWith ".cu" || p.toString.endsWith ".h"
+      p.toString.endsWith ".cu" || p.toString.endsWith ".h" || p.toString.endsWith ".hpp"
+  let headerJob ← inputDir (pkg.dir / "cc" / "include") (text := true) fun p =>
+    p.toString.endsWith ".h" || p.toString.endsWith ".hpp"
   let toolJob ← inputDir (pkg.dir / "cc" / "tools") (text := true) fun p =>
     p.toString.endsWith ".py"
-  -- Note: we deliberately do NOT watch `gpuKernelSrcRoot` (the kernel `.lean`
+  -- Note: we deliberately do NOT watch the kernel `.lean`
   -- source tree). Changes to a kernel `.lean` file flow through Lean
   -- compilation to its `.c.o.export`, which `gpuIrJob` already watches with
   -- the right scope (only the active codegen module's IR triggers a rebuild).
   -- Watching the whole `Tyr/GPU/Kernels/` directory caused every kernel-edit
   -- in the workspace to invalidate the libtyr build cascade.
-  let _ := gpuKernelSrcRoot
   -- Fresh checkouts do not have the generated GPU IR tree yet.
   -- Create it so the optional IR scan can track later `.c.o.export` files instead of failing early.
   IO.FS.createDirAll gpuIrRoot
@@ -501,16 +535,10 @@ extern_lib libtyr pkg := do
     else
       inputDir gpuIrRoot (text := false) fun p =>
         p.toString.endsWith ".c.o.export"
-  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix srcJob |>.mix toolJob |>.mix gpuIrJob
+  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix nativeConfigJob |>.mix nativeDependenciesJob
+    |>.mix srcJob |>.mix headerJob |>.mix toolJob |>.mix gpuIrJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do
-    let sysroot ← getLeanSysroot
-    let gpuEnv ← gpuMakeEnv
-    let extraEnv :=
-      if System.Platform.isOSX then
-        #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
-      else
-        #[]
     let skipGpuCodegen? ← IO.getEnv "TYR_SKIP_GPU_CODEGEN"
     if skipGpuCodegen?.getD "" != "1" then
       let generatorExe := pkg.dir / ".lake" / "build" / "bin" / "GenerateGpuKernels"
@@ -562,10 +590,7 @@ extern_lib libtyr pkg := do
     proc {
       cmd := "make"
       args := makeArgs
-      env := #[
-        ("LEAN_HOME", some sysroot.toString),
-        ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
-      ] ++ gpuEnv ++ extraEnv
+      env := nativeEnv
     }
 
 /-! ## Lean Library -/
@@ -781,7 +806,7 @@ lean_exe Qwen3ASRLiveMicTrueStream where
 
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
-  root := `Tests.TestDiffusion
+  root := `Tests.RunTestDiffusion
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -982,19 +1007,19 @@ lean_exe FluxDebug where
 
 /-- End-to-end demo for a minimal ThunderKittens-style copy kernel. -/
 lean_exe RunCopy where
-  root := `Examples.GPU.RunCopy
+  root := `Examples.GPU.RunCopyExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end rotary fixture validation using a ThunderKittens-style kernel. -/
 lean_exe RunRotary where
-  root := `Examples.GPU.RunRotary
+  root := `Examples.GPU.RunRotaryExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end ThunderKittens layernorm fixture validation. -/
 lean_exe RunLayerNorm where
-  root := `Examples.GPU.RunLayerNorm
+  root := `Examples.GPU.RunLayerNormExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1018,7 +1043,7 @@ lean_exe RunOptimizer where
 
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunFlashAttn where
-  root := `Examples.GPU.RunFlashAttn
+  root := `Examples.GPU.RunFlashAttnExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1069,7 +1094,7 @@ lean_exe RunDecodeBench where
 
 /-- End-to-end ThunderKittens `mha_h100` forward/backward fixture validation. -/
 lean_exe RunMhaH100 where
-  root := `Examples.GPU.RunMhaH100
+  root := `Examples.GPU.RunMhaH100Exe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1081,7 +1106,7 @@ lean_exe RunMhaH100Train where
 
 /-- End-to-end GB10 MHA validation and synchronized benchmark. -/
 lean_exe RunMhaGB10 where
-  root := `Examples.GPU.RunMhaGB10
+  root := `Examples.GPU.RunMhaGB10Exe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

@@ -23,6 +23,12 @@ on:
     branches: [main]
     paths:
       - 'Tyr/GPU/**'
+      - 'Tests/*GPU*.lean'
+      - 'Examples/GPU/**'
+      - 'Examples/NanoChat/Generator/KVCache.lean'
+      - 'scripts/gpu/**'
+      - 'cc/include/**'
+      - 'cc/tools/**'
       - 'cc/src/tyr*'
       - 'cc/src/tk_*'
       - 'cc/src/generated/**'
@@ -34,6 +40,12 @@ on:
     types: [labeled, opened, synchronize, reopened]
     paths:
       - 'Tyr/GPU/**'
+      - 'Tests/*GPU*.lean'
+      - 'Examples/GPU/**'
+      - 'Examples/NanoChat/Generator/KVCache.lean'
+      - 'scripts/gpu/**'
+      - 'cc/include/**'
+      - 'cc/tools/**'
       - 'cc/src/tyr*'
       - 'cc/src/tk_*'
       - 'cc/src/generated/**'
@@ -61,7 +73,8 @@ jobs:
       # GPU defaults expected on the runner; override here if a runner
       # serves a different device.
       GPU: ${{ vars.TYR_GPU || 'GB10' }}
-      TYR_GPU_FAMILY: ${{ vars.TYR_GPU_FAMILY || 'BLACKWELL' }}
+      TYR_GPU_FAMILY: ${{ vars.TYR_GPU_FAMILY }}
+      TYR_GPU_TEST_STRICT: '1'
 
     steps:
       - uses: actions/checkout@v4
@@ -144,9 +157,23 @@ jobs:
         run: nvcc --version
 
       - name: Verify GPU
-        run: nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+        run: |
+          nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+          case "$GPU" in
+            H100) expected_family=HOPPER ;;
+            GB10|B200|B300) expected_family=BLACKWELL ;;
+            *) echo "No strict smoke suite configured for GPU=$GPU" >&2; exit 1 ;;
+          esac
+          family="${TYR_GPU_FAMILY:-$expected_family}"
+          if [ "$family" != "$expected_family" ]; then
+            echo "GPU=$GPU requires TYR_GPU_FAMILY=$expected_family, got $family" >&2
+            exit 1
+          fi
+          echo "TYR_GPU_TARGET=$GPU" >> "$GITHUB_ENV"
+          echo "TYR_GPU_FAMILY=$family" >> "$GITHUB_ENV"
 
-      - name: Build GB10 E2E test runner
+      - name: Build Blackwell E2E test runner
+        if: env.GPU != 'H100'
         env:
           # GB10 needs the Blackwell-family kernels emitted; the default
           # codegen module is the Hopper MhaH100 set which won't link the
@@ -170,14 +197,24 @@ jobs:
             Tyr.GPU.Kernels.BrownianSample
           lake -R build TestGPUGB10E2E
 
-      - name: Run GB10 parity smoke
+      - name: Run strict Blackwell parity smoke
+        if: env.GPU != 'H100'
         env:
           TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample'
         run: |
           lake -R env ./.lake/build/bin/TestGPUGB10E2E --fail-fast
 
-      - name: Optional — Hopper decode parity (only if Hopper hardware)
+      - name: Build and run strict Hopper parity and cached decode
         if: env.GPU == 'H100'
+        env:
+          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.Copy Tyr.GPU.Kernels.Rotary Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode'
         run: |
-          lake -R build RunMhaH100Decode
-          ./.lake/build/bin/RunMhaH100Decode --kv-seq 1024
+          TYR_SKIP_GPU_CODEGEN=1 lake -R build \
+            Tyr.GPU.Kernels.Copy Tyr.GPU.Kernels.Rotary \
+            Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.FusedRMSNorm \
+            Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode
+          lake -R build TestGPUE2E RunMhaH100Decode
+          # Vendored references have separate optional prerequisites; every
+          # selected TorchParity case must execute actual CUDA parity here.
+          lake -R env ./.lake/build/bin/TestGPUE2E --filter TorchParity --fail-fast
+          lake -R env ./.lake/build/bin/RunMhaH100Decode

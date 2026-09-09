@@ -6,18 +6,23 @@ namespace DiffEq
 def clampIndex (n : Nat) (i : Nat) : Nat :=
   if i < n then i else if n == 0 then 0 else n - 1
 
+/-- Locate a segment in monotone ascending or descending knots. `left` always
+selects the limit from smaller physical times, independently of knot order. -/
 def findBracket (ts : Array Time) (t : Time) (left : Bool) : Nat :=
   let n := ts.size
   if n <= 1 then
     0
   else
+    let forward := ts[0]! <= ts[n - 1]!
     let rec go (i : Nat) : Nat :=
       if h : i + 1 < n then
         let t1 := ts[i + 1]!
-        if left then
-          if t <= t1 then i else go (i + 1)
-        else
-          if t < t1 then i else go (i + 1)
+        let inSegment :=
+          if forward then
+            if left then t <= t1 else t < t1
+          else
+            if left then t > t1 else t >= t1
+        if inSegment then i else go (i + 1)
       else
         n - 2
     go 0
@@ -162,14 +167,15 @@ private def selectSegment [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y)
   match splitInfos? info with
   | none => info
   | some (tSplit, leftSeg, rightSeg) =>
+      let forward := info.t0 <= info.t1
       if t < tSplit then
-        leftSeg
+        if forward then leftSeg else rightSeg
       else if t > tSplit then
-        rightSeg
+        if forward then rightSeg else leftSeg
       else if left then
-        leftSeg
+        if forward then leftSeg else rightSeg
       else
-        rightSeg
+        if forward then rightSeg else leftSeg
 
 def toInterpolation [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
     DenseInterpolation Y := by
@@ -262,16 +268,7 @@ private def segmentIndex (interp : PiecewiseDenseInterpolation Y) (t : Time) (le
   if interp.ts.size <= 1 then
     0
   else
-    let idx := findBracket interp.ts t left
-    let idx' :=
-      if !left then
-        let rightKnot := idx + 1
-        let hasRightSegment := rightKnot + 1 < interp.ts.size
-        let knotTime := interp.ts.getD rightKnot t
-        if hasRightSegment && t == knotTime then rightKnot else idx
-      else
-        idx
-    clampIndex interp.segments.size idx'
+    clampIndex interp.segments.size (findBracket interp.ts t left)
 
 private def evalAt [DiffEqSpace Y] [Inhabited Y]
     (interp : PiecewiseDenseInterpolation Y) (t : Time) (left : Bool) : Y :=

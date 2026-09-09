@@ -145,6 +145,33 @@ Items fixed in the improvement pass, with their commits.
   rejects with the semantically correct `Result.invalidInput`, and the test
   was corrected.
 
+## September 8 correctness pass
+
+- **[correctness]** Audited tensor FFI declarations now agree with generated Lean
+  C, including boxed indexing and unbinding, 64-bit factory arguments, and exact
+  reshape/load operations. A shared header and CI ABI check prevent drift.
+- **[correctness]** Checked typed constructors validate actual shapes. Typed
+  reshape checks element counts and supports real scalars. Integral promotion
+  handles UInt8/Int8 correctly and float8 metadata uses eight bits. Public
+  examples distinguish the raw shape-erased alias from the checked typed facade.
+- **[correctness]** Reverse dense interpolation and physical knot-side semantics
+  are direction-aware. The former Newton/VeryChord heuristics are now accurately
+  named NormRatioFixedPoint/AdaptiveFixedPoint, with their limitations documented.
+- **[testing]** Numerical comparisons reject nonfinite values and unequal lengths;
+  saltation boundaries validate dimensions and finite inputs/results.
+- **[testing]** Required CPU suites are enumerated in `scripts/test_suites.json`,
+  including restored Diffusion tests, TileIR specialization, and Laguna CPU
+  runners. Strict GPU CI requires actual execution and fails skipped cases.
+- **[correctness]** Native builds track compiler header dependencies, effective
+  configuration, and generated launcher inventories, with isolated incremental
+  and clean-build regression fixtures.
+- **[correctness]** Checkpoints use versioned exact loss metadata and atomically
+  published immutable snapshots. Combined training snapshots restore model,
+  optimizer moments, and step together; regressions cover interruption, concurrent
+  replacement, legacy metadata, bf16 templates, and tensor-count mismatches.
+- **[performance]** SafeTensors schema discovery reads bounded headers only,
+  without loading shard payloads; malformed and oversized headers are rejected.
+
 ## Remaining
 
 Open items, roughly by area. These were deliberately not addressed in the
@@ -163,12 +190,9 @@ pass (scope, semantics risk, or hardware requirements).
 
 ### Serialization
 
-- **[performance]** Elaboration-time SafeTensors introspection reads whole
-  shards (`Tyr/SafeTensors/Schema.lean:272-273`). → Header-only reads.
 - **[docs]** `safetensors_type_provider` failure is a generic message that
   swallows the underlying error (`TypeProvider.lean:628-632`). → Surface it.
-- **[testing]** No end-to-end checkpoint round-trip test and no Hub coverage.
-  The repo-root `dummy_path.ckpt/` directory left behind by earlier test runs
+- **[testing]** Hub coverage remains absent. The repo-root `dummy_path.ckpt/` directory left behind by earlier test runs
   can be deleted manually (the test no longer writes it).
 
 ### Modules and modular

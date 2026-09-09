@@ -124,23 +124,43 @@ chicken-and-egg problem. The Makefile breaks it by always archiving
 (`cc/Makefile:290-297, 310-320`): strong definitions from real `.cu` files win
 when present, and links succeed when they are not. The stubs are regenerated
 by `cc/tools/generate_gpu_kernel_stubs.py`, which scans `.c.o.export` IR and
-`@[gpu_kernel]` sources for launcher names. `tyr_ops.cpp` calls launchers only
+`@[gpu_kernel]` sources for launcher names. The inventory is refreshed before
+Lake checks the native build trace and on every Make invocation that needs
+stubs. It preserves the output timestamp when symbols are unchanged. Source
+declarations take precedence over stale IR when a kernel is removed; nested
+namespaces and comments are handled during source scanning.
+`tyr_ops.cpp` calls launchers only
 after a runtime Hopper check (`device_supports_tk_hopper`,
 `cc/src/tyr_ops.cpp:39-48`), routing everything else to portable SDPA.
 
 ### Build orchestration in `lakefile.lean`
 
-`extern_lib libtyr` (`lakefile.lean:416-548`) is the hub. On every build it:
+`extern_lib libtyr` in `lakefile.lean` is the hub. It:
 
 1. Writes `.lake/build/libtyr_gpu_codegen.env` recording
    `TYR_GPU_CODEGEN_MODULE` / `TYR_SKIP_GPU_CODEGEN` / `TYR_BUILD_TYRC_DYLIB`,
    so changing any of them invalidates the native build.
-2. Mixes Lake jobs over `cc/Makefile`, `cc/src` (all `.cpp/.mm/.cu/.h`),
-   `cc/tools` (`*.py`), and the active kernel module's `.c.o.export` IR.
-3. Unless `TYR_SKIP_GPU_CODEGEN=1`, runs `lake -R build GenerateGpuKernels` and
+2. Runs `make -s -C cc native-config gpu-stubs` to refresh content-stable
+   native configuration and symbol inventories. `cc/build/native-build.json`
+   records effective compilers, flags, GPU target/family/compute/code, library
+   paths, and selected objects, including values discovered by Make.
+3. Mixes Lake jobs over those manifests, `cc/Makefile`, `cc/src`,
+   `cc/include`, `cc/tools`, and the active kernel module's `.c.o.export` IR.
+   Compiler-generated `.d` files also feed `native-dependencies.txt`, whose
+   existing paths are tracked by Lake, including vendor headers.
+4. Unless `TYR_SKIP_GPU_CODEGEN=1`, runs `lake -R build GenerateGpuKernels` and
    executes it into `cc/src/generated/`.
-4. Runs `make -C cc lib [dylib]` with `gpuMakeEnv` forwarding
-   `GPU`/`GPU_FAMILY`/`GPU_COMPUTE`/`GPU_CODE` (`lakefile.lean:389-411`).
+5. Runs `make -C cc lib [dylib]` with `gpuMakeEnv` forwarding
+   `GPU`/`GPU_FAMILY`/`GPU_COMPUTE`/`GPU_CODE`.
+
+Make uses compiler dependency files for C, C++, Objective-C++, and CUDA.
+Header changes rebuild their consumers; native configuration changes rebuild
+the selected objects and relink the archives/libraries. No-op manifest refreshes
+leave existing object timestamps unchanged. The inexpensive regression command
+`python3 scripts/test_native_build.py` exercises these rules with tiny sources
+in a temporary checkout: header edits, architecture switches, renamed headers,
+clean/incremental output agreement, and launcher additions/removals. It does
+not compile LibTorch or CUDA and does not modify workspace build artifacts.
 
 The Makefile probes everything at parse time — Lean (`lean --print-prefix`),
 vendored libtorch (`external/libtorch`), soxr (built from the
@@ -262,7 +282,8 @@ opaque get_live_tensors : IO UInt64
 opaque manual_seed (seed : UInt64) : IO Unit
 ```
 
-Makefile targets: `lib` (default static archive), `dylib`, `all`,
+Makefile targets: `all` (default; static and shared libraries), `lib`, `dylib`,
+`native-config`, `gpu-stubs`,
 `bench-flash-attn` (standalone C++ attention benchmark from
 `cc/tools/bench_flash_attn.cpp`), `soxr`, `clean`. `check-submodules` runs
 first and fails early with the `git submodule update --init --recursive` hint

@@ -22,7 +22,11 @@
       decode-time KV truncation is exercised). CPU fp32 dense (tol 2e-4),
       CUDA fp32 dense (tol 1e-2), CPU + CUDA bf16 MoE (tol 0.1 — bf16 has
       ~3 decimal digits; prefill (causal seq SDPA) and decode (q_seq=1 SDPA)
-      kernels round differently; random-weight logits are O(1)).
+      kernels round differently; random-weight logits are O(1)). The cache
+      fixture gives MoE selection scores a guaranteed margin, so rounding
+      cannot switch experts. The same dequantized weights also run through
+      a tight FP32 MoE cache oracle. Unconstrained routing remains covered
+      by LagunaMoeTest and the generation checks below.
   (b) Sliding-window invariance: single-layer sliding model (window 8, fp32,
       dense MLP) — changing input token 0 leaves logits at positions 8..19
       EXACTLY unchanged (window edge: position 7 sees token 0, position 8
@@ -95,9 +99,27 @@ private def deviceLabel : Device → String
 private def moveModel {α : Type} [TensorStruct α] (m : α) (device : Device) (bf16 : Bool) : α :=
   TensorStruct.map (fun t => (if bf16 then toBFloat16' t else t).to device) m
 
-/-- Max absolute difference between two shape-erased tensors, in FP32. -/
-private def maxAbsDiff (a b : T #[]) : IO Float :=
-  pure (nn.item (nn.maxAll (nn.abs (sub (toFloat' a) (toFloat' b)))))
+/-- Validate before aggregating: NaN must not disappear in `if d > max`. -/
+private def maxAbsDiff (a b : T #[]) : IO Float := do
+  if a.runtimeShape != b.runtimeShape then
+    throw <| IO.userError "Tensor comparison runtime shape mismatch"
+  let diff := nn.item (nn.maxAll (nn.abs (sub (toFloat' a) (toFloat' b))))
+  if !diff.isFinite then
+    throw <| IO.userError "Non-finite tensor comparison"
+  pure diff
+
+private def checkComparisonFailures : IO Unit := do
+  for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
+    let rejected ← try
+      let _ ← maxAbsDiff (full #[1] invalid) (zeros #[1])
+      pure false
+    catch _ => pure true
+    check rejected "comparison rejects NaN/infinity before max aggregation"
+  let rejected ← try
+    let _ ← maxAbsDiff (zeros #[1]) (zeros #[2])
+    pure false
+  catch _ => pure true
+  check rejected "comparison rejects broadcastable shape mismatch"
 
 /-- Deterministic int64 token-id tensor `[1, seq]` on `device`. -/
 private def mkIds (vals : Array Int64) (device : Device) : T #[1, vals.size.toUInt64] :=
@@ -109,10 +131,37 @@ private def baseIds : Array Int64 :=
 
 /-! ## (a) KV-cache parity -/
 
-private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol : Float) : IO Unit := do
-  let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
-  torch.manualSeed 1234
-  let model : LagunaForCausalLM cfg := moveModel (← LagunaForCausalLM.init cfg) device bf16
+/-- Sigmoid router scores lie in [0,1]. Biases spaced by 2 guarantee the
+selected set even when differently sized BF16 matmuls perturb the scores.
+Only selection is stabilized: the distinct expert weights and input-dependent
+routing weights still participate in every cache comparison. -/
+private def withStableRoutes (cfg : Config) (m : LagunaForCausalLM cfg) : LagunaForCausalLM cfg :=
+  { m with model := { m.model with layers := m.model.layers.map fun layer =>
+      { layer with sparseMoe := layer.sparseMoe.map fun moe =>
+          let bias : T #[cfg.num_experts] := reshape
+            (mul_scalar (toFloat' ((arange 0 cfg.num_experts).to moe.router.weight.device)) 2.0)
+            #[cfg.num_experts]
+          { moe with router := { moe.router with eScoreCorrectionBias := some bias } } } } }
+
+/-- Materialize the original NVFP4 weights once, preserving their BF16
+rounding, then upcast the entire model. The oracle exercises the same MoE
+weights and routing, including the single-token expert dispatch path. -/
+private def floatReference (cfg : Config) (m : LagunaForCausalLM cfg) : IO (LagunaForCausalLM cfg) := do
+  let layers ← m.model.layers.mapM fun layer => do
+    let sparseMoe ← layer.sparseMoe.mapM fun moe => do
+      let p := moe.experts
+      let gateProj ← nvfp4.dequantBank p.gatePacked p.gateScale p.gateGlobal
+        cfg.num_experts cfg.moe_intermediate_size cfg.hidden_size
+      let upProj ← nvfp4.dequantBank p.upPacked p.upScale p.upGlobal
+        cfg.num_experts cfg.moe_intermediate_size cfg.hidden_size
+      let downProj ← nvfp4.dequantBank p.downPacked p.downScale p.downGlobal
+        cfg.num_experts cfg.hidden_size cfg.moe_intermediate_size
+      pure { moe with denseExperts := some { gateProj, upProj, downProj } }
+    pure { layer with sparseMoe }
+  pure (TensorStruct.map (fun t => toFloat' t) { m with model := { m.model with layers } })
+
+private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
+    (model : LagunaForCausalLM cfg) (tol : Float) : IO Unit := do
   let seq : UInt64 := 20
   let ids : T #[1, seq] := mkIds baseIds device
 
@@ -136,6 +185,11 @@ private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol :
   let logitsP : T #[1, prefillLen, 1024] := linear3d hiddenP model.lmHead
   let logitsPRef : T #[1, prefillLen, 1024] := data.slice logitsAll 1 0 prefillLen
   let dPrefillPart ← maxAbsDiff (nn.eraseShape logitsP) (nn.eraseShape logitsPRef)
+  -- This isolates cache writes from batch-size-dependent arithmetic: both
+  -- forwards consume exactly the same prefix with the same operation shapes.
+  let logitsUncachedPrefix ← model.forward cfg idsPre
+  let dSamePrefix ← maxAbsDiff (nn.eraseShape logitsP) (nn.eraseShape logitsUncachedPrefix)
+  check (dSamePrefix == 0.0) s!"(a) [{lbl}] same-prefix prefill is exactly equal to uncached forward"
 
   let mut cache := cacheP1
   let mut dStep : Float := 0.0
@@ -153,6 +207,16 @@ private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol :
   check (dPrefill ≤ tol) s!"(a) [{lbl}] prefill-20 logits match full forward (maxAbs={dPrefill})"
   check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
   check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
+
+private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol : Float) : IO Unit := do
+  let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
+  torch.manualSeed 1234
+  let model := withStableRoutes cfg (moveModel (← LagunaForCausalLM.init cfg) device bf16)
+  runCacheParityModel cfg device lbl model tol
+  if bf16 then
+    let reference ← floatReference cfg model
+    let referenceTol := match device with | .CPU => 2e-4 | _ => 1e-2
+    runCacheParityModel cfg device s!"{deviceLabel device}/fp32-moe-oracle" reference referenceTol
 
 /-! ## (b) Sliding-window invariance -/
 
@@ -221,6 +285,7 @@ private def runGenerateCheck (device : Device) : IO Unit := do
   check (ncb == 6) s!"(c) [{lbl}] stream callback fired {ncb} == 6 times"
 
 def main : IO Unit := do
+  checkComparisonFailures
   IO.println "-- (a) KV-cache parity: full forward vs prefill + decode"
   -- fp32 all-dense 4-layer model: tight tolerance on CPU, looser on CUDA
   -- (different SDPA kernels between causal prefill and q_seq=1 decode).

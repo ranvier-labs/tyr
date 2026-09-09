@@ -12,7 +12,7 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
-import Examples.NanoProof.Model
+import Examples.Diffusion.Parameters
 
 namespace torch.diffusion
 
@@ -56,7 +56,7 @@ structure DiffusionParams (cfg : Config) where
   token_emb : T #[cfg.vocab_size, cfg.n_embd]
   -- Time embedding for timesteps
   time_emb : T #[cfg.diffusion_steps, cfg.n_embd]
-  -- Transformer blocks (reuse from NanoProof with n_head = n_kv_head)
+  -- Transformer blocks with equal query and KV head counts.
   blocks : Array (BlockParams cfg.n_embd cfg.n_head cfg.n_head)
   -- Output head (NOT tied to token_emb)
   output_head : T #[cfg.vocab_size, cfg.n_embd]
@@ -105,7 +105,7 @@ def DiffusionParams.init (cfg : Config) : IO (DiffusionParams cfg) := do
   let output_head := zeros #[cfg.vocab_size, cfg.n_embd]
 
   return {
-    token_emb := makeLeafParam (token_emb * scale)
+    token_emb := makeLeafParam (mul_scalar token_emb scale)
     time_emb := makeLeafParam time_emb  -- standard normal init for embeddings
     blocks := blocks
     output_head := makeLeafParam output_head
@@ -154,7 +154,7 @@ def bidirectionalAttentionForward {batch seq n_embd n_head : UInt64}
   -- Output projection (no bias)
   linear3d attn params.c_proj
 
-/-- MLP forward pass with ReLU² (reuse from NanoProof) -/
+/-- MLP forward pass with ReLU². -/
 def mlpForward {batch seq n_embd : UInt64}
     (params : MLPParams n_embd)
     (x : T #[batch, seq, n_embd])

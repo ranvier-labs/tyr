@@ -117,6 +117,9 @@ gpu_family="$(detect_gpu_family)"
 export TYR_GPU_TARGET="${TYR_GPU_TARGET:-${gpu_target}}"
 export TYR_GPU_FAMILY="${TYR_GPU_FAMILY:-${gpu_family}}"
 runner_source="Examples/GPU/${runner_exe}.lean"
+if [[ -f "Examples/GPU/${runner_exe}Exe.lean" ]]; then
+  runner_source="Examples/GPU/${runner_exe}Exe.lean"
+fi
 use_source_runner=0
 
 echo "[3/6] Build C++/CUDA runtime library (${label}, GPU=${TYR_GPU_TARGET}, family=${TYR_GPU_FAMILY})"

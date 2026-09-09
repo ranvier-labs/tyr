@@ -93,7 +93,10 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake -R build test_runner test_runner_experimental
+          python3 scripts/test_inventory.py --build
+
+      - name: Verify audited FFI ABI declarations
+        run: python3 scripts/check_ffi_abi.py
 
       - name: Typecheck required example surfaces
         run: |
@@ -106,12 +109,12 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake -R build Examples
+          lake -R build Examples BranchingFlowsMoleculeTrainGenerate
           # Key example files that are not covered by `Examples.lean`.
           lake -R env lean Examples/NanoChat/Generator/TypedState.lean
           lake -R env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
 
-      - name: Run tests
+      - name: Run required CPU test suites
         run: |
           lean_prefix="$(lean --print-prefix)"
           LEAN_LIB="${lean_prefix}/lib/lean"
@@ -124,22 +127,8 @@ jobs:
             export LEAN_CC_GCC="/usr/bin/gcc"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
-          lake -R env ./.lake/build/bin/test_runner --fail-fast
-
-      - name: Run experimental tests
-        run: |
-          lean_prefix="$(lean --print-prefix)"
-          LEAN_LIB="${lean_prefix}/lib/lean"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            export DYLD_LIBRARY_PATH="$PWD/external/libtorch/lib:/opt/homebrew/opt/libomp/lib:$LEAN_LIB"
-          else
-            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
-            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
-            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
-            export LEAN_CC_GCC="/usr/bin/gcc"
-            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
-          fi
-          lake -R env ./.lake/build/bin/test_runner_experimental
+          lake -R env python3 scripts/test_inventory.py --run
+          lake -R env python3 scripts/test_branching_checkpoint_resume.py
 
       - name: Evaluate Qwen3-TTS parity regression gate
         if: runner.os == 'macOS'
@@ -232,6 +221,14 @@ jobs:
           for commit in "${commits[@]}"; do
             ./scripts/check-commit-messages.sh "${commit}^!"
           done
+
+      - name: Check test routing and native build dependencies
+        run: |
+          python3 scripts/test_inventory.py
+          python3 scripts/test_test_inventory.py
+          python3 scripts/test_native_build.py
+          python3 scripts/test_branching_checkpoint_snapshot.py
+          bash scripts/nanochat/test_checkpoint_paths.sh
 
       - name: Check for TODO/FIXME comments
         run: |

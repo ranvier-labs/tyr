@@ -6,7 +6,7 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
-import Examples.NanoProof.Model
+import Examples.Diffusion.Parameters
 import Examples.Diffusion.Diffusion
 import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionCheckpoint
@@ -65,7 +65,7 @@ def getBatch {n : UInt64} (trainData : T #[n]) (batchSize seqLen : UInt64)
   let batch := reshape block #[batchSize, seqLen]
   return batch
 
-/-- Clip gradients for NanoProof-style block (used by diffusion) -/
+/-- Clip gradients for a diffusion transformer block. -/
 def clipBlockGrads {n_embd n_head n_kv_head : UInt64}
     (params : BlockParams n_embd n_head n_kv_head)
     (maxNorm : Float) : IO Unit := do

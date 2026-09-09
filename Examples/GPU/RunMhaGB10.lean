@@ -366,6 +366,3 @@ def main (args : List String) : IO UInt32 := do
     runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
 end Examples.GPU.RunMhaGB10
-
-def main (args : List String) : IO UInt32 :=
-  Examples.GPU.RunMhaGB10.main args

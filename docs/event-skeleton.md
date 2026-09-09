@@ -44,7 +44,7 @@ structure SkeletonGraph where
 
 All kernels are partial via `Except String` and operate on dense arrays.
 
-- **Saltation** (`Tyr/EventSkeleton/Saltation.lean`) — reverse mode through one deterministic hybrid event without forming the dense saltation matrix. `SaltationData` stores the reset Jacobian `R_x`, guard gradient `g_x`, and the precomputed `a = f⁺ − R_x f⁻ − R_t`, `γ = g_t + g_x·f⁻`, `β`. The reverse update is `p⁻ = c_x + R_xᵀ p⁺ + g_xᵀ α` with `α = (aᵀp⁺ − β)/γ`; a zero `γ` is rejected as "not transverse" (`validateGamma`, `Saltation.lean:126`).
+- **Saltation** (`Tyr/EventSkeleton/Saltation.lean`) — reverse mode through one deterministic hybrid event without forming the dense saltation matrix. `SaltationData` stores the reset Jacobian `R_x`, guard gradient `g_x`, and the precomputed `a = f⁺ − R_x f⁻ − R_t`, `γ = g_t + g_x·f⁻`, `β`. The reverse update is `p⁻ = c_x + R_xᵀ p⁺ + g_xᵀ α` with `α = (aᵀp⁺ − β)/γ`. Checked operations reject zero or nonfinite `γ`, inconsistent matrix/vector dimensions, nonfinite fields/cotangents, and overflowing results. Empty optional cost and parameter terms mean zero.
 - **Marks** (`Tyr/EventSkeleton/Mark.lean`) — `CategoricalMarkData.exactEliminate?` marginalizes over explicit marks: `V⁻ = Σ_y π_y Q_y` plus the probability-message term `(Dπ)ᵀQ`. `SampledMarkData.eliminate` keeps one sampled mark live and adds the score-function term `(Q_y − b) ∇ log π_y`. `EventMessage` is the per-outcome value/adjoint payload. `simplexHitCotangent?` computes the hit-simplex cotangent `Q − 1·(vᵀQ)/(1ᵀv)`.
 - **Branches** (`Tyr/EventSkeleton/Branch.lean`) — `BranchEventData.aggregate?` generalizes the saltation update to weighted children: `p⁻ = c_x + Σ_j w_j R_{j,x}ᵀ p_j⁺ + g_xᵀ α` with `α = (Σ_j w_j a_jᵀ p_j⁺ − β)/γ`.
 - **Intervals** (`Tyr/EventSkeleton/Interval.lean`) — `AcceptedStepSegment` records one accepted integration attempt (`tStart`, `tAttempt`, `tAfter`, jump flags); `localizedByEvent` is true when the segment ended before the attempted time, i.e. an event root was localized. `planForAcceptedSegment` emits an `intervalAdjoint` move (plus an optional `checkpointBoundary`), and `graphFromAcceptedSegments` builds a `SkeletonGraph` from a run of segments.
@@ -93,7 +93,7 @@ Small dense numeric primitives, explicitly not a high-performance backend (`Phys
 urdf_type_provider "Tyr/EventSkeleton/Examples/contact_probe.urdf" as ContactProbeUrdf
 ```
 
-via the `LeanUrdfTypeProvider` dependency. Note the build wiring: `lakefile.lean:261` declares `require LeanUrdfTypeProvider from "../lean-urdf-typeprovider"` as a **sibling path** dependency, so a standalone checkout of `tyr` will not build the URDF example or its runner (`lean_exe RunUrdfContactExample`, `lakefile.lean:702`). See [ffi-and-build.md](ffi-and-build.md).
+via the `LeanUrdfTypeProvider` dependency, which `lakefile.lean` requires from a pinned GitHub revision (`github.com/ranvier-labs/lean-urdf-typeprovider`), fetched automatically by Lake like the other dependencies. See [ffi-and-build.md](ffi-and-build.md).
 
 ## Key APIs
 
@@ -112,6 +112,8 @@ via the `LeanUrdfTypeProvider` dependency. Note the build wiring: `lakefile.lean
 | Declaration | Signature |
 |---|---|
 | `SaltationData.mkFromFields` | `(resetJac : Array (Array Float)) (guardGrad : Array Float) (fMinus fPlus : Array Float) (resetTime := #[]) (guardTime := 0.0) (beta := 0.0) … → SaltationData` — computes `a` and `γ` from the vector fields |
+| `SaltationData.mkFromFields?` | Same arguments, returning `Except String SaltationData`; validates the input vector fields before their dimensions are lost in contractions. Use this at dynamic input boundaries; `mkFromFields` is an unchecked algebraic constructor. |
+| `SaltationData.validate` | Checks finite data, a rectangular reset Jacobian, and matching state/parameter dimensions. |
 | `SaltationData.timingAdjoint?` | `SaltationData → (pPlus : Array Float) → Except String Float` |
 | `SaltationData.reverseState?` | `SaltationData → (pPlus : Array Float) → Except String (Array Float)` — `c_x + R_xᵀp⁺ + g_xᵀα` |
 | `SaltationData.reverseTheta?` | same shape, for parameter cotangents (`R_θ`, `g_θ`, `c_θ`) |
@@ -209,7 +211,7 @@ The forward-simulation pattern lives in `Tyr/EventSkeleton/Examples/BouncingBall
 
 - [diffeq.md](diffeq.md) — ODE solvers, `EventSpec`, and the solve loop the skeleton segments are projected from.
 - [autodiff.md](autodiff.md) — the other AD surfaces, including the `Tyr.AD.Elim` eliminator that `localSchurBlock` is meant to bridge to.
-- [ffi-and-build.md](ffi-and-build.md) — Lake wiring, including the sibling-path `LeanUrdfTypeProvider` dependency.
+- [ffi-and-build.md](ffi-and-build.md) — Lake wiring, including the pinned-git `LeanUrdfTypeProvider` dependency.
 - [examples-and-testing.md](examples-and-testing.md) — how the `Tests/TestEventSkeleton*.lean` suites are registered and run.
 
 Exhaustive per-symbol documentation for every structure and definition mentioned here is generated by doc-gen4 (see `docbuild/`); this chapter is a guide, not a reference.

@@ -82,10 +82,9 @@ curl -O https://download.pytorch.org/libtorch/nightly/cu126/libtorch-cxx11-abi-s
 unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
 ```
 
-Two Lake-level requirements are declared in `lakefile.lean:260-261`: `LeanTest`
-(pinned git revision, fetched by Lake) and `LeanUrdfTypeProvider` from the
-**local path** `../lean-urdf-typeprovider` — that sibling checkout must exist
-next to this repository or `lake build` fails at dependency resolution.
+Lake-level requirements are declared in `lakefile.lean`: `LeanTest`,
+`LeanBenchmark`, and `LeanUrdfTypeProvider`, all pinned git revisions that Lake
+fetches automatically.
 
 ## Building
 

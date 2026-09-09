@@ -316,9 +316,12 @@ def meanAll {σ : StaticSpec} (t : Tensor σ)
 
 /-! ## Shape ops (dtype/device-preserving) -/
 
-def reshape {σ : StaticSpec} (t : Tensor σ) (shape' : Shape) :
+/-- Reshape without changing the element count. Unlike the legacy raw
+    `torch.reshape`, an empty target creates a scalar. -/
+def reshape {σ : StaticSpec} (t : Tensor σ) (shape' : Shape)
+    (_h : TensorSpec.numelOfShape σ.shape = TensorSpec.numelOfShape shape' := by decide) :
     Tensor (σ.withShape shape') :=
-  .assumeSpec (torch.reshape t.raw shape')
+  .assumeSpec (torch.reshapeExact t.raw shape')
 
 def permute {σ : StaticSpec} (t : Tensor σ) (permutation : Array UInt64) :
     Tensor (σ.withShape (permuteShape σ.shape permutation)) :=

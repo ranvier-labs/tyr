@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${SCRIPT_DIR}/checkpoint_paths.sh"
 
 have_glob() {
   local pattern="$1"
@@ -183,7 +184,7 @@ if [[ "${CLEAR_PIPELINE_CHECKPOINT:-1}" == "1" ]]; then
 fi
 
 if [[ "${PRETRAIN_ITERS}" =~ ^[0-9]+$ ]] && [[ "${PRETRAIN_ITERS}" -eq 0 ]]; then
-  if [[ ! -f "${NANOCHAT_DIR}/checkpoints/base/latest.ckpt/meta.txt" ]]; then
+  if ! nanochat_checkpoint_dir "${NANOCHAT_DIR}/checkpoints/base/latest.ckpt" >/dev/null; then
     echo "error: PRETRAIN_ITERS=0 but no base checkpoint is present at ${NANOCHAT_DIR}/checkpoints/base/latest.ckpt" >&2
     echo "       set PRETRAIN_ITERS>=1 for a fresh run, or place/resume an existing base checkpoint first." >&2
     exit 2

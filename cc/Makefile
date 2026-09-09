@@ -1,5 +1,7 @@
 # Detect Lean
 # Lake tracks this file hash for extern_lib invalidation.
+TYR_MAKEFILE := $(lastword $(MAKEFILE_LIST))
+.DEFAULT_GOAL := all
 
 ifndef LEAN_HOME
 LEAN ?= lean
@@ -235,6 +237,8 @@ BENCH_FLASH_ATTN := $(OUT_DIR)/tools/bench_flash_attn
 GPU_STUB_SRC := $(SRC_DIR)/generated/tyr_gpu_kernel_stubs.cpp
 GPU_STUB_SCRIPT := $(TOOLS_DIR)/generate_gpu_kernel_stubs.py
 GPU_STUB_IR_ROOT := ../.lake/build/ir/Tyr/GPU
+GPU_KERNEL_SRC_ROOT := ../Tyr/GPU/Kernels
+NATIVE_CONFIG := $(OUT_DIR)/native-build.json
 
 SRCS := \
 	tyr.cpp\
@@ -345,7 +349,7 @@ CPP_OBJ_FILES_NO_STUBS := $(filter-out $(GPU_STUB_OBJ),$(CPP_OBJ_FILES))
 MM_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(MM_SRCS:.mm=.o))
 CU_OBJ_FILES := $(patsubst $(SRC_DIR)/%.cu,$(OUT_DIR)/%.o,$(CU_SRCS))
 OBJ_FILES := $(CPP_OBJ_FILES_NO_STUBS) $(MM_OBJ_FILES) $(CU_OBJ_FILES) $(GPU_STUB_OBJ) $(LAGUNA_MOE_STUB_OBJ)
-HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
+DEP_FILES := $(OBJ_FILES:.o=.d) $(SOXR_OBJS:.o=.d) $(BENCH_FLASH_ATTN).d
 
 # Lean runtime library
 LEAN_LIB := $(LEAN_HOME)/lib/lean
@@ -363,7 +367,28 @@ DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 
 # Build Rules
 
-.PHONY: check-submodules
+# Quote configuration values as data, including quotes in compiler flags.
+shell_quote = '$(subst ','"'"',$(1))'
+NATIVE_CONFIG_KEYS := CC CXX NVCC LEAN_HOME TORCHDIR SOXR_DIR TKDIR \
+	CXX_STD_FLAG EXTRA_CXX_FLAGS CPP_CUDA_FLAGS NVCCFLAGS SOXR_CFLAGS \
+	TORCH_INC_FLAGS PYTHON_INC_FLAGS CUDA_INC_FLAGS NCCL_INC_FLAGS ARROW_INC_FLAGS \
+	GPU GPU_FAMILY GPU_COMPUTE GPU_CODE HAS_NVCC HAS_CUDA_TOOLKIT \
+	CUDA_HOME CUDA_MAJOR_VERSION GPU_CODEGEN_MODULES OBJ_FILES DYLIB_LINK_FLAGS \
+	MACOSX_DEPLOYMENT_TARGET SDKROOT
+
+.PHONY: check-submodules native-config gpu-stubs FORCE
+FORCE:
+
+# Lake refreshes these inexpensive manifests before checking its native trace.
+# FORCE notices environment and added/removed inputs; write-if-changed preserves
+# timestamps when the effective configuration/symbol inventory is unchanged.
+native-config: $(NATIVE_CONFIG)
+gpu-stubs: $(GPU_STUB_SRC)
+
+$(NATIVE_CONFIG): FORCE $(TOOLS_DIR)/write_build_config.py $(TYR_MAKEFILE)
+	@python3 $(TOOLS_DIR)/write_build_config.py --output $@ --dependencies-output $(OUT_DIR)/native-dependencies.txt $(foreach key,$(NATIVE_CONFIG_KEYS),$(call shell_quote,$(key)=$($(key)))) --dependency-files $(wildcard $(DEP_FILES))
+
+-include $(DEP_FILES)
 
 check-submodules:
 	@if [ ! -f "$(SOXR_DIR)/CMakeLists.txt" ]; then \
@@ -425,47 +450,46 @@ $(SOXR_CONFIG): | check-submodules
 		'#define WITH_DEV_TRACE 0' \
 		'#endif' > $@
 
-$(SOXR_OBJ_DIR)/%.o: $(SOXR_DIR)/src/%.c $(SOXR_CONFIG) | check-submodules
+$(SOXR_OBJ_DIR)/%.o: $(SOXR_DIR)/src/%.c $(SOXR_CONFIG) $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules
 	$(MKPATH) $(SOXR_OBJ_DIR)
-	$(CC) -o $@ -c $< $(SOXR_CFLAGS)
+	$(CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -o $@ -c $< $(SOXR_CFLAGS)
 
 $(OUT_DIR):
 	$(MKPATH) $@
 
-$(OUT_DIR)/$(LIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
+$(OUT_DIR)/$(LIB) : $(OBJ_FILES) $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
 	$(RMPATH) $@
-	${AR} rcs $@ $^
+	${AR} rcs $@ $(OBJ_FILES)
 
-$(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
-	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
+$(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) $(SOXR_LIB) $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
+	$(CXX) $(SHARED_FLAG) -o $@ $(OBJ_FILES) $(DYLIB_LINK_FLAGS)
 
-$(BENCH_FLASH_ATTN): $(TOOLS_DIR)/bench_flash_attn.cpp $(OUT_DIR)/$(DYLIB) | check-submodules $(OUT_DIR)
+$(BENCH_FLASH_ATTN): $(TOOLS_DIR)/bench_flash_attn.cpp $(OUT_DIR)/$(DYLIB) $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -L$(OUT_DIR) -l$(LIB_NAME) $(DYLIB_LINK_FLAGS) -Wl,-rpath,$(abspath $(OUT_DIR))
+	$(CXX) $(CXX_STD_FLAG) -MMD -MP -MF $@.d -MT $@ -o $@ $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -L$(OUT_DIR) -l$(LIB_NAME) $(DYLIB_LINK_FLAGS) -Wl,-rpath,$(abspath $(OUT_DIR))
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
+	$(CXX) $(CXX_STD_FLAG) -MMD -MP -MF $(@:.o=.d) -MT $@ -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -MMD -MP -MF $(@:.o=.d) -MT $@ -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	@if [ "$(GPU)" = "GB10" ] && grep -Eq 'tcgen05|tensor_allocator<|warpgroup::(mma_|mm_)|mma_async_wait|mma_commit_group' "$<"; then \
 		echo "error: $< requires Hopper WGMMA or SM100a tcgen05/TMEM, neither of which is supported by GB10 sm_121" >&2; \
 		exit 2; \
 	fi
-	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
+	$(NVCC) -MMD -MP -MF $(@:.o=.d) -MT $@ -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(PYTHON_INC_FLAGS) $(CUDA_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
 
 # No-CUDA-toolkit builds: compile the stub branch of tyr_laguna_moe.cu as C++.
-$(OUT_DIR)/tyr_laguna_moe_stub.o : $(SRC_DIR)/tyr_laguna_moe.cu | check-submodules $(OUT_DIR)
-	$(CXX) $(CXX_STD_FLAG) -x c++ -o $@ -c $< -I$(LEAN_INCLUDE) $(EXTRA_CXX_FLAGS) -fPIC
+$(OUT_DIR)/tyr_laguna_moe_stub.o : $(SRC_DIR)/tyr_laguna_moe.cu $(NATIVE_CONFIG) $(TYR_MAKEFILE) | check-submodules $(OUT_DIR)
+	$(CXX) $(CXX_STD_FLAG) -x c++ -MMD -MP -MF $(@:.o=.d) -MT $@ -o $@ -c $< -I$(LEAN_INCLUDE) $(EXTRA_CXX_FLAGS) -fPIC
 
-$(GPU_STUB_SRC): $(GPU_STUB_SCRIPT)
-	$(MKPATH) $(dir $@)
-	python3 $(GPU_STUB_SCRIPT) --ir-root $(GPU_STUB_IR_ROOT) --output $@
+$(GPU_STUB_SRC): FORCE $(GPU_STUB_SCRIPT)
+	@python3 $(GPU_STUB_SCRIPT) --ir-root $(GPU_STUB_IR_ROOT) --kernel-src-root $(GPU_KERNEL_SRC_ROOT) --output $@
 
 clean:
 	$(RMPATH) $(OUT_DIR)

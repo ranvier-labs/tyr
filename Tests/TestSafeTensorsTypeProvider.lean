@@ -29,6 +29,28 @@ private def writeIndexDir (name indexJson : String) : IO String := do
 private def tensorValues {s : Shape} (t : T s) : Array Float :=
   t.getValues 1024 |>.toList.toArray
 
+private def headerPrefix (size : UInt64) : ByteArray := Id.run do
+  let mut result := ByteArray.empty
+  for i in [:8] do
+    result := result.push ((size >>> (i * 8).toUInt64).toUInt8)
+  pure result
+
+@[test]
+def testSafeTensorsHeaderReadBounds : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := (dir / "bounded.safetensors").toString
+  IO.FS.writeBinFile path (ByteArray.mk #[1, 2, 3])
+  LeanTest.assertThrows (safetensors.introspect path) (some "missing 8-byte header size")
+  IO.FS.writeBinFile path (headerPrefix 4096)
+  LeanTest.assertThrows (safetensors.introspect path) (some "header exceeds file size")
+  IO.FS.writeBinFile path (headerPrefix (safetensors.maxHeaderBytes + 1).toUInt64)
+  LeanTest.assertThrows (safetensors.introspect path) (some "byte limit")
+  let header := "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}".toUTF8
+  -- Payload bytes are deliberately not UTF-8 and must not enter JSON parsing.
+  IO.FS.writeBinFile path (headerPrefix header.size.toUInt64 ++ header ++ ByteArray.mk #[255, 254, 253, 252])
+  let schema ← safetensors.introspect path
+  LeanTest.assertEqual schema.tensors.size 1
+  LeanTest.assertTrue ((schema.find? "x").isSome)
+
 @[test]
 def testSafeTensorsIntrospectionSingle : IO Unit := do
   let schema ← safetensors.introspect "Tests/fixtures/safetensors/single.safetensors"

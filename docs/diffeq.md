@@ -217,6 +217,11 @@ constructors `successful`, `maxStepsReached`, `dtMinReached`, `eventOccurred`,
 `successful` and `eventOccurred`. `Solution.evaluate`/`derivative` query the
 dense output (they panic unless `dense := true` was saved).
 
+Dense interpolation and `SaveAt.ts` also support reverse-time solves. Interpolation
+knots may be increasing or decreasing; `left := true` selects the limit from
+smaller physical times, and `left := false` the limit from larger physical times,
+including at a discontinuous knot. This convention is independent of solve direction.
+
 ### Events
 
 `diffeqsolve` accepts terminating or recording events (`Tyr/DiffEq/Integrate.lean:11`):
@@ -274,8 +279,18 @@ error string instead of failing opaquely.
 
 Implicit solvers solve their stage equations with `Tyr/DiffEq/RootFinder.lean`:
 the `RootFinder` class plus `FixedPoint` (default for `ImplicitEuler`),
-`Newton`, and `VeryChord`, all with scaled-RMS convergence tests and
-`rtol`/`atol`/`maxIters` configs.
+`AdaptiveFixedPoint`, and `NormRatioFixedPoint`, all with scaled-RMS convergence
+tests and `rtol`/`atol`/`maxIters` configs. The latter two apply scalar relaxation
+to `step(y) - y`: `AdaptiveFixedPoint` adapts the step using successive residual
+norms, while `NormRatioFixedPoint` uses scaled iterate/residual norm ratios.
+They do not solve or reuse a Jacobian system, and noncontractive stage equations
+can fail to converge. Select them with `RootFindMethod.adaptiveFixedPoint` or
+`RootFindMethod.normRatioFixedPoint`.
+
+Migration: the former names `VeryChord` / `.veryChord` and `Newton` / `.newton`
+were removed because the implementations are fixed-point heuristics, not chord
+or Newton methods. Use the corresponding names above; the iteration algorithms
+and configuration fields are unchanged.
 
 ## Key APIs
 

@@ -2,7 +2,15 @@
 
 ## Purpose & when to use
 
-`Tyr/Basic.lean` and `Tyr/Torch.lean` are the tensor layer everything else in Tyr sits on. `Tyr/Basic.lean` defines the shape-indexed tensor type `T s` — an opaque handle to a libtorch tensor whose `Shape` index exists only at the Lean level — plus the pure shape arithmetic used to compute result types. `Tyr/Torch.lean` binds roughly 245 `@[extern]` declarations (about 243 unique `lean_torch_*` symbols, implemented under `cc/src/`) into shape-aware Lean declarations: creation, arithmetic, `nn` functional ops, autograd, SafeTensors IO, rotary embeddings, and linear algebra. Import `Tyr.Torch` directly when you want the low-level surface with a narrow dependency footprint; everything here is re-exported by `import Tyr`.
+`Tyr/Basic.lean` and `Tyr/Torch.lean` provide the raw LibTorch interface. `T s`
+is a reducible alias for one opaque handle type: its `Shape` argument is an
+annotation, and different raw shapes are definitionally equal. The pure shape
+arithmetic documents expected results but cannot make raw calls shape-safe.
+Use the [typed facade](typed.md), `Tensor σ`, for static shape checks and
+checked raw boundaries. `Tyr/Torch.lean` exposes creation, arithmetic, `nn`
+functional ops, autograd, SafeTensors IO, rotary embeddings, and linear algebra.
+Import it directly for a narrow dependency footprint; `import Tyr` re-exports
+both interfaces.
 
 ## Architecture & main abstractions
 
@@ -34,7 +42,11 @@ inductive Device where                               -- Tyr/Basic.lean:101
   | MPS
 ```
 
-`DType` carries parsers/normalizers for PyTorch and SafeTensors metadata (`DType.ofString?`, `DType.parse`, `DType.canonicalName`, `DType.safeTensorTag?`). The dtype and device of a tensor are *not* tracked in `T s` — only the shape is; dtype/device are runtime properties read back through the metadata FFI (below). For dtype/device in types, see the typed facade in [typed.md](typed.md).
+`DType` carries parsers/normalizers for PyTorch and SafeTensors metadata
+(`DType.ofString?`, `DType.parse`, `DType.canonicalName`, `DType.safeTensorTag?`).
+Raw `T s` does not enforce shape, dtype, or device. Read actual metadata through
+the FFI below, or use `Tensor.ofTensor` / `Tensor.ofTensorWithContract` to check
+it when entering the [typed facade](typed.md).
 
 ### Pure shape arithmetic
 
@@ -287,7 +299,19 @@ Matrix decompositions and functions for manifold optimization (`Tyr/Torch.lean:1
 
 ### The dynamic corner: `T #[]`
 
-A growing set of APIs gives up static shapes entirely and works with `T #[]`: `einsum`, `interpolate`, `conv_transpose2d`, `squeezeDim`, `masked_select`, `cat_dyn`, the media loaders, `stft1d`/`istft1d`/`rfft1d`, `fromInt64Array`/`fromFloatArray`. Convert with `eraseShape` (down) and `reshape` (up, runtime-trusted). When you control the shapes, prefer the typed variants.
+A growing set of APIs uses `T #[]` for dynamically shaped handles: `einsum`,
+`interpolate`, `conv_transpose2d`, `squeezeDim`, `masked_select`, `cat_dyn`, the
+media loaders, `stft1d`/`istft1d`/`rfft1d`, `fromInt64Array`/`fromFloatArray`.
+`eraseShape` preserves the handle. For compatibility, raw `reshape t #[]`
+also preserves it; this does **not** turn a one-element vector into a scalar.
+Use `reshapeExact t #[]` for actual scalar reshape. `Tensor.reshape` always
+uses exact semantics and requires a proof that the element count is unchanged.
+
+The audited creation, indexing, unbind, and reshape ABI declarations live in
+`cc/src/tyr_ffi_abi.h`. C++ compilation checks the implementations against this
+header. After `lake build Tyr.Torch:c`, run `python3 scripts/check_ffi_abi.py`
+to compare it with Lean's generated declarations. `Tests.TestFFIBoundary`
+checks native boxed indices, axes, 64-bit range values, and reshape semantics.
 
 ## Usage example
 

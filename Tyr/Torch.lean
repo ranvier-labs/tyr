@@ -33,8 +33,15 @@ lower-level control and a narrower dependency surface.
 namespace torch
 
 -- | Tensor Creation API
--- All creation functions support an optional device parameter (defaults to CPU)
-@[extern "lean_torch_arange"] opaque arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
+-- Creation functions with a device parameter default to CPU.
+/-- Length of an increasing, end-exclusive range. Compute in `Nat` so the
+    ceiling division cannot overflow `UInt64`. A zero step is rejected by
+    the runtime. -/
+def arangeLength (start stop step : UInt64) : UInt64 :=
+  if step == 0 || stop <= start then 0
+  else ((stop.toNat - start.toNat + step.toNat - 1) / step.toNat).toUInt64
+
+@[extern "lean_torch_arange"] opaque arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[arangeLength start stop step]
 @[extern "lean_torch_eye"] opaque eye (n : UInt64) (requires_grad : Bool := false) : T #[n, n]
 -- full: Returns a tensor filled with a single value
 @[extern "lean_torch_full"] opaque full (s : Shape) (value : Float) (requires_grad : Bool := false) (device : Device := Device.CPU) : T s
@@ -370,9 +377,18 @@ def permuteShape (s : Shape) (permutation : Array UInt64) : Shape :=
   permutation.map fun p => s.getD p.toNat 0
 
 @[extern "lean_torch_permute"] opaque permute {s : Shape} (t : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
-@[extern "lean_torch_reshape"] opaque reshape {s : Shape} (t : @& T s) (s' : Shape) : T s'
+/-- Legacy raw reshape. An empty target erases the shape annotation without
+    reshaping the handle. Use `reshapeExact` for a real scalar reshape, and
+    `Tensor.reshape` for a statically checked element count. -/
+@[extern "lean_torch_reshape"] opaque reshape {s : Shape} (t : @& T s) (s' : @& Shape) : T s'
 @[extern "lean_torch_permute"] opaque T.permute {s : Shape} (self : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
-@[extern "lean_torch_reshape"] opaque T.reshape {s : Shape} (self : @& T s) (s' : Shape) : T s'
+@[extern "lean_torch_reshape"] opaque T.reshape {s : Shape} (self : @& T s) (s' : @& Shape) : T s'
+
+/-- LibTorch reshape with exact target semantics, including `#[]` for a
+    scalar. The raw API checks element counts at runtime; the typed wrapper
+    additionally requires a static proof. -/
+@[extern "lean_torch_reshape_exact"] opaque reshapeExact {s : Shape}
+    (t : @& T s) (s' : @& Shape) : T s'
 
 -- comparison
 @[extern "lean_torch_allclose"] opaque allclose {s : Shape} (a b : @& T s) (rtol : Float := 1e-05) (atol : Float := 1e-08): Bool
@@ -991,9 +1007,15 @@ opaque wavAppend {s : Shape} (t : @& T s) (path : @& String) : IO Unit
 @[extern "lean_torch_wav_finalize"]
 opaque wavFinalize (path : @& String) : IO Unit
 
-/-- Load tensor from a file with expected shape -/
+/-- Load the first tensor and reshape it to the requested shape when the
+    element count agrees. Use `loadTensorExact` to validate stored dimensions. -/
 @[extern "lean_torch_load_tensor"]
 opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
+
+/-- Load the first tensor only if its stored shape exactly matches `s`.
+    Reports an IO error on mismatch; never repairs dimensions by reshaping. -/
+@[extern "lean_torch_load_tensor_exact"]
+opaque loadTensorExact (s : Shape) (path : @& String) : IO (T s)
 
 /-- Check if a file exists -/
 @[extern "lean_torch_file_exists"]

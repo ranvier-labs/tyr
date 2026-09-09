@@ -34,9 +34,11 @@ def parseArgs (args : List String) : IO LeanTest.RunConfig := do
 
 unsafe def main (args : List String) : IO UInt32 := do
   let config ← parseArgs args
+  Tests.GPUCoverage.checkPreflight (← Tests.GPUCoverage.strictMode)
+    (← torch.cuda_is_available) true
   Lean.initSearchPath (← Lean.findSysroot)
   Lean.enableInitializersExecution
   let env ← Lean.importModules
     #[{ module := `LeanTest }, { module := `Tests.TestGPUE2E }]
     {}
-  LeanTest.runTestsAndExit env {} config
+  Tests.GPUCoverage.runSuite env config

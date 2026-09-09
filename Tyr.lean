@@ -76,6 +76,7 @@ This root module re-exports the core, general-purpose surface area:
 
 - `Tyr.Basic`: foundational tensor aliases and shared utilities.
 - `Tyr.Torch`: low-level tensor operations and libtorch bindings.
+- `Tyr.Typed`: tensor wrappers with static shape/dtype checks and checked raw boundaries.
 - `Tyr.SafeTensors`: typed SafeTensors schema and loading support.
 - `Tyr.TensorStruct`: generic traversal/mapping over tensor-containing structures.
 - `Tyr.Mctx`: Monte Carlo tree search infrastructure.
@@ -98,13 +99,16 @@ import Tyr
 
 open torch
 
-def toyForward : T #[2, 4] :=
-  let x : T #[2, 8] := zeros #[2, 8]
-  let w : T #[4, 8] := zeros #[4, 8]
-  linear x w
+def toyForward : DTensor #[2, 4] .Float32 :=
+  let x := Tensor.zeros #[2, 8]
+  let w := Tensor.zeros #[4, 8]
+  x.linear w
 ```
 
-`import Tyr` gives a batteries-included entrypoint; shapes remain encoded in types.
+`import Tyr` re-exports both the typed facade and the legacy raw API. Use
+`Tensor` for static shape checks: the raw `T s` alias does not enforce its
+shape annotation. `Tensor.ofTensor` checks runtime shape and dtype when
+crossing from raw handles into the facade.
 
 ## Scope
 
