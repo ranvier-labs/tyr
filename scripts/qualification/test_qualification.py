@@ -9,12 +9,40 @@ from unittest.mock import patch
 
 from prepare import ensure_file, safe_path, verify
 from gpu_plan import configuration as gpu_configuration
+from cuda_runtime import library_path, loader_libraries
 from readiness import configuration
 from run import validate_result, wait_for_idle_gpu
 from summarize import summarize
 
 
 class QualificationTests(unittest.TestCase):
+    def test_wheel_cuda_dependencies_precede_host_toolkit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            torch = root / "site-packages/torch"
+            vendor = root / "site-packages/nvidia/cu13/lib"
+            toolkit = root / "cuda/lib64"
+            for path in (torch / "lib", vendor, toolkit):
+                path.mkdir(parents=True)
+            (torch / "__init__.py").touch()
+            paths = library_path(torch, root / "cuda", str(toolkit) + ":").split(":")
+            self.assertEqual(paths, list(map(str, (torch / "lib", vendor, toolkit))))
+            # A standalone LibTorch archive has no Python-wheel layout.
+            (torch / "__init__.py").unlink()
+            self.assertEqual(library_path(torch, root / "cuda").split(":"),
+                             list(map(str, (torch / "lib", toolkit))))
+
+    def test_loader_evidence_records_initialized_libraries_not_search_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "loader.123"
+            log.write_text("123: trying file=/wrong/libcublasLt.so.13\n"
+                           "123: calling init: /pinned/libcublasLt.so.13\n"
+                           "124: calling init: /pinned/libcublas.so.13\n"
+                           "124: calling init: /pinned/libcudart.so.13\n"
+                           "124: calling init: /other/libc.so.6\n")
+            self.assertEqual(loader_libraries([log]), ["/pinned/libcublas.so.13",
+                "/pinned/libcublasLt.so.13", "/pinned/libcudart.so.13"])
+
     def test_new_gpu_workload_is_waited_for_without_being_interrupted(self):
         with patch("run.subprocess.check_output", side_effect=["12345\n", ""]), \
              patch("run.time.monotonic", side_effect=[0.0, 0.0, 1.25]), \

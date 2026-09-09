@@ -12,6 +12,7 @@ import time
 
 from prepare import MANIFEST, prepare
 from gpu_plan import configuration as gpu_configuration
+from cuda_runtime import LIBRARIES, library_path, loader_libraries
 
 REPO = Path(__file__).resolve().parents[2]
 COVERAGE = re.compile(r"\[gpu-coverage\] executed=(\d+) skipped=(\d+) failed=(\d+).*strict=true")
@@ -55,9 +56,26 @@ def validate_result(kind, output, code):
     return 1
 
 
-def runtime(python, manifest, real_models):
+def describe_libraries(python, paths, env):
+    if not paths:
+        return []
     code = """
-import importlib.metadata as m, json, platform, torch
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from cuda_runtime import library_versions
+print(json.dumps(library_versions(sys.argv[2:])))
+"""
+    # Keep diagnostic CDLL loads out of the coordinator that performs the
+    # next GPU-idle check; a failing loader/version query is contained here.
+    return json.loads(subprocess.check_output(
+        [python, "-c", code, str(REPO / "scripts/qualification"), *paths], env=env, text=True))
+
+
+def runtime(python, manifest, real_models, env=None):
+    code = """
+import importlib.metadata as m, json, platform, sys, torch
+sys.path.insert(0, sys.argv[1])
+from cuda_runtime import library_versions, process_libraries
 packages = {}
 for distribution in m.distributions():
     packages.setdefault(distribution.metadata['Name'], distribution.version)
@@ -66,9 +84,9 @@ print(json.dumps({'torch':torch.__version__, 'cuda':torch.version.cuda,
  'cuda_available':torch.cuda.is_available(), 'torch_dir':str(__import__('pathlib').Path(torch.__file__).parent),
  'devices':[{'name':torch.cuda.get_device_name(i),'capability':torch.cuda.get_device_capability(i)}
             for i in range(torch.cuda.device_count())],
- 'packages':packages}))
+ 'packages':packages, 'loaded_cuda_libraries':library_versions(process_libraries())}))
 """
-    info = json.loads(subprocess.check_output([python, "-c", code], text=True))
+    info = json.loads(subprocess.check_output([python, "-c", code, str(REPO / "scripts/qualification")], text=True, env=env))
     if not info["cuda_available"]:
         raise ValueError("CUDA is unavailable in the selected Python reference runtime")
     if info["torch"] != manifest["python_packages"]["torch"] or info["cuda"] != manifest["cuda_version"]:
@@ -78,7 +96,7 @@ print(json.dumps({'torch':torch.__version__, 'cuda':torch.version.cuda,
     config = (REPO / "external/libtorch/share/cmake/Torch/TorchConfigVersion.cmake").read_text()
     if f'set(PACKAGE_VERSION "{manifest["libtorch_version"]}")' not in config:
         raise ValueError("LibTorch version does not match qualification manifest")
-    nvcc = subprocess.check_output(["nvcc", "--version"], text=True)
+    nvcc = subprocess.check_output(["nvcc", "--version"], text=True, env=env)
     if f'release {manifest["cuda_version"]},' not in nvcc:
         raise ValueError("NVCC does not match the pinned CUDA version")
     info["nvcc"] = nvcc.strip()
@@ -117,11 +135,13 @@ def main():
     env["LIBTORCH_DIR"] = str(REPO / "external/libtorch")
     env["TYR_LAGUNA_CACHE_BENCH"] = "1"
     env["PATH"] = str(Path(args.python).parent) + os.pathsep + env.get("PATH", "")
+    env["LD_LIBRARY_PATH"] = library_path(REPO / "external/libtorch",
+        Path(env.get("CUDA_HOME", "/usr/local/cuda")), env.get("LD_LIBRARY_PATH", ""))
     try:
         if report["source_status"]:
             raise ValueError("Strict qualification requires a clean committed candidate checkout")
         report["preflight_gpu_wait_seconds"] = wait_for_idle_gpu()
-        report["runtime"] = runtime(args.python, manifest, args.kind == "models")
+        report["runtime"] = runtime(args.python, manifest, args.kind == "models", env)
         if args.check_runtime:
             report["status"] = "runtime_ready"
             return 0
@@ -158,8 +178,12 @@ def main():
             item["gpu_wait_seconds"] = wait_for_idle_gpu()
             start = time.monotonic()
             log_path = args.report.parent / (args.kind + "-" + name + ".log")
+            loader_prefix = args.report.parent.resolve() / (args.kind + "-" + name + "-loader")
+            for stale in loader_prefix.parent.glob(loader_prefix.name + ".*"):
+                stale.unlink()
+            command_env = dict(env, LD_DEBUG="libs", LD_DEBUG_OUTPUT=str(loader_prefix))
             with log_path.open("w") as log:
-                with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+                with subprocess.Popen(command, env=command_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
                     output = []
                     for line in process.stdout:
                         print(line, end="", flush=True)
@@ -167,6 +191,11 @@ def main():
                         output.append(line)
                     code = process.wait()
             item.update(exit_code=code, seconds=time.monotonic() - start, log=str(log_path))
+            paths = loader_libraries(loader_prefix.parent.glob(loader_prefix.name + ".*"))
+            try:
+                item["loaded_cuda_libraries"] = describe_libraries(args.python, paths, env)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                item["library_evidence_error"] = str(error)
             output = "".join(output)
             counts = COVERAGE.findall(output) if name == "gpu" else []
             if counts:
@@ -176,6 +205,10 @@ def main():
                 report["skipped"] += skipped
                 report["failed"] += failed
             executed = validate_result(name, output, code)
+            if "library_evidence_error" in item:
+                raise ValueError(f"CUDA library evidence failed for {name}: {item['library_evidence_error']}")
+            if any(not any(Path(path).name.startswith(lib) for path in paths) for lib in LIBRARIES):
+                raise ValueError(f"Incomplete CUDA loader evidence for {name}")
             item.update(status="passed", executed=executed, skipped=0)
             if not counts:
                 report["executed"] += executed

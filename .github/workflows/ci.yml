@@ -228,6 +228,10 @@ jobs:
             ./scripts/check-commit-messages.sh "${commit}^!"
           done
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Prepare tokenizer parity regression dependencies
         run: |
           python3 -m venv "$RUNNER_TEMP/qualification-tests"

@@ -57,6 +57,12 @@ the existing checkout, Python environment or global elan default. Numerical
 reference dependencies are pinned in `scripts/qualification/requirements.txt`;
 the report records all resolved package versions. TorchAudio is pinned by
 architecture because its official ARM64 and x86_64 wheel version strings differ.
+The runtime search path prefers LibTorch's bundled libraries and a Python
+wheel's sibling NVIDIA libraries before the host CUDA toolkit. This keeps
+cuBLAS and cuBLASLt from different installations from being mixed; standalone
+LibTorch archives do not require a sibling NVIDIA directory. Reports record
+the Python runtime's loaded CUDA library paths/versions and glibc loader traces
+for the actual Lean/Python child processes in each qualification command.
 
 Both repositories must use the same qualification root. The host-wide
 `gpu.lock` covers environment setup, fixture downloads, builds and execution,
