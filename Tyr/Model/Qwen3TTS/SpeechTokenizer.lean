@@ -47,8 +47,33 @@ structure SpeechTokenizer12HzDecoderConfig where
   decoderDim : UInt64 := 1536
   deriving Repr, Inhabited
 
+/-- Mimi encoder metadata. Its attention, MLP and quantizer dimensions are
+independent of the waveform decoder's `decoder_config`. -/
+structure SpeechTokenizer12HzEncoderConfig where
+  codebookSize : UInt64 := 2048
+  codebookDim : UInt64 := 256
+  hiddenSize : UInt64 := 512
+  intermediateSize : UInt64 := 2048
+  headDim : UInt64 := 64
+  numAttentionHeads : UInt64 := 8
+  numKeyValueHeads : UInt64 := 8
+  numHiddenLayers : UInt64 := 8
+  numQuantizers : UInt64 := 32
+  numSemanticQuantizers : UInt64 := 1
+  slidingWindow : UInt64 := 250
+  upsamplingRatios : Array UInt64 := #[8, 6, 5, 4]
+  normEps : Float := 1e-5
+  ropeTheta : Float := 10000.0
+  samplingRate : UInt64 := 24000
+  deriving Repr, Inhabited
+
 structure SpeechTokenizer12HzConfig where
   decoder : SpeechTokenizer12HzDecoderConfig := {}
+  encoder : SpeechTokenizer12HzEncoderConfig := {}
+  /-- Number of available encoder quantizers actually emitted by Qwen. -/
+  encoderValidNumQuantizers : UInt64 := 16
+  inputSampleRate : UInt64 := 24000
+  encodeDownsampleRate : UInt64 := 1920
   outputSampleRate : UInt64 := 24000
   decodeUpsampleRate : UInt64 := 1920
   deriving Repr, Inhabited
@@ -103,6 +128,25 @@ private def getUInt64ArrayFieldD (j : Json) (key : String) (d : Array UInt64) : 
 
 namespace SpeechTokenizer12HzConfig
 
+private def parseEncoderConfig (j : Json) (d : SpeechTokenizer12HzEncoderConfig := {})
+    : SpeechTokenizer12HzEncoderConfig := {
+  codebookSize := getNatFieldD j "codebook_size" d.codebookSize
+  codebookDim := getNatFieldD j "codebook_dim" d.codebookDim
+  hiddenSize := getNatFieldD j "hidden_size" d.hiddenSize
+  intermediateSize := getNatFieldD j "intermediate_size" d.intermediateSize
+  headDim := getNatFieldD j "head_dim" d.headDim
+  numAttentionHeads := getNatFieldD j "num_attention_heads" d.numAttentionHeads
+  numKeyValueHeads := getNatFieldD j "num_key_value_heads" d.numKeyValueHeads
+  numHiddenLayers := getNatFieldD j "num_hidden_layers" d.numHiddenLayers
+  numQuantizers := getNatFieldD j "num_quantizers" d.numQuantizers
+  numSemanticQuantizers := getNatFieldD j "num_semantic_quantizers" d.numSemanticQuantizers
+  slidingWindow := getNatFieldD j "sliding_window" d.slidingWindow
+  upsamplingRatios := getUInt64ArrayFieldD j "upsampling_ratios" d.upsamplingRatios
+  normEps := getFloatFieldD j "norm_eps" d.normEps
+  ropeTheta := getFloatFieldD j "rope_theta" d.ropeTheta
+  samplingRate := getNatFieldD j "sampling_rate" d.samplingRate
+}
+
 private def parseDecoderConfig (j : Json) (d : SpeechTokenizer12HzDecoderConfig := {})
     : SpeechTokenizer12HzDecoderConfig := {
   codebookSize := getNatFieldD j "codebook_size" d.codebookSize
@@ -129,21 +173,57 @@ private def requireTrue (ok : Bool) (msg : String) : IO Unit := do
   unless ok do
     throw (IO.userError msg)
 
-/-- Load tokenizer config from `speech_tokenizer/config.json`. -/
-def loadFromFile (path : String) (defaults : SpeechTokenizer12HzConfig := {})
-    : IO SpeechTokenizer12HzConfig := do
-  let root ← parseJsonFile path
+/-- Parse encoder and decoder metadata independently, preserving defaults for
+omitted fields as in the upstream configuration classes. -/
+def fromJson (root : Json) (defaults : SpeechTokenizer12HzConfig := {})
+    : SpeechTokenizer12HzConfig := Id.run do
   let decoder :=
     match getObjVal? root "decoder_config" with
     | some j => parseDecoderConfig j defaults.decoder
     | none => defaults.decoder
-  pure {
+  let encoder :=
+    match getObjVal? root "encoder_config" with
+    | some j => parseEncoderConfig j defaults.encoder
+    | none => defaults.encoder
+  return {
     decoder
+    encoder
+    encoderValidNumQuantizers := getNatFieldD root "encoder_valid_num_quantizers" defaults.encoderValidNumQuantizers
+    inputSampleRate := getNatFieldD root "input_sample_rate" defaults.inputSampleRate
+    encodeDownsampleRate := getNatFieldD root "encode_downsample_rate" defaults.encodeDownsampleRate
     outputSampleRate := getNatFieldD root "output_sample_rate" defaults.outputSampleRate
     decodeUpsampleRate := getNatFieldD root "decode_upsample_rate" defaults.decodeUpsampleRate
   }
 
-/-- Validate this Lean implementation supports the provided tokenizer config. -/
+/-- Load tokenizer config from `speech_tokenizer/config.json`. -/
+def loadFromFile (path : String) (defaults : SpeechTokenizer12HzConfig := {})
+    : IO SpeechTokenizer12HzConfig := do
+  return fromJson (← parseJsonFile path) defaults
+
+/-- Validate the fixed Mimi encoder architecture and select the emitted
+semantic/acoustic codebooks. Decoder metadata does not control encoding. -/
+def encoderCodebookCounts (cfg : SpeechTokenizer12HzConfig) : IO (Nat × Nat) := do
+  let e := cfg.encoder
+  for (name, actual, expected) in #[
+      ("codebook_size", e.codebookSize, 2048), ("codebook_dim", e.codebookDim, 256),
+      ("hidden_size", e.hiddenSize, 512), ("intermediate_size", e.intermediateSize, 2048),
+      ("head_dim", e.headDim, 64), ("num_attention_heads", e.numAttentionHeads, 8),
+      ("num_key_value_heads", e.numKeyValueHeads, 8), ("num_hidden_layers", e.numHiddenLayers, 8),
+      ("sliding_window", e.slidingWindow, 250), ("sampling_rate", e.samplingRate, 24000)] do
+    requireTrue (actual == expected)
+      s!"Unsupported speech tokenizer encoder {name}={actual} (expected {expected})"
+  requireTrue (e.upsamplingRatios == #[8, 6, 5, 4])
+    s!"Unsupported speech tokenizer encoder upsampling_ratios={e.upsamplingRatios} (expected #[8,6,5,4])"
+  requireTrue (e.normEps == 1e-5 && e.ropeTheta == 10000.0)
+    s!"Unsupported speech tokenizer encoder norm_eps={e.normEps}/rope_theta={e.ropeTheta}"
+  requireTrue (cfg.inputSampleRate == 24000 && cfg.encodeDownsampleRate == 1920)
+    s!"Unsupported encoder input_sample_rate={cfg.inputSampleRate}/encode_downsample_rate={cfg.encodeDownsampleRate}"
+  let valid := cfg.encoderValidNumQuantizers
+  requireTrue (valid <= e.numQuantizers && e.numSemanticQuantizers >= 1 && e.numSemanticQuantizers < valid)
+    s!"Unsupported encoder quantizer split: semantic={e.numSemanticQuantizers}, valid={valid}, available={e.numQuantizers} (need 1 <= semantic < valid <= available)"
+  return (e.numSemanticQuantizers.toNat, (valid - e.numSemanticQuantizers).toNat)
+
+/-- Validate the waveform decoder architecture, independently of the encoder. -/
 def validateSupported (cfg : SpeechTokenizer12HzConfig) : IO Unit := do
   let d := cfg.decoder
   requireTrue (d.codebookSize == 2048) s!"Unsupported speech tokenizer codebook_size={d.codebookSize} (expected 2048)"
