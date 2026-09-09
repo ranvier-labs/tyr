@@ -1,4 +1,5 @@
 import Tyr.Mctx.Policies
+import Tyr.Mctx.Sampling
 
 /-!
 # Tyr.Mctx.Batched
@@ -224,73 +225,14 @@ def getSubtreeBatched
     getSubtree t (childActions.getD bi 0)
   { trees := trees }
 
-private def maxRow (xs : Array Float) (default : Float := 0.0) : Float :=
-  xs.foldl (init := default) fun acc x => if x > acc then x else acc
-
-private def logSafe' (x : Float) : Float :=
-  let tiny : Float := 1e-30
-  Float.log (if x < tiny then tiny else x)
-
 private def addArrays (a b : Array Float) : Array Float :=
   (List.range a.size).toArray.map fun i => a.getD i 0.0 + b.getD i 0.0
-
-private def clamp01 (x : Float) : Float :=
-  if x < 1e-6 then 1e-6 else if x > 1.0 - 1e-6 then 1.0 - 1e-6 else x
-
-private def pseudoUniform01 (key : UInt64) (i : Nat) : Float :=
-  let x := (key + UInt64.ofNat (i + 1) * 0x9e3779b97f4a7c15)
-  let mant := (x >>> 11).toNat
-  let denom : Float := Float.ofNat (Nat.pow 2 53)
-  clamp01 (Float.ofNat mant / denom)
-
-private def pseudoProbs (key : UInt64) (n : Nat) : Array Float :=
-  let vals := (List.range n).toArray.map (fun i => pseudoUniform01 key i)
-  let z := vals.foldl (init := 0.0) (· + ·)
-  if z <= 0.0 then
-    Array.replicate n (1.0 / Float.ofNat (Nat.max 1 n))
-  else
-    vals.map (fun v => v / z)
 
 private def maskInvalidActionsRow
     (logits : Array Float)
     (invalidActions : Option (Array Bool))
     : Array Float :=
-  match invalidActions with
-  | none => logits
-  | some invalid =>
-    let shifted :=
-      if logits.isEmpty then logits
-      else
-        let m := maxRow logits (logits.getD 0 0.0)
-        logits.map (fun x => x - m)
-    (List.range shifted.size).toArray.map fun i =>
-      if invalid.getD i false then -1e30 else shifted.getD i 0.0
-
-private def getLogitsFromProbs (probs : Array Float) : Array Float :=
-  probs.map logSafe'
-
-private def addDirichletNoise
-    (key : UInt64)
-    (probs : Array Float)
-    (dirichletFraction : Float)
-    : Array Float :=
-  let noise := pseudoProbs key probs.size
-  (List.range probs.size).toArray.map fun i =>
-    (1.0 - dirichletFraction) * probs.getD i 0.0 + dirichletFraction * noise.getD i 0.0
-
-private def applyTemperatureRow (logits : Array Float) (temperature : Float) : Array Float :=
-  if logits.isEmpty then
-    #[]
-  else
-    let m := maxRow logits (logits.getD 0 0.0)
-    let shifted := logits.map (fun x => x - m)
-    let t := if temperature <= 0.0 then 1e-30 else temperature
-    shifted.map (fun x => x / t)
-
-private def sampleGumbel (key : UInt64) (n : Nat) (scale : Float) : Array Float :=
-  (List.range n).toArray.map fun i =>
-    let u := pseudoUniform01 key i
-    scale * (-(Float.log (-Float.log u)))
+  maskInvalidActions logits invalidActions
 
 /-- Batched MuZero policy. -/
 def muzeroPolicyBatched
@@ -304,7 +246,7 @@ def muzeroPolicyBatched
     (maxDepth : Option Nat := none)
     (qtransform : QTransform S Unit := qtransformByParentAndSiblings)
     (dirichletFraction : Float := 0.25)
-    (_dirichletAlpha : Float := 0.3)
+    (dirichletAlpha : Float := 0.3)
     (pbCInit : Float := 1.25)
     (pbCBase : Float := 19652.0)
     (temperature : Float := 1.0)
@@ -312,10 +254,9 @@ def muzeroPolicyBatched
   let batchSize := root.value.size
   let noisyPrior := (List.range batchSize).toArray.map fun bi =>
     let row := root.priorLogits.getD bi #[]
-    let probs := softmax row
-    let noisyProbs := addDirichletNoise (rngKey + UInt64.ofNat bi) probs dirichletFraction
-    let noisyLogits := getLogitsFromProbs noisyProbs
-    maskInvalidActionsRow noisyLogits (invalidRowOpt invalidActions bi)
+    let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
+    Sampling.rootLogits (Sampling.splitKey rowKey 0) row (invalidRowOpt invalidActions bi)
+      dirichletFraction dirichletAlpha
 
   let root : BatchedRootFnOutput S := {
     priorLogits := noisyPrior
@@ -329,14 +270,16 @@ def muzeroPolicyBatched
     interiorFn 0 tree nodeIndex 0
 
   let searchTree := searchBatched
-    params rngKey root recurrentFn rootFn interiorFn
+    params (Sampling.splitKey rngKey 1) root recurrentFn rootFn interiorFn
     numSimulations maxDepth invalidActions
 
   let summary := searchTree.summary
-  let actionWeights := summary.visitProbs
+  let actionWeights := (List.range batchSize).toArray.map fun bi =>
+    Sampling.normalizeWeights (summary.visitProbs.getD bi #[]) (invalidRowOpt invalidActions bi)
   let actions := (List.range batchSize).toArray.map fun bi =>
-    let logits := applyTemperatureRow (getLogitsFromProbs (actionWeights.getD bi #[])) temperature
-    argmax logits
+    let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
+    Sampling.sampleAction (Sampling.splitKey rowKey 2) (actionWeights.getD bi #[])
+      temperature (invalidRowOpt invalidActions bi)
 
   {
     action := actions
@@ -358,7 +301,7 @@ def alphazeroPolicyBatched
     (maxDepth : Option Nat := none)
     (qtransform : QTransform S Unit := qtransformByParentAndSiblings)
     (dirichletFraction : Float := 0.25)
-    (_dirichletAlpha : Float := 0.3)
+    (dirichletAlpha : Float := 0.3)
     (pbCInit : Float := 1.25)
     (pbCBase : Float := 19652.0)
     (temperature : Float := 1.0)
@@ -366,10 +309,9 @@ def alphazeroPolicyBatched
   let batchSize := root.value.size
   let noisyPrior := (List.range batchSize).toArray.map fun bi =>
     let row := root.priorLogits.getD bi #[]
-    let probs := softmax row
-    let noisyProbs := addDirichletNoise (rngKey + UInt64.ofNat bi) probs dirichletFraction
-    let noisyLogits := getLogitsFromProbs noisyProbs
-    maskInvalidActionsRow noisyLogits (invalidRowOpt invalidActions bi)
+    let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
+    Sampling.rootLogits (Sampling.splitKey rowKey 0) row (invalidRowOpt invalidActions bi)
+      dirichletFraction dirichletAlpha
 
   let root : BatchedRootFnOutput S := {
     priorLogits := noisyPrior
@@ -399,13 +341,15 @@ def alphazeroPolicyBatched
         updateTreeWithRoot existing rootRow invalid ()
 
   let searchTree := searchBatchedWithTrees
-    params rngKey initialTrees recurrentFn rootFn interiorFn numSimulations maxDepth
+    params (Sampling.splitKey rngKey 1) initialTrees recurrentFn rootFn interiorFn numSimulations maxDepth
 
   let summary := searchTree.summary
-  let actionWeights := summary.visitProbs
+  let actionWeights := (List.range batchSize).toArray.map fun bi =>
+    Sampling.normalizeWeights (summary.visitProbs.getD bi #[]) (invalidRowOpt invalidActions bi)
   let actions := (List.range batchSize).toArray.map fun bi =>
-    let logits := applyTemperatureRow (getLogitsFromProbs (actionWeights.getD bi #[])) temperature
-    argmax logits
+    let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
+    Sampling.sampleAction (Sampling.splitKey rowKey 2) (actionWeights.getD bi #[])
+      temperature (invalidRowOpt invalidActions bi)
 
   {
     action := actions
@@ -440,7 +384,8 @@ def gumbelMuZeroPolicyBatched
   }
 
   let gumbels := (List.range batchSize).toArray.map fun bi =>
-    sampleGumbel (rngKey + UInt64.ofNat (bi + 17)) (maskedPrior.getD bi #[]).size gumbelScale
+    let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
+    Sampling.gumbel (Sampling.splitKey rowKey 0) (maskedPrior.getD bi #[]).size gumbelScale
   let extras : Array GumbelMuZeroExtraData :=
     gumbels.map (fun g => { rootGumbel := g })
 
@@ -450,7 +395,7 @@ def gumbelMuZeroPolicyBatched
     gumbelMuZeroInteriorActionSelection tree nodeIndex qtransform
 
   let searchTree := searchBatched
-    params rngKey root recurrentFn rootFn interiorFn
+    params (Sampling.splitKey rngKey 1) root recurrentFn rootFn interiorFn
     numSimulations maxDepth invalidActions (extraData := some extras)
 
   let summary := searchTree.summary
@@ -470,7 +415,7 @@ def gumbelMuZeroPolicyBatched
     let completedQvalues := qtransform tree ROOT_INDEX
     let logits := addArrays (maskedPrior.getD bi #[]) completedQvalues
     let logits := maskInvalidActionsRow logits (invalidRowOpt invalidActions bi)
-    softmax logits
+    Sampling.normalizeWeights (softmax logits) (invalidRowOpt invalidActions bi)
 
   {
     action := actions

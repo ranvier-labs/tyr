@@ -79,6 +79,7 @@ import Tests.TestModularNorm
 import Tests.TestMctxImport
 import Tests.TestMctxSeqHalving
 import Tests.TestMctxQTransforms
+import Tests.TestMctxSampling
 import Tests.TestMctxPolicies
 import Tests.TestMctxTree
 import Tests.TestMctx

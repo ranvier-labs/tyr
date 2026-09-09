@@ -238,10 +238,10 @@ pass (scope, semantics risk, or hardware requirements).
 
 ### MCTS
 
-- **[correctness]** Hash-based pseudo-Dirichlet noise, ignored
-  `_dirichletAlpha`, and a temperature argument that is an argmax no-op
-  (`Tyr/Mctx/Policies.lean`) — documented in `docs/mctx.md`; implementing the
-  real semantics changes search behavior and should be done deliberately.
+- **Resolved:** Tree, batched, and DAG policies share seeded gamma-based
+  Dirichlet and Gumbel sampling, honor `dirichletAlpha`, and sample actions
+  from temperature-adjusted visits. Regression tests cover distribution
+  moments, replay, masks, and all policy backends; see `docs/mctx.md`.
 
 ### Testing and CI
 

@@ -116,7 +116,7 @@ paper via `computeMixedValue`).
 
 The public entry points are in `Tyr/Mctx/Policies.lean`:
 
-- `muzeroPolicy` (:61) — fresh tree each call, Dirichlet-style root noise,
+- `muzeroPolicy` (:61) — fresh tree each call, symmetric Dirichlet root noise,
   PUCT selection everywhere.
 - `alphazeroPolicy` (:103) — same selection, but takes an optional
   `searchTree` to continue from and a `maxNodes` capacity override, enabling
@@ -193,7 +193,7 @@ Policies (unbatched, `import Tyr.Mctx`, `open torch.mctx`):
 
 | Function | Search tree | Distinctive arguments |
 | --- | --- | --- |
-| `muzeroPolicy` | `Tree S Unit` (fresh) | `dirichletFraction := 0.25`, `pbCInit`, `pbCBase`, `temperature` |
+| `muzeroPolicy` | `Tree S Unit` (fresh) | `dirichletFraction := 0.25`, `dirichletAlpha := 0.3`, `pbCInit`, `pbCBase`, `temperature` |
 | `alphazeroPolicy` | `Tree S Unit` (persistent) | `searchTree : Option (Tree S Unit)`, `maxNodes` |
 | `gumbelMuZeroPolicy` | `Tree S GumbelMuZeroExtraData` | `maxNumConsideredActions := 16`, `gumbelScale := 1.0` |
 
@@ -306,19 +306,48 @@ Tests live in `Tests/TestMctx*.lean` and `Tests/TestMctxDag.lean` (run via
 `lake exe test_runner`); `Tests/MctxData/` holds JSON tree dumps recorded with
 upstream mctx configuration conventions (`pb_c_base`, qtransform names).
 
-## Semantics caveats
+## Exploration and reproducibility
 
-Worth knowing before you trust the exploration knobs:
+MuZero and AlphaZero use the same exploration controls in the tree, batched,
+and DAG backends:
 
-- All "randomness" is deterministic hashing of the `UInt64` key
-  (`pseudoUniform01`, `Tyr/Mctx/Policies.lean:11`). `addDirichletNoise`
-  normalizes those values — it is not a true Dirichlet sample, and
-  `_dirichletAlpha` is ignored in every policy signature.
-- `temperature` does not change the chosen action in `muzeroPolicy` /
-  `alphazeroPolicy`: the action is `argmax` of tempered log visit-probs, and
-  `argmax` is invariant under positive scaling. `actionWeights` are the raw
-  visit probabilities either way. Upstream mctx samples from the tempered
-  distribution instead.
+- `dirichletAlpha` is the symmetric Dirichlet concentration. Small values
+  produce sparse root noise; large values concentrate it near uniform.
+  `dirichletFraction` mixes that noise with the network prior, over legal
+  actions only. Set the fraction to zero to disable root noise.
+- At positive `temperature`, acting samples from
+  `visitCounts ** (1 / temperature)`. Nonpositive temperatures choose the
+  first maximum deterministically. The returned `actionWeights` remain the
+  untempered visit probabilities, normalized over legal actions, for training.
+  This sampling rule follows [upstream mctx's policy API](https://github.com/google-deepmind/mctx/blob/main/mctx/_src/policies.py).
+- Gumbel MuZero uses independent Gumbel draws for root sequential halving and
+  retains its completed-Q policy target. Setting `gumbelScale := 0.0`
+  disables Gumbel noise.
+
+`Tyr/Mctx/Sampling.lean` provides shared SplitMix64 streams, gamma-based
+Dirichlet draws, and categorical/Gumbel sampling. Root noise, recurrent search,
+and final action selection use separate streams; batched rows derive separate
+keys. Repeating a key and inputs reproduces a run on the same platform, but the
+PRNG is not bit-compatible with JAX and seeded trajectories differ from the old
+placeholder sampler. Floating-point library differences can affect draws
+across platforms. The root-noise parameter is now named `dirichletAlpha`,
+replacing the previously ignored `_dirichletAlpha` argument.
+
+Invalid actions have exactly zero output weight when at least one legal action
+exists, including with zero simulations (uniform fallback over legal actions).
+Zero-visit actions otherwise remain impossible even at high temperature.
+Callers must provide a nonempty action set with at least one legal action for a
+valid selection: the total API retains its legacy uniform fallback for an
+all-invalid mask and returns action 0 for an empty action set.
+
+For numerical robustness, Dirichlet samples are normalized in log space,
+including a scaled-log calculation below concentration one. Nonpositive or
+nonfinite alpha disables root noise; the standalone `Sampling.dirichlet`
+helper returns uniform weights for such alpha. Fractions are clamped to [0, 1]
+and NaN fractions disable noise. NaN temperature chooses the greedy action;
+positive infinity samples uniformly over positive visit weights. Model logits
+should be finite, with negative infinity permitted for zero prior mass provided
+at least one legal action has a finite logit.
 
 ## Related guides
 
