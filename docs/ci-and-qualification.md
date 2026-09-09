@@ -102,6 +102,10 @@ cache, outside the candidate checkout. The model gates check tokenizer codes
 against the pinned Python reference, then generated-audio energy and a nonempty
 ASR transcription. The latter is a model integration smoke test, not a speech
 quality or transcription-accuracy benchmark. Generation uses sampling seed zero.
+Both gates retain Lean and Python execution logs. Strict qualification requires
+CUDA device evidence from Lean; the ASR gate additionally requires a completed
+Lean waveform decode and rejects the optional Python decoder fallback. Tokenizer
+comparison rejects empty or malformed code matrices and invalid thresholds.
 
 For an isolated **clean committed candidate**, after setting the variables above
 and linking `external/libtorch` to the configured runtime:

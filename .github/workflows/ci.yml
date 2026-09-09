@@ -228,12 +228,20 @@ jobs:
             ./scripts/check-commit-messages.sh "${commit}^!"
           done
 
+      - name: Prepare tokenizer parity regression dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/qualification-tests"
+          numpy_version=$(python3 -c 'import json; print(json.load(open("scripts/qualification/fixtures.json"))["python_packages"]["numpy"])')
+          "$RUNNER_TEMP/qualification-tests/bin/python" -m pip install --disable-pip-version-check "numpy==$numpy_version"
+
       - name: Check test routing and native build dependencies
         run: |
           python3 scripts/test_inventory.py
           python3 scripts/test_test_inventory.py
           python3 scripts/ci/test_cache_key.py
           python3 scripts/qualification/test_qualification.py
+          python3 scripts/test_qwen3tts_asr_wrapper.py
+          "$RUNNER_TEMP/qualification-tests/bin/python" scripts/test_qwen3tts_parity_wrapper.py
           python3 scripts/test_native_build.py
           python3 scripts/test_branching_checkpoint_snapshot.py
           bash scripts/nanochat/test_checkpoint_paths.sh

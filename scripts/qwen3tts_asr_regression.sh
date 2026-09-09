@@ -28,18 +28,22 @@ cd "$ROOT_DIR"
 
 RUN_ENV=(uv run)
 PYTHON_BIN=python
+BRIDGE_PYTHON=uv
 if [[ -n "${TYR_QUALIFICATION_PYTHON:-}" ]]; then
   RUN_ENV=(env)
   PYTHON_BIN="$TYR_QUALIFICATION_PYTHON"
+  BRIDGE_PYTHON="$TYR_QUALIFICATION_PYTHON"
 fi
 
 TTS_MODEL_DIR="${QWEN3_TTS_MODEL_DIR:-weights/qwen3-tts-0.6b-base}"
 ASR_MODEL_DIR="${QWEN3_ASR_MODEL_DIR:-weights/qwen3-asr-0.6b}"
 REF_AUDIO_PATH="${QWEN3_TTS_REF_AUDIO:-MLKDream.wav}"
+QWEN_REPO="${QWEN3_TTS_REPO:-../Qwen3-TTS}"
 OUT_DIR="${QWEN3_TTS_ASR_REGRESSION_OUT_DIR:-output/asr_regression}"
 WAV_PATH="$OUT_DIR/tts.wav"
 CODES_PATH="$OUT_DIR/tts.codes"
 ASR_OUT="$OUT_DIR/asr.txt"
+TTS_LOG="$OUT_DIR/tts.log"
 TYR_DEVICE="${TYR_DEVICE:-mps}"
 
 check_prereqs() {
@@ -87,8 +91,25 @@ TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake env ./.lake/build/bin/Qwen3TTSEndT
   --text "Regression audio validation" \
   --max-frames 40 \
   --ref-audio-path "$REF_AUDIO_PATH" \
+  --python "$BRIDGE_PYTHON" \
+  --qwen-repo "$QWEN_REPO" \
   --codes-path "$CODES_PATH" \
-  --wav-path "$WAV_PATH" >/dev/null
+  --wav-path "$WAV_PATH" 2>&1 | tee "$TTS_LOG"
+
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]]; then
+  if ! grep -Eq '^Target device: torch\.Device\.CUDA [0-9]+$' "$TTS_LOG"; then
+    echo "[qwen3tts-asr] FAIL: missing TTS CUDA execution evidence in $TTS_LOG"
+    exit 1
+  fi
+  if grep -Fq 'Python decode bridge' "$TTS_LOG"; then
+    echo "[qwen3tts-asr] FAIL: strict qualification requires Lean decoding; Python fallback recorded in $TTS_LOG"
+    exit 1
+  fi
+  if ! grep -Fxq "Saved waveform to $WAV_PATH (Lean decoder)" "$TTS_LOG"; then
+    echo "[qwen3tts-asr] FAIL: missing Lean decode completion marker in $TTS_LOG"
+    exit 1
+  fi
+fi
 
 if [[ ! -f "$WAV_PATH" ]]; then
   echo "[qwen3tts-asr] FAIL: wav not generated"
@@ -125,7 +146,13 @@ echo "[qwen3tts-asr] transcribing generated audio"
 TYR_DEVICE="$TYR_DEVICE" "${RUN_ENV[@]}" lake env ./.lake/build/bin/Qwen3ASRTranscribe \
   --model-dir "$ASR_MODEL_DIR" \
   --wav-path "$WAV_PATH" \
-  --max-new-tokens 64 > "$ASR_OUT"
+  --max-new-tokens 64 2>&1 | tee "$ASR_OUT"
+
+if [[ "${TYR_QUALIFICATION_STRICT:-0}" == 1 ]] && \
+    ! grep -Eq '^Qwen3-ASR target device: torch\.Device\.CUDA [0-9]+$' "$ASR_OUT"; then
+  echo "[qwen3tts-asr] FAIL: missing ASR CUDA execution evidence in $ASR_OUT"
+  exit 1
+fi
 
 TRANSCRIPT="$(awk '/^TEXT_BEGIN$/{flag=1;next}/^TEXT_END$/{flag=0}flag{print}' "$ASR_OUT" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
 if [[ -z "$TRANSCRIPT" ]]; then
