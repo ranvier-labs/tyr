@@ -20,11 +20,13 @@
   (a) KV-cache parity: logits from a single full-sequence forward == logits
       from prefill + step-by-step decode (seq 20 > window 8, so sliding-layer
       decode-time KV truncation is exercised). CPU fp32 dense (tol 2e-4),
-      CUDA fp32 dense (tol 1e-2). BF16 cache parity is also checked layer by
-      layer: full/prefill/decode receive identical incoming hidden states
-      from the uncached reference, avoiding accumulated earlier-layer drift.
-      Every layer output must satisfy |got-ref| <= 0.05 + 0.02*|ref|, matching
-      the Laguna MoE fixture's bound. Erased cached-history controls must fail
+      CUDA fp32 dense (tol 1e-2). BF16 attention-cache parity is also checked
+      layer by layer: full/prefill/decode receive identical normalized hidden
+      states from the uncached reference. This checks the actual KV-cache
+      block before residual/FFN: BF16 FFN matmul shapes introduce additional
+      rounding unrelated to cache storage or attention history, which can be
+      amplified through successive layers. Every attention output must satisfy
+      |got-ref| <= 0.05 + 0.02*|ref|. Erased cached-history controls must fail
       this gate. Whole-model BF16 cross-shape differences are diagnostic;
       same-prefix cached/uncached equality remains exact, and FP32 cache
       parity remains tightly gated. The cache
@@ -171,10 +173,9 @@ private def mixedErrorStats (got expected : T #[]) (rtol := 0.02) (atol := 0.05)
       violations := if diff > bound then 1 else 0 }
   pure stats
 
-private def checkMixedErrors (stats : MixedErrorStats) (label : String) : IO Unit := do
+private def reportMixedErrors (stats : MixedErrorStats) (label : String) : IO Unit := do
   IO.println s!"  {label}: maxAbs={stats.maxAbs} |ref|@maxAbs={stats.referenceAtMaxAbs} max|ref|={stats.maxReference} max(error/bound)={stats.maxRatio} violations={stats.violations} (atol=0.05 rtol=0.02)"
   IO.println s!"    worst flat_index={stats.worstIndex}/{stats.count} got={stats.worstGot} ref={stats.worstReference} error={stats.worstError} bound={stats.worstBound}"
-  check (stats.violations == 0) s!"{label} every logit satisfies the BF16 mixed bound"
 
 private def checkComparisonFailures : IO Unit := do
   for invalid in #[Float.ofBits 0x7ff8000000000000, Float.ofBits 0x7ff0000000000000] do
@@ -318,44 +319,82 @@ private def runCacheParityModel (cfg : Config) (device : Device) (lbl : String)
     check (dPrefillPart ≤ tol) s!"(a) [{lbl}] prefill-12 logits match full forward (maxAbs={dPrefillPart})"
     check (dStep ≤ tol) s!"(a) [{lbl}] decode-step logits match full forward (maxAbs={dStep})"
 
-/-- Isolate cache arithmetic within each BF16 layer. Every path receives the
-same incoming hidden states from the full reference, never a previous cached
-layer's rounded outputs. The fixture bound therefore checks one layer's cache
-behavior rather than treating an accumulated model difference as one operation. -/
+/-- Check the public attention-cache block before the residual/FFN. Inputs,
+normalization and RoPE rows are shared between all three operation shapes.
+Return numeric violations and undetected erased-history controls separately;
+the caller reports every layer before asserting their aggregate counts. -/
+private def runBf16AttentionCacheParity {numHeads rotaryDim : UInt64}
+    (cfg : Config) (lbl : String) (attention : LagunaAttention cfg numHeads)
+    (inputs : T #[1, 20, cfg.hidden_size])
+    (cos sin : T #[20, rotaryDim / 2]) (window : Option UInt64)
+    (fresh : LagunaAttention.KVCache cfg 1) : IO (Nat × Nat) := do
+  let full := attention.forward (rotaryDim := rotaryDim) cfg inputs cos sin window
+  let inputsPre : T #[1, 12, cfg.hidden_size] := data.slice inputs 1 0 12
+  let cosPre : T #[12, rotaryDim / 2] := data.slice cos 0 0 12
+  let sinPre : T #[12, rotaryDim / 2] := data.slice sin 0 0 12
+  let (prefill, initialCache) := attention.forwardWithCache
+    (rotaryDim := rotaryDim) cfg inputsPre cosPre sinPre window fresh
+  let expectedPre : T #[1, 12, cfg.hidden_size] := data.slice full 1 0 12
+  let preStats ← mixedErrorStats (nn.eraseShape prefill) (nn.eraseShape expectedPre)
+  reportMixedErrors preStats s!"(a) [{lbl}] attention prefill"
+  let mut cache := initialCache
+  let mut stepStats : MixedErrorStats := {}
+  let mut undetected : Nat := 0
+  for pos in [12:20] do
+    let input : T #[1, 1, cfg.hidden_size] := data.slice inputs 1 pos.toUInt64 1
+    let expected : T #[1, 1, cfg.hidden_size] := data.slice full 1 pos.toUInt64 1
+    let cosStep : T #[1, rotaryDim / 2] := data.slice cos 0 pos.toUInt64 1
+    let sinStep : T #[1, rotaryDim / 2] := data.slice sin 0 pos.toUInt64 1
+    if pos == 12 then
+      let erased := { cache with vStoreDyn := torch.zeros_like cache.vStoreDyn }
+      let (bad, _) := attention.forwardStep
+        (rotaryDim := rotaryDim) cfg input cosStep sinStep window erased
+      let badStats ← mixedErrorStats (nn.eraseShape bad) (nn.eraseShape expected)
+      IO.println s!"  (a) [{lbl}] erased cached history: violations={badStats.violations} (must be positive)"
+      if badStats.violations == 0 then undetected := undetected + 1
+    let (out, next) := attention.forwardStep
+      (rotaryDim := rotaryDim) cfg input cosStep sinStep window cache
+    cache := next
+    stepStats := stepStats.merge (← mixedErrorStats (nn.eraseShape out) (nn.eraseShape expected))
+  reportMixedErrors stepStats s!"(a) [{lbl}] attention decode positions 12..19"
+  pure (preStats.violations + stepStats.violations, undetected)
+
+/-- Isolate cache arithmetic within each BF16 attention block. Every path
+receives the same normalized states from the full reference, never a previous
+cached layer's rounded outputs. The complete layer forward only supplies the
+next layer's reference inputs; its residual/FFN is outside this cache gate. -/
 private def runBf16LayerCacheParity (cfg : Config) (device : Device) (lbl : String)
     (model : LagunaForCausalLM cfg) : IO Unit := do
   let ids : T #[1, 20] := mkIds baseIds device
   let tables ← precomputeRotaryTables cfg 20 device
   let mut inputs : T #[1, 20, cfg.hidden_size] := model.embedTokens ids
+  let mut violations : Nat := 0
+  let mut undetected : Nat := 0
+  let fresh := model.model.initCache (batch := 1) cfg 20 device
   for layerIdx in [:model.model.layers.size] do
     let some layer := model.model.layers[layerIdx]? |
       throw <| IO.userError "Missing layer in BF16 cache reference"
-    let full ← layer.forward cfg inputs tables
-    let inputsPre : T #[1, 12, cfg.hidden_size] := data.slice inputs 1 0 12
-    let fresh := model.model.initCache (batch := 1) cfg 20 device
-    let (prefill, initialCache) ← layer.forwardWithCache cfg inputsPre tables fresh layerIdx
-    let expectedPre : T #[1, 12, cfg.hidden_size] := data.slice full 1 0 12
-    let preStats ← mixedErrorStats (nn.eraseShape prefill) (nn.eraseShape expectedPre)
-    checkMixedErrors preStats s!"(a) [{lbl}] isolated layer {layerIdx} prefill"
-    let mut cache := initialCache
-    let mut stepStats : MixedErrorStats := {}
-    for pos in [12:20] do
-      let input : T #[1, 1, cfg.hidden_size] := data.slice inputs 1 pos.toUInt64 1
-      let expected : T #[1, 1, cfg.hidden_size] := data.slice full 1 pos.toUInt64 1
-      if pos == 12 then
-        let some kv := cache.kvCaches[layerIdx]? |
-          throw <| IO.userError "Missing layer cache in BF16 history control"
-        let erased := { kv with vStoreDyn := torch.zeros_like kv.vStoreDyn }
-        let corrupt := { cache with kvCaches := cache.kvCaches.set! layerIdx erased }
-        let (bad, _) ← layer.forwardStep cfg input tables pos.toUInt64 corrupt layerIdx
-        let badStats ← mixedErrorStats (nn.eraseShape bad) (nn.eraseShape expected)
-        check (badStats.violations > 0)
-          s!"(a) [{lbl}] isolated layer {layerIdx} rejects erased cached history ({badStats.violations} violations)"
-      let (out, next) ← layer.forwardStep cfg input tables pos.toUInt64 cache layerIdx
-      cache := next
-      stepStats := stepStats.merge (← mixedErrorStats (nn.eraseShape out) (nn.eraseShape expected))
-    checkMixedErrors stepStats s!"(a) [{lbl}] isolated layer {layerIdx} decode positions 12..19"
-    inputs := full
+    let normalized : T #[1, 20, cfg.hidden_size] := toBFloat16'
+      (nn.rmsNormWeighted inputs (toFloat' layer.input_layernorm) cfg.rms_norm_eps)
+    let some kv := fresh.kvCaches[layerIdx]? |
+      throw <| IO.userError "Missing layer cache in BF16 attention reference"
+    let (count, missed) ← match layer.attnFull, layer.attnSliding with
+      | some attention, _ =>
+        let cos : T #[20, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos 0 20
+        let sin : T #[20, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin 0 20
+        runBf16AttentionCacheParity (rotaryDim := cfg.rotaryDimFull) cfg
+          s!"{lbl} layer {layerIdx} full" attention normalized cos sin none kv
+      | _, some attention =>
+        let cos : T #[20, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos 0 20
+        let sin : T #[20, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin 0 20
+        runBf16AttentionCacheParity (rotaryDim := cfg.rotaryDimSliding) cfg
+          s!"{lbl} layer {layerIdx} sliding" attention normalized cos sin (some cfg.sliding_window) kv
+      | _, _ => throw <| IO.userError "Missing attention in BF16 cache reference"
+    violations := violations + count
+    undetected := undetected + missed
+    inputs ← layer.forward cfg inputs tables
+  check (undetected == 0) s!"(a) [{lbl}] every attention layer rejects erased cached history"
+  check (violations == 0) s!"(a) [{lbl}] every attention cache output satisfies the BF16 mixed bound ({violations} violations)"
 
 private def runCacheParity (cfg : Config) (device : Device) (bf16 : Bool) (tol : Float) : IO Unit := do
   let lbl := s!"{deviceLabel device}{(if bf16 then "/bf16" else "/fp32")}"
