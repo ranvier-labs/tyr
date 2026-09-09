@@ -28,6 +28,7 @@ import Tests.TestADFrontendElab
 import Tests.TestADGraphaxAlphaGradParity
 import Tests.TestADGraphaxAlphaGradCoverageGate
 import Tests.TestADSparse
+import Tests.TestADSparseNumerics
 import Tests.TestADElimGraph
 import Tests.TestADElimOrderPolicy
 import Tests.TestADElimFromJaxpr
