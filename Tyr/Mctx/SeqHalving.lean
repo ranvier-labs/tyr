@@ -55,6 +55,33 @@ def getTableOfConsideredVisits (maxNumConsideredActions numSimulations : Nat) : 
   (List.range (maxNumConsideredActions + 1)).toArray.map fun m =>
     getSequenceOfConsideredVisits m numSimulations
 
+/-- The one sequential-halving schedule used by a policy invocation. -/
+structure ConsideredVisitSchedule where
+  numConsideredActions : Nat
+  visits : Array Nat
+  deriving Repr, Inhabited
+
+/-- Count considered legal actions, treating missing mask entries as valid. -/
+def countConsideredActions (maximum numActions : Nat) (invalid : Array Bool) : Nat :=
+  min maximum ((List.range numActions).countP fun i => !invalid.getD i false)
+
+def ConsideredVisitSchedule.create (numConsideredActions numSimulations : Nat) : ConsideredVisitSchedule :=
+  { numConsideredActions, visits := getSequenceOfConsideredVisits numConsideredActions numSimulations }
+
+/-- Look up a cached schedule. Direct selector callers may omit it; stale
+    metadata is ignored when the legal-action count or simulation budget changes.
+    The fallback constructs only the requested row, never the entire table. -/
+def consideredVisitAt (cached : Option ConsideredVisitSchedule)
+    (numConsideredActions numSimulations simulationIndex : Nat) : Nat :=
+  match cached with
+  | some schedule =>
+    if schedule.numConsideredActions == numConsideredActions && schedule.visits.size == numSimulations then
+      schedule.visits.getD simulationIndex 0
+    else
+      (getSequenceOfConsideredVisits numConsideredActions numSimulations).getD simulationIndex 0
+  | none =>
+    (getSequenceOfConsideredVisits numConsideredActions numSimulations).getD simulationIndex 0
+
 /-- Score used by Gumbel MuZero root action selection. -/
 def scoreConsidered
     (consideredVisit : UInt64)

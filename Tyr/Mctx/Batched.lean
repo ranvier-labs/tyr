@@ -342,8 +342,11 @@ def gumbelMuZeroPolicyBatched
   let gumbels := (List.range batchSize).toArray.map fun bi =>
     let rowKey := Sampling.splitKey rngKey (UInt64.ofNat bi + 3)
     Sampling.gumbel (Sampling.splitKey rowKey 0) (maskedPrior.getD bi #[]).size gumbelScale
-  let extras : Array GumbelMuZeroExtraData :=
-    gumbels.map (fun g => { rootGumbel := g })
+  let extras : Array GumbelMuZeroExtraData := gumbels.mapIdx fun bi g =>
+    let numConsidered := countConsideredActions maxNumConsideredActions g.size
+      ((invalidRowOpt invalidActions bi).getD #[])
+    { rootGumbel := g
+      consideredVisitSchedule := some (ConsideredVisitSchedule.create numConsidered numSimulations) }
 
   let rootFn : RootActionSelectionFn S GumbelMuZeroExtraData := fun _ tree nodeIndex =>
     gumbelMuZeroRootActionSelection tree nodeIndex numSimulations maxNumConsideredActions qtransform

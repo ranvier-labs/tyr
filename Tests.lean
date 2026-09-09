@@ -80,6 +80,7 @@ import Tests.TestMctxImport
 import Tests.TestMctxSeqHalving
 import Tests.TestMctxQTransforms
 import Tests.TestMctxSampling
+import Tests.TestMctxSelection
 import Tests.TestMctxSearchIntegrity
 import Tests.TestMctxPolicies
 import Tests.TestMctxTree

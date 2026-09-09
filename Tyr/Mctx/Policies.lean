@@ -133,7 +133,12 @@ def gumbelMuZeroPolicy
     : PolicyOutput (Tree S GumbelMuZeroExtraData) :=
   let root := { root with priorLogits := maskInvalidActions root.priorLogits invalidActions }
   let gumbel := Sampling.gumbel (Sampling.splitKey rngKey 0) root.priorLogits.size gumbelScale
-  let extraData : GumbelMuZeroExtraData := { rootGumbel := gumbel }
+  let numConsidered := countConsideredActions
+    maxNumConsideredActions root.priorLogits.size (invalidActions.getD #[])
+  let extraData : GumbelMuZeroExtraData := {
+    rootGumbel := gumbel
+    consideredVisitSchedule := some (ConsideredVisitSchedule.create numConsidered numSimulations)
+  }
 
   let rootFn : RootActionSelectionFn S GumbelMuZeroExtraData := fun _ tree nodeIndex =>
     gumbelMuZeroRootActionSelection tree nodeIndex numSimulations maxNumConsideredActions qtransform

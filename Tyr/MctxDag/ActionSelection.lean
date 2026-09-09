@@ -61,6 +61,7 @@ def muzeroActionSelection
 /-- Extra search metadata for Gumbel MuZero (DAG variant). -/
 structure GumbelMuZeroExtraData where
   rootGumbel : Array Float
+  consideredVisitSchedule : Option torch.mctx.ConsideredVisitSchedule := none
   deriving Repr, Inhabited
 
 private def prepareArgmaxInput (probs : Array Float) (visitCounts : Array UInt64) : Array Float :=
@@ -81,12 +82,11 @@ def gumbelMuZeroRootActionSelection
   let visitCounts := tree.childrenVisits.getD nodeIndex #[]
   let priorLogits := tree.childrenPriorLogits.getD nodeIndex #[]
   let completedQvalues := qtransform tree nodeIndex
-  let table := torch.mctx.getTableOfConsideredVisits maxNumConsideredActions numSimulations
-  let numValidActions := tree.rootInvalidActions.foldl (init := 0) fun acc invalid =>
-    if invalid then acc else acc + 1
-  let numConsidered := Nat.min maxNumConsideredActions numValidActions
+  let numConsidered := torch.mctx.countConsideredActions
+    maxNumConsideredActions priorLogits.size tree.rootInvalidActions
   let simulationIndex := (visitCounts.foldl (init := 0) (· + ·)).toNat
-  let consideredVisit := (table.getD numConsidered #[]).getD simulationIndex 0
+  let consideredVisit := torch.mctx.consideredVisitAt tree.extraData.consideredVisitSchedule
+    numConsidered numSimulations simulationIndex
   let toArgmax :=
     torch.mctx.scoreConsidered (UInt64.ofNat consideredVisit) tree.extraData.rootGumbel priorLogits completedQvalues visitCounts
   maskedArgmax toArgmax (some tree.rootInvalidActions)
