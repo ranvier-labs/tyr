@@ -236,3 +236,111 @@ def testResetSearchTreeBatchedSelectMask : IO Unit := do
     "Selected batch row should be reset"
   LeanTest.assertTrue (t1.nodeVisits.getD ROOT_INDEX 0 > 0)
     "Unselected batch row should be preserved"
+
+/-! Batched exploration must use independent streams for identical rows. -/
+
+private def explorationRoot (rows : Nat) : BatchedRootFnOutput Unit := {
+  priorLogits := Array.replicate rows #[0.0, 0.0, 0.0, 0.0]
+  value := Array.replicate rows 0.0
+  embedding := Array.replicate rows ()
+}
+
+private def explorationRecurrent : BatchedRecurrentFn Unit Unit := fun _ _ actions _ =>
+  ({ reward := Array.replicate actions.size 0.0, discount := Array.replicate actions.size 0.0,
+     priorLogits := Array.replicate actions.size #[0.0, 0.0, 0.0, 0.0],
+     value := Array.replicate actions.size 0.0 }, Array.replicate actions.size ())
+
+private def explorationPolicy (alphaZero : Bool) (seed : UInt64) (simulations : Nat)
+    (temperature fraction alpha : Float) (root : BatchedRootFnOutput Unit)
+    (invalid : Option (Array (Array Bool)) := none) : BatchedPolicyOutput (BatchedTree Unit Unit) :=
+  if alphaZero then
+    alphazeroPolicyBatched () seed root explorationRecurrent simulations
+      (invalidActions := invalid) (temperature := temperature)
+      (dirichletFraction := fraction) (dirichletAlpha := alpha)
+  else
+    muzeroPolicyBatched () seed root explorationRecurrent simulations
+      (invalidActions := invalid) (temperature := temperature)
+      (dirichletFraction := fraction) (dirichletAlpha := alpha)
+
+@[test] def testMctxBatchedExplorationStreamsAndReplay : IO Unit := do
+  let root := explorationRoot 16
+  for alphaZero in #[false, true] do
+    let out := explorationPolicy alphaZero 0 16 1.0 0.0 0.3 root
+    let replay := explorationPolicy alphaZero 0 16 1.0 0.0 0.3 root
+    LeanTest.assertEqual out.action replay.action "same seed replays every batch row"
+    LeanTest.assertEqual out.actionWeights replay.actionWeights "same seed replays batched weights"
+    LeanTest.assertTrue (out.action.any (· != out.action[0]!))
+      "identical batch rows must receive independent categorical draws"
+    LeanTest.assertTrue ((explorationPolicy alphaZero 1 16 1.0 0.0 0.3 root).action != out.action)
+      "adjacent small seeds change batched action draws"
+    for temperature in #[0.0, -1.0] do
+      let greedy := explorationPolicy alphaZero 0 16 temperature 0.0 0.3 root
+      for row in [:16] do
+        LeanTest.assertEqual greedy.action[row]! (argmax greedy.actionWeights[row]!)
+          "nonpositive temperature is greedy in every row"
+
+@[test] def testMctxBatchedExplorationZeroVisitsRespectMask : IO Unit := do
+  let root := { explorationRoot 16 with priorLogits := Array.replicate 16 #[1e100, 0.0, 1e100, 1.0] }
+  let invalid := some (Array.replicate 16 #[true, false, true, false])
+  for alphaZero in #[false, true] do
+    for temperature in #[0.0, 1.0, 2.0] do
+      let out := explorationPolicy alphaZero 3 0 temperature 0.0 0.3 root invalid
+      for row in [:16] do
+        let prior := softmax out.searchTree.trees[row]!.childrenPriorLogits[ROOT_INDEX]!
+        let expected := softmax #[0.0, 1.0]
+        LeanTest.assertTrue (approx prior[1]! expected[0]! && approx prior[3]! expected[1]!)
+          "masking a huge invalid prior preserves each row's legal prior ratio"
+        LeanTest.assertTrue (out.action[row]! == 1 || out.action[row]! == 3)
+          "zero-visit batched selection remains legal despite huge invalid priors"
+        let weights := out.actionWeights[row]!
+        LeanTest.assertEqual weights[0]! 0.0 "invalid action zero has exactly zero weight"
+        LeanTest.assertEqual weights[2]! 0.0 "invalid action two has exactly zero weight"
+        LeanTest.assertTrue (weights.all (fun w => w.isFinite && w >= 0.0)) "batched weights are finite probabilities"
+        LeanTest.assertTrue (approx (sum weights) 1.0) "zero-visit legal row sums to one"
+
+@[test] def testMctxBatchedExplorationDirichletAlpha : IO Unit := do
+  let root := explorationRoot 32
+  for alphaZero in #[false, true] do
+    let priors := fun seed alpha =>
+      (explorationPolicy alphaZero seed 0 0.0 1.0 alpha root).searchTree.trees.map fun tree =>
+        softmax tree.childrenPriorLogits[ROOT_INDEX]!
+    let draws := priors 0 0.3
+    LeanTest.assertEqual draws (priors 0 0.3) "same seed replays batched Dirichlet noise"
+    LeanTest.assertTrue (draws != priors 1 0.3) "nearby seeds change batched Dirichlet noise"
+    LeanTest.assertTrue (draws[0]! != draws[1]!) "identical rows receive independent root noise"
+    let concentration := fun (rows : Array (Array Float)) =>
+      sum (rows.map fun row => sum (row.map fun p => p * p))
+    LeanTest.assertTrue (concentration (priors 0 0.05) > concentration (priors 0 10.0) + 10.0)
+      "Dirichlet alpha controls root prior spread independently across batch rows"
+
+@[test] def testMctxBatchedAlphaZeroVisitTemperatureDistribution : IO Unit := do
+  let root := explorationRoot 16
+  let singleRoot : RootFnOutput Unit := { priorLogits := #[0.0, 0.0, 0.0, 0.0], value := 0.0, embedding := () }
+  let base := instantiateTreeFromRootWithCapacity singleRoot 1 #[false, false, false, false] ()
+  let carried : BatchedTree Unit Unit := {
+    trees := Array.replicate 16 { base with childrenVisits := #[#[9, 1, 0, 0]], nodeVisits := #[10] }
+  }
+  let draw := fun seed temperature =>
+    (alphazeroPolicyBatched () seed root explorationRecurrent 0
+      (searchTree := some carried) (dirichletFraction := 0.0) (temperature := temperature)).action
+  let mut cold := 0
+  let mut hot := 0
+  for seed in [:16] do
+    let a := draw seed.toUInt64 1.0
+    let b := draw seed.toUInt64 2.0
+    for row in [:16] do
+      LeanTest.assertTrue (a[row]! < 2 && b[row]! < 2) "unvisited actions have no sampling mass"
+      if a[row]! == 0 then cold := cold + 1
+      if b[row]! == 0 then hot := hot + 1
+  LeanTest.assertTrue (cold > hot + 16 && cold >= 200 && hot >= 150 && hot <= 220)
+    s!"batched temperature changes visit sampling, got T1={cold}/256 T2={hot}/256"
+
+@[test] def testMctxBatchedGumbelIndependentRows : IO Unit := do
+  let root := explorationRoot 16
+  let run := fun seed => gumbelMuZeroPolicyBatched () seed root explorationRecurrent 0
+  let out := run 0
+  let draws := fun seed => (run seed).searchTree.trees.map (·.extraData.rootGumbel)
+  LeanTest.assertEqual (draws 0) (draws 0) "same seed replays batched Gumbel noise"
+  LeanTest.assertTrue (draws 0 != draws 1) "adjacent seeds change batched Gumbel noise"
+  LeanTest.assertTrue ((draws 0)[0]! != (draws 0)[1]!) "batch rows use distinct Gumbel streams"
+  LeanTest.assertTrue (out.action.any (· != out.action[0]!)) "Gumbel action draws differ across identical rows"
