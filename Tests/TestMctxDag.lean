@@ -83,6 +83,154 @@ def testMctxDagTranspositionReuse : IO Unit := do
   LeanTest.assertTrue (c0 = c1 && c0 = Int.ofNat 1)
     s!"Expected both root actions to point to shared node 1, got ({c0}, {c1})"
 
+private def assertKeyMap (tree : DagTree Nat Nat Unit) : IO Unit := do
+  LeanTest.assertEqual tree.keyToNode.size tree.numAllocated "one key per allocated DAG node"
+  for i in [:tree.numAllocated] do
+    LeanTest.assertEqual tree.keyToNode[tree.keys[i]!]? (some i)
+      s!"DAG key map must identify node {i}"
+
+@[test]
+def testMctxDagRerootEarlierTransposition : IO Unit := do
+  let root : RootFnOutput Nat := { priorLogits := #[0.0, 0.0], value := 0.0, embedding := 0 }
+  let recurrent : RecurrentFn Unit Nat := fun _ _ action embedding =>
+    let next := if embedding == 0 then (if action == 0 then 1 else 2)
+      else if embedding == 2 then 1 else 3
+    ({ reward := 0.0, discount := 1.0, priorLogits := #[0.0, 0.0], value := Float.ofNat next }, next)
+  let rootFn : RootActionSelectionFn Nat Nat Unit := fun _ t _ =>
+    if t.nodeVisits[0]! == 1 then 0 else 1
+  let interiorFn : InteriorActionSelectionFn Nat Nat Unit := fun _ _ _ _ => 0
+  -- A is allocated before B, but B reaches A: root -> A, root -> B -> A.
+  let tree := searchDag () 0 root recurrent id rootFn interiorFn 3 (maxDepth := some 3)
+  let carried := getSubtree tree 1
+  LeanTest.assertEqual carried.keys[0]! 2 "the selected child B must become the root"
+  LeanTest.assertEqual carried.embeddings[0]! 2 "reroot must retain B's embedding"
+  LeanTest.assertEqual carried.childrenIndex[0]![0]! 1 "B must retain its edge to A"
+  LeanTest.assertEqual carried.keys[1]! 1 "the earlier transposition A must be retained"
+  LeanTest.assertEqual carried.numAllocated 2 "discard the unreachable previous root"
+  assertKeyMap carried
+  let refreshed := updateDagTreeWithRoot carried { root with embedding := 2, value := 2.0 }
+    2 #[false, false] ()
+  let resumed := searchWithDag () 0 refreshed recurrent id (fun _ _ _ => 0) interiorFn 1
+    (maxDepth := some 3)
+  LeanTest.assertEqual resumed.keys[0]! 2 "continued search must stay rooted at B"
+  LeanTest.assertEqual resumed.nodeVisits[0]! (carried.nodeVisits[0]! + 1)
+  LeanTest.assertEqual resumed.childrenIndex[1]![0]! 2 "continued search expands A's child"
+  LeanTest.assertEqual resumed.keys[2]! 3
+  assertKeyMap resumed
+
+@[test]
+def testMctxDagRerootCycleReachingPreviousRoot : IO Unit := do
+  let root : RootFnOutput Nat := { priorLogits := #[0.0], value := 0.0, embedding := 0 }
+  let recurrent : RecurrentFn Unit Nat := fun _ _ _ embedding =>
+    let next := if embedding == 0 then 1 else 0
+    ({ reward := 0.0, discount := 1.0, priorLogits := #[0.0], value := Float.ofNat next }, next)
+  let rootFn : RootActionSelectionFn Nat Nat Unit := fun _ _ _ => 0
+  let interiorFn : InteriorActionSelectionFn Nat Nat Unit := fun _ _ _ _ => 0
+  let tree := searchDag () 0 root recurrent id rootFn interiorFn 2 (maxDepth := some 2)
+  let carried := getSubtree tree 0
+  LeanTest.assertEqual carried.keys[0]! 1 "the selected child stays first even in a cycle"
+  LeanTest.assertEqual carried.keys[1]! 0 "the reachable previous root must be retained"
+  LeanTest.assertEqual carried.childrenIndex[0]![0]! 1
+  LeanTest.assertEqual carried.childrenIndex[1]![0]! 0 "cycle back edge must be remapped"
+  LeanTest.assertEqual carried.nodeVisits[0]! tree.nodeVisits[1]!
+  assertKeyMap carried
+  let refreshed := updateDagTreeWithRoot carried { root with embedding := 1, value := 1.0 }
+    1 #[false] ()
+  let resumed := searchWithDag () 0 refreshed recurrent id rootFn interiorFn 1 (maxDepth := some 1)
+  LeanTest.assertEqual resumed.keys[0]! 1
+  LeanTest.assertEqual resumed.numAllocated 2 "following a cycle must not allocate duplicate keys"
+  LeanTest.assertEqual resumed.nodeVisits[0]! (carried.nodeVisits[0]! + 1)
+  assertKeyMap resumed
+
+private def capacityRoot : RootFnOutput Nat := {
+  priorLogits := #[0.0], value := 0.0, embedding := 0
+}
+
+private def capacityRecurrent : RecurrentFn Unit Nat := fun _ key _ embedding =>
+  if embedding == 0 then
+    ({ reward := 1.0, discount := 0.5, priorLogits := #[0.0], value := 2.0 }, 1)
+  else if key % 2 == 0 then
+    ({ reward := 3.0, discount := 0.25, priorLogits := #[0.0], value := 8.0 }, 2)
+  else
+    ({ reward := 5.0, discount := 0.5, priorLogits := #[0.0], value := 10.0 }, 2)
+
+private def runCapacitySearch (tree : DagTree Nat Nat Unit) (key : UInt64) (simulations : Nat) :=
+  searchWithDag () key tree capacityRecurrent id (fun _ _ _ => 0) (fun _ _ _ _ => 0)
+    simulations (maxDepth := some 3)
+
+@[test]
+def testMctxDagRootOnlyCapacityBacksUpEvaluatedReturns : IO Unit := do
+  for requestedCapacity in #[0, 1] do
+    let tree := instantiateDagTreeFromRootWithCapacity capacityRoot 0 requestedCapacity #[false] ()
+    let searched := runCapacitySearch tree 0 3
+    LeanTest.assertEqual searched.capacity 1 "zero requested capacity must retain one root slot"
+    LeanTest.assertEqual searched.numAllocated 1 "the hard node capacity must be preserved"
+    LeanTest.assertEqual searched.nodeVisits[0]! 4 "every evaluated rollout visits the root"
+    LeanTest.assertEqual searched.childrenVisits[0]![0]! 3
+    LeanTest.assertEqual searched.childrenIndex[0]![0]! UNVISITED "no child exists at capacity"
+    LeanTest.assertTrue (approx searched.nodeValues[0]! 1.5) "root mean includes three returns of 2"
+    LeanTest.assertTrue (approx (searched.qvalues 0)[0]! 2.0) "Q must use evaluated r + discount * V"
+    LeanTest.assertEqual searched.rawValues[0]! 0.0 "transient leaves must not overwrite root raw value"
+    assertKeyMap searched
+
+@[test]
+def testMctxDagFullNonrootCapacityBacksUpVaryingReturns : IO Unit := do
+  let tree := instantiateDagTreeFromRootWithCapacity capacityRoot 0 2 #[false] ()
+  let searched := runCapacitySearch tree 0 3
+  LeanTest.assertEqual searched.capacity 2
+  LeanTest.assertEqual searched.numAllocated 2
+  LeanTest.assertEqual searched.nodeVisits #[4, 3] "root and full nonroot each receive their rollouts"
+  LeanTest.assertEqual searched.childrenVisits #[#[3], #[2]]
+  LeanTest.assertEqual searched.childrenIndex #[#[1], #[UNVISITED]]
+  -- The transient returns at node 1 are 3 + .25*8 = 5 and 5 + .5*10 = 10.
+  LeanTest.assertTrue (approx (searched.qvalues 1)[0]! 7.5) "transient Q averages full returns"
+  LeanTest.assertTrue (approx searched.nodeValues[1]! (17.0 / 3.0)) "nonroot mean includes its initial value 2"
+  -- Root rollouts are 2, 1 + .5*5 = 3.5, and 1 + .5*10 = 6.
+  LeanTest.assertTrue (approx searched.nodeValues[0]! 2.875) "ancestors receive each raw rollout return"
+  LeanTest.assertTrue (approx (searched.qvalues 0)[0]! (23.0 / 6.0)) "allocated edges retain child-value semantics"
+  LeanTest.assertEqual searched.rawValues[1]! 2.0
+  assertKeyMap searched
+
+@[test]
+def testMctxDagTransientEdgeAllocatesAfterReroot : IO Unit := do
+  let tree := instantiateDagTreeFromRootWithCapacity capacityRoot 0 2 #[false] ()
+  let searched := runCapacitySearch tree 0 2
+  let carried := getSubtree searched 0
+  LeanTest.assertEqual carried.numAllocated 1 "reroot frees the unreachable old root's slot"
+  LeanTest.assertTrue (approx (carried.qvalues 0)[0]! 5.0)
+  let resumed := runCapacitySearch carried 2 1
+  LeanTest.assertEqual resumed.numAllocated 2
+  LeanTest.assertEqual resumed.childrenIndex[0]![0]! 1
+  LeanTest.assertEqual resumed.childrenVisits[0]![0]! 2 "historical transient edge visits are preserved"
+  LeanTest.assertEqual resumed.nodeVisits #[3, 1]
+  LeanTest.assertTrue (approx resumed.nodeValues[1]! 10.0) "new child starts at the current evaluated value"
+  LeanTest.assertTrue (approx resumed.childrenValues[0]![0]! 10.0) "replace stored return-Q with allocated child V"
+  LeanTest.assertTrue (approx (resumed.qvalues 0)[0]! 10.0)
+  LeanTest.assertTrue (approx resumed.nodeValues[0]! (17.0 / 3.0)) "reroot preserves prior rollout history"
+  assertKeyMap resumed
+
+@[test]
+def testMctxDagTransientEdgeLaterFindsExistingTransposition : IO Unit := do
+  let root : RootFnOutput Nat := { priorLogits := #[0.0, 0.0], value := 0.0, embedding := 0 }
+  let recurrent : RecurrentFn Unit Nat := fun _ key action _ =>
+    if action == 0 then
+      ({ reward := 0.0, discount := 1.0, priorLogits := #[0.0, 0.0], value := 10.0 }, 1)
+    else if key == 2 then
+      ({ reward := 2.0, discount := 0.5, priorLogits := #[0.0, 0.0], value := 4.0 }, 2)
+    else
+      ({ reward := 1.0, discount := 0.5, priorLogits := #[0.0, 0.0], value := 10.0 }, 1)
+  let tree := instantiateDagTreeFromRootWithCapacity root 0 2 #[false, false] ()
+  let searched := searchWithDag () 0 tree recurrent id
+    (fun _ t _ => if t.nodeVisits[0]! == 1 then 0 else 1) (fun _ _ _ _ => 0) 3
+    (maxDepth := some 1)
+  LeanTest.assertEqual searched.numAllocated 2 "a full DAG can still reuse an existing transposition"
+  LeanTest.assertEqual searched.childrenIndex[0]! #[1, 1]
+  LeanTest.assertEqual searched.childrenVisits[0]! #[1, 2]
+  LeanTest.assertEqual searched.childrenValues[0]![1]! 10.0 "promoted edge stores child V, not its old return-Q"
+  LeanTest.assertTrue (approx (searched.qvalues 0)[1]! 6.0) "new reward and discount apply to the shared child's value"
+  LeanTest.assertTrue (approx searched.nodeValues[0]! 5.0) "rollout returns 10, 4, 6 are backed up once each"
+  assertKeyMap searched
+
 @[test]
 def testMctxDagAlphaZeroPersistentSubtree : IO Unit := do
   let root1 : RootFnOutput UInt64 := {

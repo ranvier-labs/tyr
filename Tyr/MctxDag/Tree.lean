@@ -21,6 +21,8 @@ structure DagTree (S K E : Type) [BEq K] [Hashable K] where
   childrenVisits : Array (Array UInt64)
   childrenRewards : Array (Array Float)
   childrenDiscounts : Array (Array Float)
+  /-- Allocated edges store the child's value estimate. Evaluated edges that
+      remain `UNVISITED` at capacity store their mean complete rollout return. -/
   childrenValues : Array (Array Float)
   embeddings : Array S
   keys : Array K
@@ -65,8 +67,13 @@ def DagTree.qvalues [BEq K] [Hashable K] (tree : DagTree S K E) (nodeIndex : Nat
   let rewards := tree.childrenRewards.getD nodeIndex #[]
   let discounts := tree.childrenDiscounts.getD nodeIndex #[]
   let values := tree.childrenValues.getD nodeIndex #[]
+  let children := tree.childrenIndex.getD nodeIndex #[]
+  let visits := tree.childrenVisits.getD nodeIndex #[]
   (List.range rewards.size).toArray.map fun a =>
-    rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
+    if children.getD a UNVISITED == UNVISITED && visits.getD a 0 > 0 then
+      values.getD a 0.0
+    else
+      rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
 
 private def visitProbsFromCounts (counts : Array UInt64) (numActions : UInt64) : Array Float :=
   let total : UInt64 := counts.foldl (init := 0) (· + ·)
@@ -141,6 +148,8 @@ def getSubtree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
   let rootChild := intToNatNonneg rootChildInt
   let numNodes := tree.capacity
   let numActions := tree.numActions
+  if rootChild >= numNodes then
+    return resetSearchTree tree
 
   let mut keep : Array Bool := Array.replicate numNodes false
   let mut stack : Array Nat := #[rootChild]
@@ -155,9 +164,11 @@ def getSubtree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
         if child != UNVISITED then
           stack := stack.push (intToNatNonneg child)
 
-  let mut retained : Array Nat := #[]
+  -- A transposition can point to an earlier allocated node; a cycle can even
+  -- reach the old root. The selected child must nevertheless become index 0.
+  let mut retained : Array Nat := #[rootChild]
   for i in [:numNodes] do
-    if keep.getD i false then
+    if i != rootChild && keep.getD i false then
       retained := retained.push i
 
   let mut oldToNew : Array Int := Array.replicate numNodes UNVISITED

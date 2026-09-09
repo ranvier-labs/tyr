@@ -14,6 +14,11 @@ namespace torch.mctx
 /-- Search tree state (unbatched Lean port of mctx.Tree). -/
 structure Tree (S E : Type) where
   nodeVisits : Array Nat
+  /-- Allocated nodes occupy `[0, numAllocated)`; all remaining visit counts
+      are zero. Constructors and mutation helpers maintain this invariant.
+      The default scans once for compatibility with manually constructed trees;
+      manual record updates must maintain the counter explicitly. -/
+  numAllocated : Nat := (nodeVisits.toList.takeWhile (· != 0)).length
   rawValues : Array Float
   nodeValues : Array Float
   parents : Array Int
@@ -23,6 +28,9 @@ structure Tree (S E : Type) where
   childrenVisits : Array (Array UInt64)
   childrenRewards : Array (Array Float)
   childrenDiscounts : Array (Array Float)
+  /-- For allocated children, their continuation value. For an unallocated
+      edge with positive visits, the mean complete evaluated return `r + γV`.
+      Such transient edges arise when the fixed node capacity is exhausted. -/
   childrenValues : Array (Array Float)
   embeddings : Array S
   rootInvalidActions : Array Bool
@@ -70,7 +78,11 @@ def Tree.qvalues (tree : Tree S E) (nodeIndex : Nat) : Array Float :=
   let discounts := tree.childrenDiscounts.getD nodeIndex #[]
   let values := tree.childrenValues.getD nodeIndex #[]
   (List.range rewards.size).toArray.map fun a =>
-    rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
+    if (tree.childrenIndex.getD nodeIndex #[]).getD a UNVISITED == UNVISITED &&
+        (tree.childrenVisits.getD nodeIndex #[]).getD a 0 > 0 then
+      values.getD a 0.0
+    else
+      rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
 
 private def visitProbsFromCounts (counts : Array UInt64) (numActions : UInt64) : Array Float :=
   let total : UInt64 := counts.foldl (init := 0) (· + ·)
@@ -91,12 +103,9 @@ def Tree.summary (tree : Tree S E) : SearchSummary :=
   , qvalues := qvalues
   }
 
-/-- Returns the next free node slot index (or capacity if full). -/
-def Tree.nextNodeIndex (tree : Tree S E) : Nat := Id.run do
-  for i in [:tree.nodeVisits.size] do
-    if tree.nodeVisits.getD i 0 = 0 then
-      return i
-  return tree.nodeVisits.size
+/-- Returns the next free node slot in constant time (or capacity if full). -/
+def Tree.nextNodeIndex (tree : Tree S E) : Nat :=
+  tree.numAllocated
 
 private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=
   if i < xs.size then xs.set! i v else xs
@@ -123,6 +132,7 @@ def resetSearchTree [Inhabited S] (tree : Tree S E) : Tree S E :=
   let floatRow : Array Float := Array.replicate numActions 0.0
   { tree with
     nodeVisits := Array.replicate numNodes 0
+    numAllocated := 0
     rawValues := Array.replicate numNodes 0.0
     nodeValues := Array.replicate numNodes 0.0
     parents := Array.replicate numNodes NO_PARENT
@@ -175,6 +185,7 @@ def getSubtree [Inhabited S] (tree : Tree S E) (childAction : Nat) : Tree S E :=
   let floatRow : Array Float := Array.replicate numActions 0.0
   let mut out : Tree S E := {
     nodeVisits := Array.replicate numNodes 0
+    numAllocated := retained.size
     rawValues := Array.replicate numNodes 0.0
     nodeValues := Array.replicate numNodes 0.0
     parents := Array.replicate numNodes NO_PARENT

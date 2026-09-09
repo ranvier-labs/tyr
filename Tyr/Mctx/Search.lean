@@ -27,7 +27,8 @@ private def updateAt2D (xs : Array (Array α)) (i j : Nat) (v : α) : Array (Arr
 private def intToNatNonneg (x : Int) : Nat :=
   if x < 0 then 0 else Int.toNat x
 
-/-- Updates one node's value/prior/embedding and increments visit count. -/
+/-- Updates one node's value/prior/embedding and increments visit count.
+    `nodeIndex` must name an allocated node or the next free prefix slot. -/
 def updateTreeNode
     (tree : Tree S E)
     (nodeIndex : Nat)
@@ -41,10 +42,13 @@ def updateTreeNode
     rawValues := updateAt tree.rawValues nodeIndex value
     nodeValues := updateAt tree.nodeValues nodeIndex value
     nodeVisits := updateAt tree.nodeVisits nodeIndex newVisit
+    numAllocated := if nodeIndex < tree.nodeVisits.size then
+      max tree.numAllocated (nodeIndex + 1) else tree.numAllocated
     embeddings := updateAt tree.embeddings nodeIndex embedding
   }
 
-/-- Initializes an empty tree and fills the root node. -/
+/-- Initializes an empty tree and fills the root node. Capacity is at least one
+    so even a requested zero capacity retains the root and can back up values. -/
 def instantiateTreeFromRootWithCapacity
     [Inhabited S]
     (root : RootFnOutput S)
@@ -52,12 +56,14 @@ def instantiateTreeFromRootWithCapacity
     (rootInvalidActions : Array Bool)
     (extraData : E)
     : Tree S E :=
+  let numNodes := max 1 numNodes
   let numActions := root.priorLogits.size
   let intRow : Array Int := Array.replicate numActions UNVISITED
   let visitRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   let tree : Tree S E := {
     nodeVisits := Array.replicate numNodes 0
+    numAllocated := 0
     rawValues := Array.replicate numNodes 0.0
     nodeValues := Array.replicate numNodes 0.0
     parents := Array.replicate numNodes NO_PARENT
@@ -94,21 +100,25 @@ def updateTreeWithRoot
     (rootInvalidActions : Array Bool)
     (extraData : E)
     : Tree S E :=
-  let rootUninitialized := tree.nodeVisits.getD ROOT_INDEX 0 = 0
-  let tree := { tree with
-    childrenPriorLogits := updateAt tree.childrenPriorLogits ROOT_INDEX root.priorLogits
-    rawValues := updateAt tree.rawValues ROOT_INDEX root.value
-    embeddings := updateAt tree.embeddings ROOT_INDEX root.embedding
-    rootInvalidActions := rootInvalidActions
-    extraData := extraData
-  }
-  if rootUninitialized then
-    { tree with
-      nodeValues := updateAt tree.nodeValues ROOT_INDEX root.value
-      nodeVisits := updateAt tree.nodeVisits ROOT_INDEX 1
-    }
+  if tree.nodeVisits.isEmpty then
+    instantiateTreeFromRootWithCapacity root 1 rootInvalidActions extraData
   else
-    tree
+    let rootUninitialized := tree.nodeVisits.getD ROOT_INDEX 0 = 0
+    let tree := { tree with
+      childrenPriorLogits := updateAt tree.childrenPriorLogits ROOT_INDEX root.priorLogits
+      rawValues := updateAt tree.rawValues ROOT_INDEX root.value
+      embeddings := updateAt tree.embeddings ROOT_INDEX root.embedding
+      rootInvalidActions := rootInvalidActions
+      extraData := extraData
+    }
+    if rootUninitialized then
+      { tree with
+        nodeValues := updateAt tree.nodeValues ROOT_INDEX root.value
+        nodeVisits := updateAt tree.nodeVisits ROOT_INDEX 1
+        numAllocated := max 1 tree.numAllocated
+      }
+    else
+      tree
 
 /-- Simulates from root until reaching an unvisited edge or depth cutoff. -/
 def simulate
@@ -138,19 +148,17 @@ def simulate
 
   return (parentIndex, action)
 
-/-- Expands one `(parent, action)` edge and evaluates recurrent dynamics. -/
-def expand
-    [Inhabited S]
-    (params : P)
-    (rngKey : UInt64)
+/-- Store an evaluated transition, allocating its child only when a node slot
+    is available. Re-evaluation at an existing depth-cutoff node retains the
+    upstream behavior of replacing that node's model value. -/
+def expandWithStep
     (tree : Tree S E)
-    (recurrentFn : RecurrentFn P S)
     (parentIndex : NodeIndex)
     (action : Action)
     (nextNodeIndex : NodeIndex)
+    (step : RecurrentFnOutput)
+    (nextEmbedding : S)
     : Tree S E :=
-  let embedding := tree.embeddings.getD parentIndex default
-  let (step, nextEmbedding) := recurrentFn params rngKey action embedding
   let inBounds := nextNodeIndex < tree.nodeVisits.size
   let tree :=
     if inBounds then
@@ -166,11 +174,28 @@ def expand
     actionFromParent := updateAt tree.actionFromParent nextNodeIndex (Int.ofNat action)
   }
 
-/-- Backs up values from a leaf to the root. -/
-def backward (tree : Tree S E) (leafIndex : NodeIndex) : Tree S E := Id.run do
+/-- Expands one `(parent, action)` edge and evaluates recurrent dynamics. -/
+def expand
+    [Inhabited S]
+    (params : P)
+    (rngKey : UInt64)
+    (tree : Tree S E)
+    (recurrentFn : RecurrentFn P S)
+    (parentIndex : NodeIndex)
+    (action : Action)
+    (nextNodeIndex : NodeIndex)
+    : Tree S E :=
+  let embedding := tree.embeddings.getD parentIndex default
+  let (step, nextEmbedding) := recurrentFn params rngKey action embedding
+  expandWithStep tree parentIndex action nextNodeIndex step nextEmbedding
+
+-- The rollout return is separate from the current node's running mean. This
+-- matters when a full-capacity edge was backed up before traversing ancestors.
+private def backwardFrom (tree : Tree S E) (leafIndex : NodeIndex)
+    (rolloutValue : Float) : Tree S E := Id.run do
   let mut t := tree
   let mut index := leafIndex
-  let mut leafValue := t.nodeValues.getD leafIndex 0.0
+  let mut leafValue := rolloutValue
 
   while index != ROOT_INDEX do
     let parentInt := t.parents.getD index NO_PARENT
@@ -199,6 +224,44 @@ def backward (tree : Tree S E) (leafIndex : NodeIndex) : Tree S E := Id.run do
 
   return t
 
+/-- Backs up values from an allocated leaf to the root. -/
+def backward (tree : Tree S E) (leafIndex : NodeIndex) : Tree S E :=
+  backwardFrom tree leafIndex (tree.nodeValues.getD leafIndex 0.0)
+
+/-- Back up a newly evaluated transition when the hard node capacity is full.
+    Its edge remains unallocated, but visits and the mean complete return are
+    recorded. Every ancestor receives this simulation's actual return rather
+    than the parent's updated mean. -/
+private def backwardUnallocated (tree : Tree S E) (parentIndex : NodeIndex)
+    (action : Action) (step : RecurrentFnOutput) : Tree S E :=
+  let value := step.reward + step.discount * step.value
+  let edgeCount := (tree.childrenVisits.getD parentIndex #[]).getD action 0
+  let oldValue := (tree.childrenValues.getD parentIndex #[]).getD action 0.0
+  let edgeValue := (oldValue * edgeCount.toFloat + value) / (edgeCount + 1).toFloat
+  let count := tree.nodeVisits.getD parentIndex 0
+  let parentValue :=
+    ((tree.nodeValues.getD parentIndex 0.0) * Float.ofNat count + value) / Float.ofNat (count + 1)
+  let tree := { tree with
+    nodeValues := updateAt tree.nodeValues parentIndex parentValue
+    nodeVisits := updateAt tree.nodeVisits parentIndex (count + 1)
+    childrenValues := updateAt2D tree.childrenValues parentIndex action edgeValue
+    childrenVisits := updateAt2D tree.childrenVisits parentIndex action (edgeCount + 1)
+  }
+  backwardFrom tree parentIndex value
+
+/-- Complete an evaluated simulation for both ordinary and capacity-limited
+    searches. When a formerly transient edge gains a node slot after rerooting,
+    the new child starts from the current model value; backup replaces the
+    edge's transient complete-return mean with that child's continuation value.
+    Historical edge visits and ancestor averages are retained. -/
+def expandWithStepAndBackup (tree : Tree S E) (parentIndex : NodeIndex)
+    (action : Action) (nextNodeIndex : NodeIndex) (step : RecurrentFnOutput)
+    (nextEmbedding : S) : Tree S E :=
+  let inBounds := nextNodeIndex < tree.nodeVisits.size
+  let tree := expandWithStep tree parentIndex action nextNodeIndex step nextEmbedding
+  if inBounds then backward tree nextNodeIndex
+  else backwardUnallocated tree parentIndex action step
+
 /-- Runs full MCTS search (unbatched Lean port). -/
 def searchWithTree
     [Inhabited S]
@@ -222,9 +285,9 @@ def searchWithTree
     let (parentIndex, action) := simulate key tree actionSelectionFn depthCutoff
     let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
     let nextNodeIndex := if existing = UNVISITED then tree.nextNodeIndex else intToNatNonneg existing
-    let inBounds := nextNodeIndex < tree.nodeVisits.size
-    tree := expand params key tree recurrentFn parentIndex action nextNodeIndex
-    tree := backward tree (if inBounds then nextNodeIndex else parentIndex)
+    let embedding := tree.embeddings.getD parentIndex default
+    let (step, nextEmbedding) := recurrentFn params key action embedding
+    tree := expandWithStepAndBackup tree parentIndex action nextNodeIndex step nextEmbedding
     sim := sim + 1
 
   return tree

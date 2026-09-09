@@ -57,6 +57,7 @@ def instantiateDagTreeFromRootWithCapacity
     (rootInvalidActions : Array Bool)
     (extraData : E)
     : DagTree S K E :=
+  let numNodes := max 1 numNodes
   let numActions := root.priorLogits.size
   let intRow : Array Int := Array.replicate numActions UNVISITED
   let visitRow : Array UInt64 := Array.replicate numActions 0
@@ -157,11 +158,13 @@ def simulatePath
       return (parents, actions, nodeIndex, action)
   unreachable!
 
-/-- Expands one edge. If the edge is already expanded (e.g. depth cutoff), returns the
+/-- Expands one edge and returns the information needed for its backup.
+    If the edge is already expanded (e.g. depth cutoff), returns the
     existing child without re-running `recurrentFn` and without touching the stored
     reward/discount. If the resulting key already exists, reuses that node.
-    If capacity is exhausted, no node is added and returns `parentIndex` as backup leaf. -/
-def expandEdge
+    At capacity, keeps the edge unallocated and returns the evaluated continuation
+    value separately; `parentIndex` is only a placeholder for the missing child. -/
+def expandEdgeForBackup
     [Inhabited S]
     [Inhabited K]
     [BEq K]
@@ -173,10 +176,10 @@ def expandEdge
     (keyFn : S → K)
     (parentIndex : NodeIndex)
     (action : Action)
-    : DagTree S K E × NodeIndex :=
+    : DagTree S K E × NodeIndex × Option Float :=
   let existingEdge := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
   if existingEdge != UNVISITED then
-    (tree, intToNatNonneg existingEdge)
+    (tree, intToNatNonneg existingEdge, none)
   else
     let embedding := tree.embeddings.getD parentIndex default
     let (step, nextEmbedding) := recurrentFn params rngKey action embedding
@@ -191,7 +194,7 @@ def expandEdge
     let nextKey := keyFn nextEmbedding
     match tree.keyToNode[nextKey]? with
     | some existingNode =>
-      (setEdge tree (Int.ofNat existingNode), existingNode)
+      (setEdge tree (Int.ofNat existingNode), existingNode, none)
     | none =>
       if tree.numAllocated < tree.capacity then
         let nodeIndex := tree.numAllocated
@@ -201,17 +204,25 @@ def expandEdge
           keyToNode := tree.keyToNode.insert nextKey nodeIndex
           numAllocated := nodeIndex + 1
         }
-        (setEdge tree (Int.ofNat nodeIndex), nodeIndex)
+        (setEdge tree (Int.ofNat nodeIndex), nodeIndex, none)
       else
-        -- Out-of-bounds: keep the edge unvisited but still back up through parent.
-        let tree := { tree with
-          childrenIndex := updateAt2D tree.childrenIndex parentIndex action UNVISITED
-          childrenRewards := updateAt2D tree.childrenRewards parentIndex action step.reward
-          childrenDiscounts := updateAt2D tree.childrenDiscounts parentIndex action step.discount
-        }
-        (tree, parentIndex)
+        (setEdge tree UNVISITED, parentIndex, some step.value)
 
-/-- Backs up values along the concrete simulated path. -/
+/-- Compatibility expansion API. At capacity the returned index is the parent;
+    callers that perform value backup should use `expandEdgeForBackup` to retain
+    the evaluated continuation value. -/
+def expandEdge
+    [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
+    (params : P) (rngKey : UInt64) (tree : DagTree S K E)
+    (recurrentFn : RecurrentFn P S) (keyFn : S → K)
+    (parentIndex : NodeIndex) (action : Action) : DagTree S K E × NodeIndex :=
+  let (tree, leafIndex, _) := expandEdgeForBackup params rngKey tree recurrentFn keyFn parentIndex action
+  (tree, leafIndex)
+
+/-- Backs up values along the concrete simulated path. A transient continuation
+    supplies the evaluated leaf value when capacity prevented allocation. Its
+    edge accumulates complete returns, while each ancestor receives this rollout's
+    raw return rather than the running mean of a descendant. -/
 def backwardPath
     [BEq K]
     [Hashable K]
@@ -219,10 +230,11 @@ def backwardPath
     (pathParents : Array NodeIndex)
     (pathActions : Array Action)
     (leafIndex : NodeIndex)
+    (transientValue? : Option Float := none)
     : DagTree S K E := Id.run do
   let mut t := tree
   let mut child := leafIndex
-  let mut leafValue := t.nodeValues.getD leafIndex 0.0
+  let mut leafValue := transientValue?.getD (t.nodeValues.getD leafIndex 0.0)
   let mut i := pathParents.size
 
   while i > 0 do
@@ -236,8 +248,14 @@ def backwardPath
     let parentValue :=
       ((t.nodeValues.getD parent 0.0) * Float.ofNat count + leafValue) /
         Float.ofNat (count + 1)
-    let childValue := t.nodeValues.getD child 0.0
-    let childCount := (t.childrenVisits.getD parent #[]).getD action 0 + 1
+    let oldChildCount := (t.childrenVisits.getD parent #[]).getD action 0
+    let childCount := oldChildCount + 1
+    let childValue :=
+      if i == pathParents.size && transientValue?.isSome then
+        let previous := (t.childrenValues.getD parent #[]).getD action 0.0
+        (previous * oldChildCount.toFloat + leafValue) / childCount.toFloat
+      else
+        t.nodeValues.getD child 0.0
 
     t := { t with
       nodeValues := updateAt t.nodeValues parent parentValue
@@ -275,8 +293,10 @@ def searchWithDag
   while sim < numSimulations do
     let key := rngKey + UInt64.ofNat (sim + 1)
     let (pathParents, pathActions, parentIndex, action) := simulatePath key tree actionSelectionFn depthCutoff
-    let (tree', leafIndex) := expandEdge params key tree recurrentFn keyFn parentIndex action
-    tree := backwardPath tree' (pathParents.push parentIndex) (pathActions.push action) leafIndex
+    let (tree', leafIndex, transientValue?) :=
+      expandEdgeForBackup params key tree recurrentFn keyFn parentIndex action
+    tree := backwardPath tree' (pathParents.push parentIndex) (pathActions.push action)
+      leafIndex transientValue?
     sim := sim + 1
 
   return tree
