@@ -8,7 +8,7 @@ wheels (`deps/fetch_wheels.sh`) and the pinned Lean toolchain can be cached
 in either mode.
 
 Pull requests restore compatible `.lake/packages`, `.lake/build`, `cc/build`
-and generated CUDA sources. `scripts/ci/cache_key.py` separates caches by OS,
+and generated CUDA sources. `.github/scripts/cache_key.py` separates caches by OS,
 architecture, runner image, workspace path, compiler/SDK, Lean version,
 dependency manifests (including `deps/git.lock` and `deps/wheels.lock`),
 LibTorch configuration, and explicit native/GPU build flags. The exact build
@@ -26,7 +26,7 @@ not runtime weights, test fixtures or source files tracked by Git.
 
 ## Spark qualification
 
-The `CUDA smoke` workflow retains labelled-PR and GPU-path push triggers and
+The `GPU` workflow retains labelled-PR and GPU-path push triggers and
 adds a weekly Monday schedule. Scheduled runs require both GPU and real-model
 qualification; manual runs default to both, with a `real_models` input for a
 GPU-only diagnostic. Missing prerequisites fail the selected qualification.
@@ -39,7 +39,7 @@ Spark's existing `spark-e626-gb10` runner belongs to `cpehle/tyr`, with labels
 `self-hosted,Linux,ARM64,gpu,gb10,aarch64`. A separate upstream runner can use
 `tyr-qualification` instead of generic `gpu`, so it cannot unexpectedly consume
 older queued workflows. Repository registration and runner labels must match;
-the hosted readiness job cannot substitute one repository's runner for another.
+the hosted `select-runner` job cannot substitute one repository's runner for another.
 It reports `configured` or `blocked`, never an executed qualification.
 
 Configure these repository variables for the runner that actually serves it:
@@ -48,9 +48,9 @@ Configure these repository variables for the runner that actually serves it:
 | --- | --- |
 | `TYR_QUALIFICATION_RUNNER_LABELS` | JSON label array; upstream dedicated runner: `["self-hosted","Linux","ARM64","tyr-qualification","gb10"]` |
 | `TYR_GPU` | `GB10` |
-| `TYR_QUALIFICATION_ROOT` | `/home/pehle/tyr-qualification` |
+| `TYR_QUALIFICATION_ROOT` | optional; defaults to `$HOME/tyr-qualification` |
 | `TYR_QUALIFICATION_BOOTSTRAP_PYTHON` | `python3.12` (any Python 3.12 interpreter) |
-| `TYR_CUDA_HOME` | `/usr/local/cuda` |
+| `TYR_CUDA_HOME` | required; CUDA toolkit root on the runner, e.g. `/usr/local/cuda` |
 
 The runner needs elan, a C++ compiler, NVCC 13.0, `flock`, and a Python 3.12
 interpreter (`TYR_QUALIFICATION_BOOTSTRAP_PYTHON`). The job fetches the CUDA
