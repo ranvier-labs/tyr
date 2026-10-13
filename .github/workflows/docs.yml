@@ -51,7 +51,7 @@ jobs:
           [[require]]
           name = "doc-gen4"
           git = "https://github.com/cpehle/doc-gen4"
-          rev = "43c6865cb32953f30cf1ff5664ce41cc700aca56"
+          rev = "88dbc0b34bc885045973a40cb8e6aa2bfde16551"
           EOF
 
       - name: Build patched doc-gen4
