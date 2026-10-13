@@ -108,7 +108,7 @@ structure SparseLinearMap where         -- Sparse/Map.lean:221
   entries : Array SparseEntry := #[]    -- COO: src, dst, weight : Float
 ```
 
-`SparseMapTag` (`:182`) records provenance (`placeholder`, `identityLike`, `zero`, `identity n`, `semantic tag`, `named label`, plus `add`/`compose` combinators). The `.semantic` variant wraps a `SparseSemanticTag` (`:110`) describing what the map means (e.g. `.binary op .lhs .rhsValue`, `.dotGeneral spec`) for diagnostics and downstream interpretation. `Tyr.AD.Sparse.compose` and `Tyr.AD.Sparse.add` (`Sparse/Compose.lean`, `Sparse/Add.lean`) are the dimension-checked algebra used during elimination.
+`SparseMapTag` (`:182`) records provenance (`placeholder`, `identityLike`, `zero`, `identity n`, `semantic tag`, `named label`, plus `add`/`compose` combinators). The `.semantic` variant wraps a `SparseSemanticTag` (`:110`) describing what the map means (e.g. `.binary op .lhs .rhsValue`, `.dotGeneral spec`) for diagnostics and downstream interpretation. `Tyr.AD.Sparse.compose` and `Tyr.AD.Sparse.add` ([`Sparse/Compose.lean`](../Tyr/AD/Sparse/Compose.html), [`Sparse/Add.lean`](../Tyr/AD/Sparse/Add.html)) are the dimension-checked algebra used during elimination.
 
 ### Vertex elimination (`Tyr.AD.Elim`)
 
@@ -135,9 +135,9 @@ inductive OrderPolicy where             -- Elim/OrderPolicy.lean:42
   | heuristic (name : String)
 ```
 
-Vertex IDs are 1-based (`VertexId1`); AlphaGrad action IDs are 0-based (`ActionId0`), and the two spaces cross only through checked adapters. `Elim/AlphaGradMctx.lean` wraps elimination as an MCTS environment over `Tyr.Mctx` (`recurrentFn` plus a `searchEpisode?` family, alphaZero and gumbelMuZero variants) — an AlphaGrad-style learned planner for elimination orders, exercised from `Examples/AlphaGradPort/`. See [mctx.md](mctx.md) for the search infrastructure.
+Vertex IDs are 1-based (`VertexId1`); AlphaGrad action IDs are 0-based (`ActionId0`), and the two spaces cross only through checked adapters. [`Elim/AlphaGradMctx.lean`](../Tyr/AD/Elim/AlphaGradMctx.html) wraps elimination as an MCTS environment over `Tyr.Mctx` (`recurrentFn` plus a `searchEpisode?` family, alphaZero and gumbelMuZero variants) — an AlphaGrad-style learned planner for elimination orders, exercised from `Examples/AlphaGradPort/`. See [mctx.md](mctx.md) for the search infrastructure.
 
-End-to-end adapters in `Elim/FromJaxpr.lean`:
+End-to-end adapters in [`Elim/FromJaxpr.lean`](../Tyr/AD/Elim/FromJaxpr.html):
 
 ```lean
 buildElimGraphFromJaxpr (jaxpr : LeanJaxpr)
@@ -150,7 +150,7 @@ runForwardEliminationOnJaxpr / runReverseEliminationOnJaxpr -- :75, :88
 runEliminationOnKStmts (cfg : BuildConfig := {}) (stmts : Array KStmt) …  -- :101
 ```
 
-Round-trip note: `Elim/LowerKStmt.lean` and `Elim/LowerFnBody.lean` lower a normalized jaxpr *back* to `KStmt` / `FnBody`. They share file names with `JaxprLike/Lower*.lean`, which go the opposite direction — check the namespace before importing.
+Round-trip note: [`Elim/LowerKStmt.lean`](../Tyr/AD/Elim/LowerKStmt.html) and [`Elim/LowerFnBody.lean`](../Tyr/AD/Elim/LowerFnBody.html) lower a normalized jaxpr *back* to `KStmt` / `FnBody`. They share file names with `JaxprLike/Lower*.lean`, which go the opposite direction — check the namespace before importing.
 
 ### Structured frontend (`Tyr.AD.Frontend`)
 
@@ -350,7 +350,7 @@ Day-to-day training does not use either system above: it uses libtorch's tape th
 Read these before building on the stack:
 
 - **Placeholder rule packs are not derivatives.** `registerKStmt*PlaceholderRules` and the hybrid variants (`RulePackKStmt.lean:1469-1580`) install identity-like maps; results are structurally valid but numerically meaningless. Only the `…SemanticsRules` packs carry real local Jacobian semantics, and even then the payload is scalar COO weights plus semantic tags, not dense tensor Jacobians.
-- **Scaffolding headers are literal.** `Elim/Eliminate.lean` ("vertex elimination skeleton"), `Elim/Cost.lean` ("cost model scaffolding"), and `FromFnBody.lean` ("conservative conversion skeleton") self-describe as partial.
+- **Scaffolding headers are literal.** [`Elim/Eliminate.lean`](../Tyr/AD/Elim/Eliminate.html) ("vertex elimination skeleton"), [`Elim/Cost.lean`](../Tyr/AD/Elim/Cost.html) ("cost model scaffolding"), and `FromFnBody.lean` ("conservative conversion skeleton") self-describe as partial.
 - **`@[autodiff]` companions are IR-only.** They cannot be called from Lean source, and the test suite only checks that they compile — they are never executed against known derivatives.
 - **Reverse mode rejects aliasing.** The VJP interpreter hard-errors on repeated differentiable arguments (`Tyr/AutoGrad.lean:504-515`); cotangent accumulation for aliased arguments is not implemented.
 - **Silent tangent fallback.** Outside `linearizeWithKinds`, a missing tangent falls back to the primal variable (`getTangentIdx`, `:149-158`) — wrong JVPs can compile silently.

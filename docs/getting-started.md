@@ -124,7 +124,7 @@ Runtime variables a user actually sets:
 
 ## Running tests
 
-`test_runner` (`Tests/RunTests.lean`) is the main LeanTest suite and is marked
+`test_runner` ([`Tests/RunTests.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/RunTests.lean)) is the main LeanTest suite and is marked
 `@[test_driver]` in `lakefile.lean`, so `lake test` also works:
 
 ```bash
@@ -234,7 +234,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 --no_python \
 
 ## Usage example
 
-Reconstructed example (from `Examples/TrainGPT.lean`) — the minimal
+Reconstructed example (from [`Examples/TrainGPT.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/TrainGPT.lean)) — the minimal
 build-and-train loop a new user runs, first in shell:
 
 ```bash

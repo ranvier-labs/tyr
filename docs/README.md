@@ -100,7 +100,7 @@ Two kinds of documentation exist:
 
 ### Meta
 
-- [Improvement suggestions](IMPROVEMENTS.md) — consolidated, verified
+- [Improvement suggestions](https://github.com/ranvier-labs/tyr/blob/main/docs/IMPROVEMENTS.md) — consolidated, verified
   findings (bug risks, stale docs, missing tests, cleanups) collected while
   writing these guides.
 

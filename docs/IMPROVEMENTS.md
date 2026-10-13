@@ -62,7 +62,7 @@ Items fixed in the improvement pass, with their commits.
 - **[bug-risk]** `sampleForest` index normalization shadowed `i`, collapsing
   reversed pairs to a self-merge that silently deleted a node. Fixed with
   `lo`/`hi` computed from the original pair (`4a65826 fix(branching)`).
-- **[docs]** `Tyr/Model/Qwen.lean` header rewritten — it is the Qwen3 /
+- **[docs]** [`Tyr/Model/Qwen.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen.lean) header rewritten — it is the Qwen3 /
   Qwen2.5-Omni causal-LM substrate, not a Flux-only embedder
   (`07b3bca docs(data)`).
 
@@ -97,7 +97,7 @@ Items fixed in the improvement pass, with their commits.
   markers match current diffrax — including `SRA1`, which diffrax classifies
   as a Stratonovich solver (the original list item was wrong). Added the
   missing `ReversibleSolver ReversibleHeun` instance (`440ff34 fix(diffeq)`).
-- **[cleanup]** Stale `Adjoint/Core.lean` header updated: Stratonovich SDE
+- **[cleanup]** Stale [`Adjoint/Core.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Adjoint/Core.lean) header updated: Stratonovich SDE
   backsolve adjoints now exist (`cd6a428 docs(diffeq)`).
 
 ### Event-skeleton
@@ -112,7 +112,7 @@ Items fixed in the improvement pass, with their commits.
   visited-edge check and overwrote existing edge reward/discount. Now returns
   early on visited edges (`7cefdee fix(mctx)`).
 - **[docs]** Module headers added to all 14 `Tyr/Mctx`/`Tyr/MctxDag`
-  submodules plus `Mctx/Math.lean` (`a857dea docs(mctx)`, `3c1f9bc docs(mctx)`).
+  submodules plus [`Mctx/Math.lean`](../Tyr/Mctx/Math.html) (`a857dea docs(mctx)`, `3c1f9bc docs(mctx)`).
 
 ### Audio and inference
 
@@ -137,9 +137,9 @@ Items fixed in the improvement pass, with their commits.
 
 - **[testing]** The 14 orphaned test files (12 DiffEq parity suites,
   `TestModularBudget`, `TestNanoGPTCopy`) are wired into `Tests.lean` and run
-  in the main suite; five stray root-`main`s removed. `Tests/TestCheckpoint.lean`
+  in the main suite; five stray root-`main`s removed. [`Tests/TestCheckpoint.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestCheckpoint.lean)
   writes to a temp dir and cleans up instead of polluting the repo root.
-  New `Tests/TestCoreSmoke.lean` covers PRNG determinism, `Log.Handlers`, and
+  New [`Tests/TestCoreSmoke.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestCoreSmoke.lean) covers PRNG determinism, `Log.Handlers`, and
   `TensorStruct` traversal. One wired test encoded a stale expectation
   (empty `SubSaveAt` leaf rejected with `internalError`); the library already
   rejects with the semantically correct `Result.invalidInput`, and the test

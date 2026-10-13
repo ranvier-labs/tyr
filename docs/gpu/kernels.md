@@ -120,7 +120,7 @@ import those leaf modules explicitly. `Tyr/GPU/Kernels/Examples.lean` (via
 `layerNorm`, …). Family entrypoints re-export selected leaf kernels as
 `abbrev tk…` in the `Tyr.GPU.Kernels` namespace.
 
-`Tyr/GPU/Ops.lean` is the ops umbrella, but it covers only the attention
+[`Tyr/GPU/Ops.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops.lean) is the ops umbrella, but it covers only the attention
 surface (`AttentionProblem`, `MhaH100`, `FlashAttn`); the fused-solver ops
 (`RKFused`, `SDEFused`, `BrownianFused`) are imported from their own modules.
 
@@ -140,14 +140,14 @@ generated `.launch`.
 | `Tyr/GPU/Kernels/MhaH100.lean` | `tkFlashAttnFwd{2,12}Block[Lse]`, `tkMhaH100Fwd{2,12}Block`, `tkMhaH100BwdPrep2Block`, `tkMhaH100Bwd{2,12}Block{Partials,Dq,KvSweep}` | 13 kernels; BF16, head_dim 64, `seq=128` (2 KV blocks) and `seq=768` (12 blocks); forward is currently non-causal (`MhaH100.lean:68-70`) |
 | `Tyr/GPU/Kernels/MhaH100Decode.lean` | `tkMhaH100DecodeFwd{,64,256}`, `tkMhaH100DecodeFwdGqa{,64,256}` | decode (`qSeq=1`) for head_dim 128/64/256, MHA and GQA; runtime loop over `ceil(kvSeq/64)` blocks with tail masking |
 | `Tyr/GPU/Kernels/MhaH100LCF.lean` | `tkMhaH100LCFFwd64`, `tkMhaH100LCFFwd128` | load-compute-finish forward variants |
-| `Tyr/GPU/Kernels/MhaGB10.lean` | `tkFlashAttnGb10Fwd2Block[Lse]`, `tkMhaGb10Fwd2Block`, `tkMhaGb10BwdPrep2Block`, `tkMhaGb10Bwd2BlockPartials` | GB10 (Blackwell-consumer) 2-block MHA |
+| [`Tyr/GPU/Kernels/MhaGB10.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Kernels/MhaGB10.lean) | `tkFlashAttnGb10Fwd2Block[Lse]`, `tkMhaGb10Fwd2Block`, `tkMhaGb10BwdPrep2Block`, `tkMhaGb10Bwd2BlockPartials` | GB10 (Blackwell-consumer) 2-block MHA |
 | `Tyr/GPU/Kernels/FlashAttn3.lean` | `flashAttn3Fwd`, `flashAttn3FwdGQA`, `flashAttn3FwdPersistent`, `flashAttn3BwdPrep`, `flashAttn3Bwd` | FA3-style warp-specialized producer/consumer |
 | `Tyr/GPU/Kernels/RKCombine.lean` | `dopri5Stage{2..7}[Blackwell]`, `dopri5Combine64[Blackwell]` | tableau-driven generators `rkStageSumBody` / `rkCombineBody` instantiate any explicit RK tableau |
 | `Tyr/GPU/Kernels/BrownianSample.lean` | `keyedNormal[Blackwell]`, `vbtIncrement[Blackwell]`, `emStepVbt[Blackwell]` | device PRNG replicating the CPU `PRNGKey` LCG + Box-Muller per element |
-| `Tyr/GPU/Kernels/{Bf16Gemm,PrecisionGemm,NvFp4Gemm}.lean` | `tkH100Bf16GemmFwd`, `tkB200Bf16GemmFwd`, `tkH100Fp8E4M3GemmFwd`, `tkB200NvFp4GemmFwd`, … | re-exported via `Kernels/Gemm.lean` |
-| `Tyr/GPU/Kernels/{Distributed,MOE}.lean` | `tkAllGatherFwd`, `tkAllReduceFwd`, `tkAgGemmFwd`, `tkGemmArFwd`, `tkMoeDispatchGemm`, … | re-exported via `Kernels/Parallel.lean` |
-| `Tyr/GPU/Kernels/{RingAttn,UlyssesAttn,Based,LinearAttn}.lean` | `tkRingAttnPartial`, `tkUlyssesAllToAllFwd`, `tkBasedLinearAttnFwd`, … | re-exported via `Kernels/Attention.lean` |
-| `Tyr/GPU/Kernels/Mamba2.lean` | `tkMamba2Fwd` | via `Kernels/StateSpace.lean` |
+| [`Tyr/GPU/Kernels/{Bf16Gemm,PrecisionGemm,NvFp4Gemm}.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels) | `tkH100Bf16GemmFwd`, `tkB200Bf16GemmFwd`, `tkH100Fp8E4M3GemmFwd`, `tkB200NvFp4GemmFwd`, … | re-exported via [`Kernels/Gemm.lean`](../../Tyr/GPU/Kernels/Gemm.html) |
+| [`Tyr/GPU/Kernels/{Distributed,MOE}.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels) | `tkAllGatherFwd`, `tkAllReduceFwd`, `tkAgGemmFwd`, `tkGemmArFwd`, `tkMoeDispatchGemm`, … | re-exported via [`Kernels/Parallel.lean`](../../Tyr/GPU/Kernels/Parallel.html) |
+| [`Tyr/GPU/Kernels/{RingAttn,UlyssesAttn,Based,LinearAttn}.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels) | `tkRingAttnPartial`, `tkUlyssesAllToAllFwd`, `tkBasedLinearAttnFwd`, … | re-exported via [`Kernels/Attention.lean`](../../Tyr/GPU/Kernels/Attention.html) |
+| `Tyr/GPU/Kernels/Mamba2.lean` | `tkMamba2Fwd` | via [`Kernels/StateSpace.lean`](../../Tyr/GPU/Kernels/StateSpace.html) |
 
 ### Ops: typed FlashAttention (`Tyr.GPU.Ops.FlashAttn`)
 
@@ -251,7 +251,7 @@ Eligibility details live in `currentTkBaseEligible` / `currentTkDecodeEligible`
 ## Usage examples
 
 Raw launcher — reconstructed example (from
-`Examples/GPU/RunMhaH100.lean` and `Examples/GPU/RunCopy.lean`):
+[`Examples/GPU/RunMhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100.lean) and [`Examples/GPU/RunCopy.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunCopy.lean)):
 
 ```lean
 import Tyr.Torch
@@ -284,7 +284,7 @@ order, then `grid_x grid_y grid_z`, `block_x block_y block_z`, `sharedMem`
 is the KV-block count and the block is one 128-thread warpgroup.
 
 Typed op with route inspection and autograd — reconstructed example (from
-`Examples/GPU/RunFlashAttnOp.lean`):
+[`Examples/GPU/RunFlashAttnOp.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunFlashAttnOp.lean)):
 
 ```lean
 import Tyr.Torch
@@ -299,7 +299,7 @@ let dq := torch.toFloat' (torch.autograd.grad_of q)
 ```
 
 Fused ODE solve — reconstructed example (from
-`Examples/GPU/RunRKFusedSolve.lean`):
+[`Examples/GPU/RunRKFusedSolve.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunRKFusedSolve.lean)):
 
 ```lean
 import Tyr.Torch
@@ -329,12 +329,12 @@ them.
 Numerical correctness is validated on GPU hardware, not in CPU CI. The moving
 parts:
 
-- **Fixtures.** Each `Examples/GPU/Run*.lean` harness declares a
+- **Fixtures.** Each [`Examples/GPU/Run*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Examples/GPU) harness declares a
   `FixtureSpec` pointing at `data/gpu_fixtures/<suite>/` (not checked in) —
   PyTorch reference tensors saved with `torch.data.saveTensor`, generated on
   first run or with `--regen`. Shared machinery:
-  `Examples/GPU/FixtureRunner.lean` (`runWithFixtures`, `--trials`, `--seed`,
-  `--gen-only`) and `Examples/GPU/Parity.lean` (`requireCuda`, `seedFixtures`,
+  [`Examples/GPU/FixtureRunner.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/FixtureRunner.lean) (`runWithFixtures`, `--trials`, `--seed`,
+  `--gen-only`) and [`Examples/GPU/Parity.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/Parity.lean) (`requireCuda`, `seedFixtures`,
   `reportTensorComparison`, allclose with rtol/atol).
 - **Shell harnesses.** `scripts/gpu/test_<kernel>_e2e.sh` all delegate to
   `scripts/gpu/run_e2e_kernel.sh <KernelModule> <RunnerExe> <Label>`, which
@@ -345,11 +345,11 @@ parts:
   `scripts/gpu/run_vendored_reference.sh` when executable), each suite also
   diffs against the vendored ThunderKittens CUDA reference in
   `external/git/ThunderKittens`.
-- **LeanTest suites.** `Tests/TestGPUE2E.lean` (executable `TestGPUE2E`)
+- **LeanTest suites.** [`Tests/TestGPUE2E.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestGPUE2E.lean) (executable `TestGPUE2E`)
   wraps the torch-parity runs (copy, rotary, layernorm f32/bf16, rmsnorm
   f32/bf16, flashattn, mha_h100) plus the vendored-parity checks, printing
-  `[skip]` when CUDA is unavailable. `Tests/TestGPUGB10E2E.lean` covers the
-  Blackwell-family kernels on GB10. `Tests/TestGPUKernels.lean` is the
+  `[skip]` when CUDA is unavailable. [`Tests/TestGPUGB10E2E.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestGPUGB10E2E.lean) covers the
+  Blackwell-family kernels on GB10. [`Tests/TestGPUKernels.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestGPUKernels.lean) is the
   CPU-side complement: codegen invariants and
   `AttentionProblem.currentSpecialization` selection.
 - **CI.** `.github/workflows/gpu.yml` runs on a self-hosted GPU

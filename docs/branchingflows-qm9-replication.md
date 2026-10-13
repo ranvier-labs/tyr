@@ -76,30 +76,30 @@ Evaluation:
 
 Already close:
 
-- `Tyr/Model/BranchingFlows.lean` has forest sampling, bridge sampling,
+- [`Tyr/Model/BranchingFlows.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows.lean) has forest sampling, bridge sampling,
   group minima, deletion padding, coalescence policies, and generic anchor
   merging.
 - It also now has Julia-compatible time distributions for `Uniform(0, 1)`,
   `Beta(1, 2)`, `Beta(1, 3/2)`, and `Beta(2, 2)`, the default split-intensity
   transform, and scalar/array loss helpers for split counts and deletion logits.
-- `Tyr/Model/BranchingFlowsTrain.lean` has discrete and continuous batch packers
+- [`Tyr/Model/BranchingFlowsTrain.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlowsTrain.lean) has discrete and continuous batch packers
   and losses.
-- `Examples/BranchingFlows/MixedTrainDemo.lean` is the local toy analogue of the
+- [`Examples/BranchingFlows/MixedTrainDemo.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/BranchingFlows/MixedTrainDemo.lean) is the local toy analogue of the
   Julia mixed continuous/discrete demo.
-- `Tyr/Model/BranchingFlows/DiffEq.lean` makes Tyr DiffEq solvers usable as
+- [`Tyr/Model/BranchingFlows/DiffEq.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/DiffEq.lean) makes Tyr DiffEq solvers usable as
   BranchingFlows bridges for ODE/SDE prototypes.
 - It also contains a scalar endpoint-conditioned OU bridge with constant or
   log-linear variance schedules. This covers the continuous base-process formula
   needed for one coordinate channel and can be lifted over 3D atom positions.
-- `Tyr/Model/BranchingFlows/Discrete.lean` ports the Flowfusion
+- [`Tyr/Model/BranchingFlows/Discrete.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/Discrete.lean) ports the Flowfusion
   `DistNoisyInterpolatingDiscreteFlow` schedule: target, uniform, and
   source/mask mixture weights; conditional bridge weights; categorical bridge
   sampling; Euler-style label stepping; and the label-loss time scaling.
-- `Tyr/Model/BranchingFlows/Molecule.lean` adds a molecule-shaped atom record:
+- [`Tyr/Model/BranchingFlows/Molecule.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/Molecule.lean) adds a molecule-shaped atom record:
   3D coordinates plus a discrete label, QM9-style OU defaults, a mask-token
   anchor merge, and a bridge that runs OU coordinates plus optional DFM labels
   through `branchingBridge`.
-- `Tyr/Model/BranchingFlows/MoleculeTrain.lean` packs molecule bridge results
+- [`Tyr/Model/BranchingFlows/MoleculeTrain.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/MoleculeTrain.lean) packs molecule bridge results
   into one tensor batch with coordinates, coordinate anchors, labels,
   label-anchor targets, masks, split targets, and deletion targets.
   `moleculeLosses` applies the Julia/Flowfusion time factors: the DFM label
@@ -112,13 +112,13 @@ Already close:
   Nesterov blend, first-dimension matrix flattening, Newton--Schulz
   orthogonalization, aspect scaling, and decoupled weight decay, including for
   vector parameter leaves.
-- `Tyr/Model/BranchingFlows/Molecule.lean` also has `MoleculeModelPrediction`,
+- [`Tyr/Model/BranchingFlows/Molecule.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/Molecule.lean) also has `MoleculeModelPrediction`,
   `moleculeBranchingStep`, and `moleculeBranchingGenerate`, which adapt
   coordinate endpoint predictions plus atom-label logits into the generic
   forward event path using OU coordinate stepping and DFM label stepping. By
   default they suppress a split when the atom label changed in the same step,
   matching Julia's discrete-state admissibility rule.
-- `Tyr/Model/BranchingFlows/QM9.lean` defines the preprocessing boundary for
+- [`Tyr/Model/BranchingFlows/QM9.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/QM9.lean) defines the preprocessing boundary for
   QM9 records.  It parses single JSON molecules, JSON molecule arrays, and
   JSONL batches; validates atom count, finite coordinates, label vocabulary,
   and reserved mask-token use; and converts records into
@@ -128,25 +128,25 @@ Already close:
   `maskDeletedMoleculeLabels` and raw `.xyz` export helpers
   `moleculeStateToXYZ`/`writeMoleculeXYZ`, including optional token-to-symbol
   mapping for mask labels.
-- `Examples/BranchingFlows/MoleculeGenerationDemo.lean` is the runnable local
+- [`Examples/BranchingFlows/MoleculeGenerationDemo.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/BranchingFlows/MoleculeGenerationDemo.lean) is the runnable local
   smoke example. It parses an inline preprocessed QM9-style JSONL fixture, runs
   a bridge sample with `deletionPad := 1.2`, applies the deleted-label mask
   modifier, runs `moleculeBranchingGenerate` with an oracle prediction model,
   and writes target, bridge, and generated `.xyz` files.
-- `Examples/BranchingFlows/MoleculeTrainDemo.lean` is the runnable training
+- [`Examples/BranchingFlows/MoleculeTrainDemo.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/BranchingFlows/MoleculeTrainDemo.lean) is the runnable training
   smoke. It parses an inline preprocessed molecule fixture, builds a
   QM9-shaped bridge batch, trains a small coordinate/label model through
   `trainStepMolecule`, and fails if total, coordinate, or label loss does not
   decrease.
-- `Tyr/Model/BranchingFlows/MoleculeTransformer.lean` adds a reusable
+- [`Tyr/Model/BranchingFlows/MoleculeTransformer.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/MoleculeTransformer.lean) adds a reusable
   Torch-backed molecule transformer with head-specific pairwise
   coordinate-distance attention bias and endpoint-coordinate, atom-label,
   split-count, and deletion heads.
-- `Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean` trains that
+- [`Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean) trains that
   transformer on the same QM9-shaped bridge path, with nonzero split and
   deletion loss weights, and fails if any of the four head losses does not
   decrease.
-- `Examples/BranchingFlows/MoleculeTrainGenerate.lean` is the dataset-backed
+- [`Examples/BranchingFlows/MoleculeTrainGenerate.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/BranchingFlows/MoleculeTrainGenerate.lean) is the dataset-backed
   end-to-end path. It uses Muon, samples half of training times directly from
   branching events, applies Julia's `10 : 1/3 : 1 : 1` coordinate/label/split/
   deletion loss balance, has no extra generation-only split cap by default,

@@ -52,7 +52,7 @@ Built-in pieces (`Tyr/Optim.lean:114-297`):
 
 Gradient clipping is not implemented in the core — the section is an explicit TODO
 (`Tyr/Optim.lean:299`); only `RiemannianTreeSGD` carries a private `clipScale`, and
-training loops clip inline (e.g. `clipGPTGrads` in `Examples/GPT/Train.lean`).
+training loops clip inline (e.g. `clipGPTGrads` in [`Examples/GPT/Train.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPT/Train.lean)).
 
 ### Schedules (`Tyr/Optim/Scheduler.lean`, namespace `torch.Optim.Scheduler`)
 

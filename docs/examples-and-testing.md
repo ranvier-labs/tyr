@@ -72,24 +72,24 @@ standalone test executables for a `main` and an assigned suite.
 Tests are organized in three tiers:
 
 1. **Main suite** — `lake test`. `test_runner`'s root is
-   `Tests/RunTests.lean`, which imports the umbrella module `Tests.lean`
+   [`Tests/RunTests.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/RunTests.lean), which imports the umbrella module `Tests.lean`
    plus `Tests.TestAdditionalManifolds` (special-cased there, not
    in `Tests.lean`). It parses `--filter PATTERN`, `--ignored`, `--fail-fast`,
    `--help` into a `LeanTest.RunConfig`.
 2. **Experimental suite** — `lake exe test_runner_experimental`, root
-   `Tests/RunTestsExperimental.lean`, which imports `TestsExperimental.lean`.
+   [`Tests/RunTestsExperimental.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/RunTestsExperimental.lean), which imports `TestsExperimental.lean`.
    That umbrella currently contains exactly one module,
    `Tests.TestBranchingFlows`, parked there until
-   `Tyr/Model/BranchingFlows.lean` stabilizes (note at `Tests.lean:118`).
+   [`Tyr/Model/BranchingFlows.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows.lean) stabilizes (note at `Tests.lean:118`).
 3. **Standalone executables** — focused or heavy suites built and run
    individually: `TestDiffEq`, `TestDiffEqAdjoint`, `TestDiffEqAdjointCore`,
    `TestDataLoader`, `TestGPUDSL`, `TestGPUKernels`, `TestGPUE2E`,
    `TestGPUGB10E2E`, `TestGPUTileIR`, `TestTileIRGenerateMain`, `TestDiffusion`,
    and `RunRiemannianNanoGPTTests`. Each is a thin runner module
-   (`Tests/RunTest*.lean`, `Tests/Run*.lean` — the prefix split is historical)
+   ([`Tests/RunTest*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tests), [`Tests/Run*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tests) — the prefix split is historical)
    with a `parseArgs` → `runTestsAndExit` body in most runners. `TestDiffusion`
-   has a dedicated `Tests/RunTestDiffusion.lean` driver. The SDE/underdamped order-parity runners
-   (`Tests/RunDiffEqSDEOrderParity.lean`, `RunDiffEqUnderdampedOrderParity.lean`)
+   has a dedicated [`Tests/RunTestDiffusion.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/RunTestDiffusion.lean) driver. The SDE/underdamped order-parity runners
+   ([`Tests/RunDiffEqSDEOrderParity.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/RunDiffEqSDEOrderParity.lean), `RunDiffEqUnderdampedOrderParity.lean`)
    which just call a `run` function.
 
 Hosted CI (`.github/workflows/cpu.yml`) builds and runs the manifest in
@@ -114,7 +114,7 @@ example changes are included in the workflow path filters. Local GPU runs
 without strict mode retain optional skips and print executed/skipped counts.
 
 There is also `lean_exe ffi_crash_probe` (root
-`Tests/FfiCrashProbe.lean`): a manual probe that intentionally triggers a
+[`Tests/FfiCrashProbe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/FfiCrashProbe.lean)): a manual probe that intentionally triggers a
 libtorch CUDA error to check the process dies with an intelligible `c10::Error`
 message instead of a bare SIGABRT. It is deliberately not part of any suite;
 the Linux CI job runs it and fails unless it aborts (SIGABRT) with the
@@ -127,14 +127,14 @@ libtorch error message.
   loader and type-provider tests (see [serialization.md](serialization.md)).
 - `Tests/MctxData/` — independent upstream MuZero/Gumbel references checked
   against complete search statistics. The original large dumps are preserved
-  as historical data; see the [fixture guide](../Tests/MctxData/README.md).
+  as historical data; see the [fixture guide](https://github.com/ranvier-labs/tyr/blob/main/Tests/MctxData/README.md).
 - GPU kernel examples compare against `.pt` fixtures produced by libtorch
-  reference implementations; see `Examples/GPU/FixtureRunner.lean` below.
+  reference implementations; see [`Examples/GPU/FixtureRunner.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/FixtureRunner.lean) below.
 
 ### Example organization
 
 Examples pair library modules with thin executable wrappers. The convention is
-a 4-line entrypoint module, e.g. `Examples/GPU/RunRMSNormExe.lean`:
+a 4-line entrypoint module, e.g. [`Examples/GPU/RunRMSNormExe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunRMSNormExe.lean):
 
 ```lean
 import Examples.GPU.RunRMSNorm
@@ -150,20 +150,20 @@ AlphaGradPort) — executables are excluded by design because they define global
 
 Shared infrastructure:
 
-- `Examples/ModelRunner.lean` — CLI/device/streaming helpers for the
+- [`Examples/ModelRunner.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/ModelRunner.lean) — CLI/device/streaming helpers for the
   pretrained-model demos: `resolveDevice : String → IO (Device × Option String)`
   (parses `auto`/`cpu`/`mps`/`cuda[:n]`, warns and falls back to CPU),
   `parseNatArg`, `loadPrompts`.
-- `Examples/GPU/Parity.lean` — parity-check helpers: `gpuTarget`/`gpuFamily`
+- [`Examples/GPU/Parity.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/Parity.lean) — parity-check helpers: `gpuTarget`/`gpuFamily`
   (read `TYR_GPU_TARGET`/`TYR_GPU_FAMILY`), `isBlackwellFamily`, `requireCuda`,
   `seedFixtures`, and `TensorCheck` (label/ok/mae/maxErr/rtol/atol) with
   `compareTensors`.
-- `Examples/GPU/FixtureRunner.lean` — `FixtureSpec` (fixture dir + tensor
+- [`Examples/GPU/FixtureRunner.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/FixtureRunner.lean) — `FixtureSpec` (fixture dir + tensor
   names), `CommonArgs`, `parseCommonArgs` (`--regen`, `--gen-only`, `--trials`,
   `--seed`, `--regen-every-trial`), and `runWithFixtures`, which regenerates
   missing `.pt` fixtures from libtorch references and then compares kernel
   outputs against them.
-- `Examples/GPT/GPT.lean` — the canonical dependently-typed model demo:
+- [`Examples/GPT/GPT.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPT/GPT.lean) — the canonical dependently-typed model demo:
   `torch.gpt.Config` with presets `Config.gpt2_small`, `gpt2_mini`,
   `gpt2_micro`, `tiny_shakespeare`, `nanogpt_cpu_shakespeare`,
   `nanogpt_gpu_shakespeare`, and shape-indexed parameters such as
@@ -204,7 +204,7 @@ listed under "Test tiers" above. Two codegen tools (`GenerateGpuKernels`,
 
 ## Usage example
 
-Reconstructed example (from `Tests/TestSafeTensorsTypeProvider.lean`):
+Reconstructed example (from [`Tests/TestSafeTensorsTypeProvider.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestSafeTensorsTypeProvider.lean)):
 
 ```lean
 import Tyr.SafeTensors
@@ -262,14 +262,14 @@ No test file imports these modules directly (verified by grep): `Tyr.Audio`,
 `Tyr.Hub`, `Tyr.PRNG`, `Tyr.RL`, `Tyr.Widget`, `Tyr.Log`, `Tyr.Text`,
 `Tyr.Inference`. Coverage is thin (one or two files) for `Tyr.Distributed`,
 `Tyr.Sharding`, and `Tyr.Data`. Multi-process collective behavior is only
-smoke-tested through the FFI surface in `Tests/TestModdedGPT.lean`.
+smoke-tested through the FFI surface in [`Tests/TestModdedGPT.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestModdedGPT.lean).
 
 Caveats to be aware of when extending the suite:
 
-- GPU parity harnesses under `Examples/GPU/Run{BrownianSample,BrownianDescent,EulerMaruyamaFused,RKCombine,RKFusedSolve,MhaGB10}.lean`
+- GPU parity harnesses under [`Examples/GPU/Run{BrownianSample,BrownianDescent,EulerMaruyamaFused,RKCombine,RKFusedSolve,MhaGB10}.lean`](https://github.com/ranvier-labs/tyr/tree/main/Examples/GPU)
   are exercised through `TestGPUGB10E2E`; hosted CPU success does not validate
   their numerical CUDA behavior.
-- `Tests/Test.lean` defines helpers (`encode`, `decode`, `charToInt`, ...) at
+- [`Tests/Test.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/Test.lean) defines helpers (`encode`, `decode`, `charToInt`, ...) at
   global scope and imports `Examples.GPT.*`, so the test library depends on the
   examples library and those generic names leak into downstream test modules.
 
