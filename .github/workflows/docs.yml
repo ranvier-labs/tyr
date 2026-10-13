@@ -51,7 +51,7 @@ jobs:
           [[require]]
           name = "doc-gen4"
           git = "https://github.com/cpehle/doc-gen4"
-          rev = "9808750c02cc0ad0ce9d67917250ec029283745e"
+          rev = "88dbc0b34bc885045973a40cb8e6aa2bfde16551"
           EOF
 
       - name: Build patched doc-gen4
@@ -60,6 +60,8 @@ jobs:
           lake build doc-gen4
 
       - name: Build docs
+        env:
+          DOCGEN_NAV_ROOTS: Tyr
         run: |
           cd docbuild
           lake build Tyr:docs
