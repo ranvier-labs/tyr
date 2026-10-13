@@ -4,8 +4,8 @@ import Tyr.Torch
 # Metric factors
 
 Low-rank factors of positive semidefinite pullback metrics
-([`Tyr.Modular.MetricFactor`]) and diagonal mass regularizers
-([`Tyr.Modular.DiagonalMass`]).
+(`Tyr.Modular.MetricFactor`) and diagonal mass regularizers
+(`Tyr.Modular.DiagonalMass`).
 -/
 
 namespace Tyr.Modular

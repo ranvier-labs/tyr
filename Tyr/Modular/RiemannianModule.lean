@@ -7,10 +7,10 @@ import Tyr.Manifolds.Embedded
 /-!
 # Riemannian modules
 
-The [`Tyr.Modular.RiemannianModule`] class exposes the local Jacobians
-([`Tyr.Modular.LocalLinearization`]) needed for recursive metric-factor
+The `Tyr.Modular.RiemannianModule` class exposes the local Jacobians
+(`Tyr.Modular.LocalLinearization`) needed for recursive metric-factor
 propagation (see `Tyr.Modular.MetricFactor`), with instances for `torch.Linear`
-and [`Tyr.Modular.ManifoldLinear`].
+and `Tyr.Modular.ManifoldLinear`.
 -/
 
 namespace Tyr.Modular
@@ -166,7 +166,7 @@ def backwardLeafStep {M : Type} {inDim outDim : UInt64} [RiemannianModule M inDi
   }
   exact (m', LPrev, lambdaPrev, stats)
 
-/-- [`Tyr.Modular.RiemannianModule`] for `torch.Linear` with unit diagonal parameter mass. -/
+/-- `Tyr.Modular.RiemannianModule` for `torch.Linear` with unit diagonal parameter mass. -/
 instance linearRiemannianModule (inDim outDim : UInt64) :
     RiemannianModule (torch.Linear inDim outDim) inDim outDim where
   paramDim := outDim * inDim + outDim
@@ -195,7 +195,7 @@ instance linearRiemannianModule (inDim outDim : UInt64) :
       | none => none
     { lin with weight := weight', bias := bias' }
 
-/-- [`Tyr.Modular.RiemannianModule`] for [`Tyr.Modular.ManifoldLinear`] layers. -/
+/-- `Tyr.Modular.RiemannianModule` for `Tyr.Modular.ManifoldLinear` layers. -/
 instance manifoldLinearRiemannianModule
     (M : UInt64 → UInt64 → Type)
     [MatrixManifoldCarrier M]

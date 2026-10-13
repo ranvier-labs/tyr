@@ -3,7 +3,7 @@ import Tyr.TensorStruct
 /-!
 # Modular norm
 
-The [`Tyr.Modular.NormedModule`] typeclass for neural network weight spaces.
+The `Tyr.Modular.NormedModule` typeclass for neural network weight spaces.
 
 Based on "Scalable Optimization in the Modular Norm" (NeurIPS 2024),
 <https://arxiv.org/abs/2405.14813>.

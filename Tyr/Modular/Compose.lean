@@ -4,7 +4,7 @@ import Tyr.Modular.Norm
 # Composition rules for the modular norm
 
 The modular norm is defined recursively via two operations:
-1. Sequential composition $M_2 \circ M_1$: layers applied in sequence ([`Tyr.Modular.Sequential`])
+1. Sequential composition $M_2 \circ M_1$: layers applied in sequence (`Tyr.Modular.Sequential`)
 2. Parallel concatenation $(M_1, M_2)$: layers applied to different parts (product types)
 
 Key formulas from the paper:
@@ -12,7 +12,7 @@ Key formulas from the paper:
 - Sequential: $\nu_{M_2 \circ M_1} = \nu_1 \nu_2$
 - Parallel: $\|w\| = \sqrt{\|w_1\|^2 + \|w_2\|^2}$ for $\ell_2$ combination
 
-Leaf instances are in `Tyr.Modular.Atomic`; the typeclass is [`Tyr.Modular.NormedModule`].
+Leaf instances are in `Tyr.Modular.Atomic`; the typeclass is `Tyr.Modular.NormedModule`.
 -/
 
 namespace Tyr.Modular
@@ -25,7 +25,7 @@ Products represent either:
 - Sequential composition: $(M_1, M_2)$ where $M_2$ is applied after $M_1$
 - Parallel composition: modules operating on different inputs
 
-We provide a [`Tyr.Modular.Sequential`] wrapper to distinguish composition semantics.
+We provide a `Tyr.Modular.Sequential` wrapper to distinguish composition semantics.
 -/
 
 /-- Marker for sequential composition: `M₂` applied after `M₁`. -/
@@ -35,12 +35,12 @@ structure Sequential (M₁ M₂ : Type) where
 
 namespace Sequential
 
-/-- Build a [`Tyr.Modular.Sequential`] from its two stages. -/
+/-- Build a `Tyr.Modular.Sequential` from its two stages. -/
 def mk' (m₁ : M₁) (m₂ : M₂) : Sequential M₁ M₂ := ⟨m₁, m₂⟩
 
 end Sequential
 
-/-- `TensorStruct` for [`Tyr.Modular.Sequential`] just combines the two modules. -/
+/-- `TensorStruct` for `Tyr.Modular.Sequential` just combines the two modules. -/
 instance [TensorStruct M₁] [TensorStruct M₂] : TensorStruct (Sequential M₁ M₂) where
   map f s := ⟨TensorStruct.map f s.first, TensorStruct.map f s.second⟩
   mapM f s := do
