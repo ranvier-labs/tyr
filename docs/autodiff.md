@@ -150,7 +150,7 @@ runForwardEliminationOnJaxpr / runReverseEliminationOnJaxpr -- :75, :88
 runEliminationOnKStmts (cfg : BuildConfig := {}) (stmts : Array KStmt) …  -- :101
 ```
 
-Round-trip note: [`Elim/LowerKStmt.lean`](../Tyr/AD/Elim/LowerKStmt.html) and [`Elim/LowerFnBody.lean`](../Tyr/AD/Elim/LowerFnBody.html) lower a normalized jaxpr *back* to `KStmt` / `FnBody`. They share file names with `JaxprLike/Lower*.lean`, which go the opposite direction — check the namespace before importing.
+Round-trip note: [`Elim/LowerKStmt.lean`](../Tyr/AD/Elim/LowerKStmt.html) and [`Elim/LowerFnBody.lean`](../Tyr/AD/Elim/LowerFnBody.html) lower a normalized jaxpr *back* to `KStmt` / `FnBody`. They share file names with [`JaxprLike/Lower*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/AD/JaxprLike), which go the opposite direction — check the namespace before importing.
 
 ### Structured frontend (`Tyr.AD.Frontend`)
 

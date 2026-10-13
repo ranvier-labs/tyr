@@ -28,7 +28,7 @@ Everything is declared in `lakefile.lean`:
 ### The LeanTest framework
 
 Tests are plain `IO Unit` definitions tagged with attributes
-(`.lake/packages/LeanTest/LeanTest/Attr.lean`):
+([`.lake/packages/LeanTest/LeanTest/Attr.lean`](https://github.com/cpehle/lean_test/blob/b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c/LeanTest/Attr.lean)):
 
 ```lean
 @[test] def testSomething : IO Unit := do ...        -- discovered and run
@@ -36,7 +36,7 @@ Tests are plain `IO Unit` definitions tagged with attributes
 @[test_should_error] def testFails : IO Unit := do ... -- passes iff it throws
 ```
 
-Assertions live in `LeanTest/Assert.lean` and throw on failure:
+Assertions live in [`LeanTest/Assert.lean`](https://github.com/cpehle/lean_test/blob/b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c/LeanTest/Assert.lean) and throw on failure:
 
 | Function | Purpose |
 |---|---|
