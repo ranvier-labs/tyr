@@ -6,6 +6,13 @@
 -/
 import Tyr.Model.Qwen.Config
 
+/-! # Qwen2.5-Omni configuration
+
+The thinker text config reuses the shared Qwen core schema; presets
+`torch.qwen25omni.Config.qwen25omni_3B` and
+`torch.qwen25omni.Config.qwen25omni_7B` follow the Hugging Face `config.json`.
+-/
+
 namespace torch.qwen25omni
 
 /-- Qwen2.5-Omni thinker text config reuses the shared Qwen core schema. -/

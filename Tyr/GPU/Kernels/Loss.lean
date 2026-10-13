@@ -4,6 +4,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Loss kernels
+
+Stable per-token cross entropy and logits VJP for BF16 logits (vocabulary 3072)
+and a deterministic mean reduction of per-token FP32 losses.
+-/
+
 namespace Tyr.GPU.Kernels.Loss
 
 open Tyr.GPU

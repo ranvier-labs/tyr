@@ -5,6 +5,12 @@
 -/
 import Std.Data.HashMap
 
+/-! # Tokenizer types
+
+Core BPE types: `tokenizer.TokenId`, `tokenizer.MergeRule` and the
+`tokenizer.BPETokenizer` state.
+-/
+
 namespace tokenizer
 
 /-- Token ID type (UInt32 for efficiency) -/

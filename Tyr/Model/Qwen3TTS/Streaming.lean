@@ -8,6 +8,14 @@
 import Tyr.Model.Qwen3TTS.Model
 import Tyr.Model.Qwen3TTS.SpeechTokenizer
 
+/-! # Qwen3-TTS streaming
+
+Streaming generation from prepared talker inputs with callbacks for codec rows
+and decoded audio chunks
+(`torch.qwen3tts.Qwen3TTSForConditionalGeneration.StreamingOptions`,
+`torch.qwen3tts.Qwen3TTSForConditionalGeneration.StreamingCallbacks`).
+-/
+
 namespace torch.qwen3tts
 
 namespace Qwen3TTSForConditionalGeneration

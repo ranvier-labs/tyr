@@ -6,6 +6,12 @@
 import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.ByteLevel
 
+/-! # BPE decoding
+
+Decodes token ids to bytes and strings, falling back to byte-level rendering for
+invalid UTF-8 (`tokenizer.decodeUtf8Lossy`).
+-/
+
 namespace tokenizer
 
 /-- Decode UTF-8 bytes, falling back to byte-level rendering for invalid streams. -/

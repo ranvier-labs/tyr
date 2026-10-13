@@ -10,6 +10,12 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.VAE.ResnetBlock
 
+/-! # VAE resampling
+
+`torch.vae.Upsample` (2× nearest neighbour + 3×3 conv) and
+`torch.vae.Downsample`.
+-/
+
 namespace torch.vae
 
 /-- Upsampling block: 2× nearest-neighbor upsample + 3×3 conv -/

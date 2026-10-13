@@ -2,6 +2,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Rotary embedding kernels
+
+RoPE forward and backward kernels on 64×64 tiles and BF16 head-dim-64 Q/K
+launches, including the Qwen3-TTS talker variant.
+-/
+
 namespace Tyr.GPU.Kernels.Rotary
 
 open Tyr.GPU

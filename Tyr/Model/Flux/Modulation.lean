@@ -9,6 +9,14 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-! # Timestep modulation
+
+Sinusoidal timestep embeddings (`torch.flux.timestepEmbedding`) and the
+adaLN-style `torch.flux.Modulation` layer that projects them to shift/scale/gate
+triplets (`torch.flux.ModulationOutput`). `torch.flux.applyModulation` computes
+$\text{scale} \cdot x + \text{shift}$, broadcast over the sequence dimension.
+-/
+
 namespace torch.flux
 
 /-- Create sinusoidal timestep embeddings.

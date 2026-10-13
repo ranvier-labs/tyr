@@ -13,6 +13,13 @@ import Tyr.Module.RMSNorm
 import Tyr.Model.Utils
 import Tyr.Model.Qwen3TTS.Model
 
+/-! # Qwen3-TTS weights
+
+Loads talker, code predictor and speaker encoder for
+`torch.qwen3tts.Qwen3TTSForConditionalGeneration` from a sharded SafeTensors
+directory.
+-/
+
 namespace torch.qwen3tts
 
 open torch.Log

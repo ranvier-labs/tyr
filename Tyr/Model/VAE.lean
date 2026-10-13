@@ -12,6 +12,13 @@ import Tyr.Model.VAE.Decoder
 import Tyr.Model.VAE.Weights
 import Tyr.Log
 
+/-! # Flux VAE
+
+`torch.vae.AutoEncoder` decodes Flux latents: it inverts the BatchNorm latent
+normalization (`torch.vae.AutoEncoder.invNormalize`), unpacks $16\times16$
+latents and runs the decoder.
+-/
+
 namespace torch.vae
 
 open torch.Log

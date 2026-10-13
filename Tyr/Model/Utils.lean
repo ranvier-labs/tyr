@@ -10,6 +10,14 @@
 -/
 import Tyr.Torch
 
+/-! # Model utilities
+
+Shared helpers for model code: Kaiming-like init with std
+$\sqrt{2/\text{fanIn}}$ (`torch.Model.initWeight`), `torch.Model.initBias`,
+freezing loaded tensors (`torch.Model.reqGradFalse`) and FP8 dequantization
+(`torch.Model.dequantizeFP8`).
+-/
+
 namespace torch.Model
 
 open torch

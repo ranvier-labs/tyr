@@ -2,6 +2,12 @@
 import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Kernels.Prelude
 
+/-! # GB10 multi-head attention
+
+FlashAttention forward and backward kernels tuned for GB10/Blackwell (sequence
+128, head dim 64), including pipelined and long-sequence schedules.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

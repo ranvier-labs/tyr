@@ -10,6 +10,12 @@ import Tyr.Model.Qwen3ASR.ConfigIO
 import Tyr.Model.Qwen3ASR.PreprocessorConfig
 import Tyr.Model.Qwen3ASR.Weights
 
+/-! # Qwen3-ASR pretrained loading
+
+Official repo ids (`torch.qwen3asr.hub.qwen3ASRCollectionRepoIds`), local/remote
+directory resolution and `torch.qwen3asr.loadFromPretrained`.
+-/
+
 namespace torch.qwen3asr.hub
 
 open torch.Hub

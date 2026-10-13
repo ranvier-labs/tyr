@@ -4,6 +4,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Optimizer kernels
+
+`Tyr.GPU.Kernels.Optimizer.adamWMasterBf16`: fused AdamW update with FP32 master
+parameters and moments and a BF16 working copy.
+-/
+
 namespace Tyr.GPU.Kernels.Optimizer
 
 open Tyr.GPU

@@ -10,6 +10,12 @@ import Tyr.Model.Utils
 import Tyr.Model.Qwen.Weights
 import Tyr.Model.Qwen3.Model
 
+/-! # Qwen3 weights
+
+Loads `torch.qwen3.Qwen3ForCausalLM` from a sharded Hugging Face directory or a
+single SafeTensors file.
+-/
+
 namespace torch.qwen3
 
 open torch.Log

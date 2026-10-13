@@ -10,6 +10,14 @@
  -/
 import Tyr.Basic
 
+/-! # KittenTTS configuration
+
+`torch.kittentts.AlbertConfig` for the text encoder and
+`torch.kittentts.GeneratorConfig` for the waveform generator, with derived sizes
+such as `torch.kittentts.AlbertConfig.headDim` and
+`torch.kittentts.GeneratorConfig.totalUpsample`.
+-/
+
 namespace torch.kittentts
 
 structure AlbertConfig where

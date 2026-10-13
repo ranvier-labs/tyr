@@ -8,6 +8,15 @@ import Tyr.Torch
 import Tyr.Model.Flux.Config
 import Tyr.Model.Flux.Model
 
+/-! # Flux sampling
+
+Flow-matching sampler for Flux2. `torch.flux.computeTimesteps` builds the
+shifted schedule using `torch.flux.computeEmpiricalMu` and
+`torch.flux.generalizedTimeSnrShift`; `torch.flux.eulerStep`,
+`torch.flux.denoise` and `torch.flux.sample` integrate the velocity field from
+noise to latents, configured by `torch.flux.SamplingConfig`.
+-/
+
 namespace torch.flux
 
 /-- Sampling configuration -/

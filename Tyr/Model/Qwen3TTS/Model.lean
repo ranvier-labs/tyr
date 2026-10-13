@@ -11,6 +11,13 @@ import Tyr.Model.Qwen3TTS.Config
 import Tyr.Model.Qwen3TTS.SpeakerEncoder
 import Tyr.Model.Qwen3TTS.Talker
 
+/-! # Qwen3-TTS model
+
+`torch.qwen3tts.Qwen3TTSForConditionalGeneration`: speaker embedding extraction
+from mel features, voice-clone prompts (`torch.qwen3tts.VoiceClonePromptItem`)
+and construction of talker inputs from text or instructions.
+-/
+
 namespace torch.qwen3tts
 
 /-- Voice clone prompt payload for one sample. -/

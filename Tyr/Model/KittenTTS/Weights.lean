@@ -11,6 +11,13 @@ import Tyr.Log
 import Tyr.Model.KittenTTS.Checkpoint
 import Tyr.Model.KittenTTS.Model
 
+/-! # KittenTTS weights
+
+Builds model structures from `torch.kittentts.LoadedCheckpointWeights`,
+including materializing weight-normalized Conv1d kernels and shape checks with
+warnings on override.
+-/
+
 namespace torch.kittentts
 
 open torch.Log

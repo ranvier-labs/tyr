@@ -10,6 +10,13 @@
 import Tyr.Torch
 import Tyr.Model.Qwen3ASR.PreprocessorConfig
 
+/-! # Qwen3-ASR audio frontend
+
+Audio input forms (`torch.qwen3asr.ASRAudioInput`), PCM16 WAV parsing to mono
+samples in $[-1, 1]$, and Whisper-style log-mel features
+(`torch.qwen3asr.WhisperFrontendOutput`).
+-/
+
 namespace torch.qwen3asr
 
 structure WhisperFrontendOutput (melBins frames : UInt64) where

@@ -15,6 +15,13 @@ import Tyr.Module.LayerNorm
 import Tyr.Model.Qwen3ASR.Config
 import Tyr.Model.Utils
 
+/-! # Qwen3-ASR audio encoder
+
+Convolutional downsampling followed by transformer blocks
+(`torch.qwen3asr.AudioAttention`, `torch.qwen3asr.AudioEncoderLayer`) with
+sinusoidal positions, producing audio embeddings for the text decoder.
+-/
+
 namespace torch.qwen3asr
 
 open torch.Model

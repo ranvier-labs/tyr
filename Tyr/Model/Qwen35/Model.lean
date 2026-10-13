@@ -18,6 +18,14 @@ import Tyr.Model.Qwen35.Config
 import Tyr.Model.Utils
 import Tyr.Model.Generation
 
+/-! # Qwen3.5 text model
+
+Hybrid decoder mixing full attention with gated-delta-rule linear attention
+(`torch.qwen35.chunkGatedDeltaRule`, `torch.qwen35.recurrentGatedDeltaRule`),
+the zero-centered `torch.qwen35.Qwen35RMSNorm` with $(1 + w)$ scaling, and MoE
+MLPs.
+-/
+
 namespace torch.qwen35
 
 open torch

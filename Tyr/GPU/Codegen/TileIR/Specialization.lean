@@ -1,6 +1,13 @@
 import Lean
 import Tyr.GPU.Codegen.TileIR.Expr
 
+/-! # TileIR specialization
+
+`Tyr.GPU.Codegen.TileIR.recoverConstParamKinds?` recovers the ordered `ct.Const`
+binder kinds (`Tyr.GPU.Codegen.TileIR.ConstParamKind`) from a TileIR kernel
+type.
+-/
+
 open Lean
 
 namespace Tyr.GPU.Codegen.TileIR

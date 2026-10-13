@@ -9,6 +9,12 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-! # VAE ResNet block
+
+`torch.vae.GroupNormParams`, `torch.vae.Conv2dParams`, the swish activation and
+`torch.vae.ResnetBlock`, with optional channel change via a shortcut.
+-/
+
 namespace torch.vae
 
 /-- GroupNorm parameters for VAE.

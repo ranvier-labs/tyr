@@ -15,6 +15,13 @@ import Tyr.Module.Derive
 import Tyr.Model.Qwen3TTS.Config
 import Tyr.Model.Utils
 
+/-! # ECAPA-TDNN speaker encoder
+
+Speaker encoder blocks: TDNN (Conv1d + ReLU), squeeze-excitation channel gating,
+and Res2Net channel-group blocks, followed by attentive statistics pooling and a
+1×1 projection to the speaker embedding.
+-/
+
 namespace torch.qwen3tts
 
 open torch.Model

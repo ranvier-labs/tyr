@@ -15,6 +15,14 @@ import Tyr.Model.Qwen3TTS.SpeechTokenizer25HzEncoder
 import Tyr.Model.Qwen3ASR.Frontend
 import Tyr.Log
 
+/-! # Speech tokenizer bridge
+
+Calls the external speech tokenizer
+(`torch.qwen3tts.SpeechTokenizerBridgeConfig`) to encode audio into codec id
+rows and decode them back to waveform files, and builds speaker-encoder mel
+inputs.
+-/
+
 namespace torch.qwen3tts
 
 open torch.Log

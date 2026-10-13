@@ -6,6 +6,12 @@
 -/
 import Tyr.Torch
 
+/-! # Qwen RoPE
+
+`torch.qwen.RoPECache` precomputes cos/sin tables for a sequence length;
+`torch.qwen.applyRoPE` rotates query/key tensors.
+-/
+
 namespace torch.qwen
 
 /-- Precomputed RoPE cos/sin embeddings for a given sequence length.

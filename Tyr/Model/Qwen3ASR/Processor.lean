@@ -10,6 +10,13 @@
 import Tyr.Model.Qwen3ASR.Config
 import Tyr.Tokenizer.Qwen3
 
+/-! # Qwen3-ASR processor
+
+`torch.qwen3asr.Qwen3ASRProcessor` expands audio placeholder tokens to match
+feature lengths and chunks inputs, mirroring the reference processor defaults
+(`torch.qwen3asr.ProcessorKwargs`).
+-/
+
 namespace torch.qwen3asr
 
 /-- Default processor kwargs mirrored from reference processor defaults. -/

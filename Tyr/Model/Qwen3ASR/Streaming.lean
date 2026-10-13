@@ -12,6 +12,12 @@ import Tyr.Model.Qwen3ASR.Frontend
 import Tyr.Model.Qwen3ASR.Processor
 import Tyr.Tokenizer.Qwen3
 
+/-! # Qwen3-ASR streaming
+
+Single-stream streaming ASR state (`torch.qwen3asr.ASRStreamingState`), decode
+modes, prompt caching and stripping of special tokens from decoded text.
+-/
+
 namespace torch.qwen3asr
 
 private def asrTextTag : String := "<asr_text>"

@@ -10,6 +10,14 @@ import Tyr.Model.KittenTTS.ConfigIO
 import Tyr.Model.KittenTTS.Weights
 import Tyr.Log
 
+/-! # KittenTTS pretrained loading
+
+Resolves a repo id or local path to a model directory;
+`torch.kittentts.hub.ensureConvertedCheckpoint` runs the converter script when
+`model.safetensors` is missing, and `torch.kittentts.hub.ensureConvertedVoice`
+does the same for voice files.
+-/
+
 namespace torch.kittentts.hub
 
 open torch.Hub

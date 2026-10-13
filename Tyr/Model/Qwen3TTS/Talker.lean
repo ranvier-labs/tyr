@@ -19,6 +19,12 @@ import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3TTS.Config
 import Tyr.Model.Utils
 
+/-! # Qwen3-TTS talker
+
+`torch.qwen3tts.TalkerModel` decodes text and codec embeddings into hidden
+states; code-predictor layers then predict the remaining codebooks.
+-/
+
 namespace torch.qwen3tts
 
 open torch.Model

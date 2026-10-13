@@ -7,6 +7,13 @@
 import Tyr.Torch
 import Tyr.Model.Qwen35.VLConfig
 
+/-! # Qwen3.5 media loading
+
+Loads and patchifies image and video files for the vision tower
+(`torch.qwen35.media.loadImagePatches`, `torch.qwen35.media.loadVideoPatches`);
+this path is Apple-only.
+-/
+
 namespace torch.qwen35.media
 
 open torch

@@ -1,6 +1,13 @@
 import Tyr.Model.Qwen3ASR.Transcribe
 import Tyr.Tokenizer.Qwen3
 
+/-! # Realtime transcript assembly
+
+`torch.qwen3asr.RealtimeTranscriptState` merges overlapping-window hypotheses
+into stable and unstable text, emitting a `torch.qwen3asr.TranscriptDelta` per
+decode step.
+-/
+
 namespace torch.qwen3asr
 
 /-- Coherent transcript assembly state for overlap-window streaming.

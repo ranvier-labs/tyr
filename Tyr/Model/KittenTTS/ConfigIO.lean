@@ -7,6 +7,12 @@ import Tyr.Model.KittenTTS.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # KittenTTS config loading
+
+Parses the KittenTTS JSON config and phoneme vocabulary
+(`torch.kittentts.VocabMap`).
+-/
+
 namespace torch.kittentts
 
 open Lean

@@ -14,6 +14,12 @@ import Tyr.Module.Derive
 import Tyr.Model.KittenTTS.Config
 import Tyr.Model.Utils
 
+/-! # KittenTTS model
+
+Forward pass of KittenTTS: linear/convolution helpers, the ALBERT text encoder,
+prosody prediction and the upsampling waveform generator.
+-/
+
 namespace torch.kittentts
 
 open torch.Model

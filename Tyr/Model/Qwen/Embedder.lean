@@ -9,6 +9,13 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.RoPE
 
+/-! # Qwen text embedder for Flux
+
+`torch.qwen.QwenFluxEmbedder` encodes prompts by concatenating hidden states
+from selected Qwen layers (`torch.qwen.FluxEmbedderConfig`); output width is
+number of layers × hidden size.
+-/
+
 namespace torch.qwen
 
 /-- Configuration for Flux text embedding.

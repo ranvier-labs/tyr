@@ -10,6 +10,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Fused residual RMSNorm
+
+Fused residual + RMSNorm for $d_{model} = 1024$ (16 × 64 hidden tiles) in BF16
+and FP32, with Blackwell-family variants.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

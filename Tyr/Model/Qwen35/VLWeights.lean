@@ -10,6 +10,12 @@ import Tyr.Model.Utils
 import Tyr.Model.Qwen35.Weights
 import Tyr.Model.Qwen35.Multimodal
 
+/-! # Qwen3.5 multimodal weights
+
+Loads `torch.qwen35.Qwen35ForConditionalGeneration` (text + vision) from single
+or sharded SafeTensors.
+-/
+
 namespace torch.qwen35
 
 open torch.Log

@@ -7,6 +7,11 @@ import Tyr.Model.Qwen3ASR.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen3-ASR config loading
+
+Loads the Qwen3-ASR config from a Hugging Face `config.json` or model directory.
+-/
+
 namespace torch.qwen3asr
 
 open Lean

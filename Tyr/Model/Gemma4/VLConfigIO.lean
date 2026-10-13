@@ -9,6 +9,12 @@ import Tyr.Model.Gemma4.ConfigIO
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Gemma 4 multimodal config loading
+
+Reads `config.json` and the optional processor config into
+`torch.gemma4.Gemma4VLConfig`.
+-/
+
 namespace torch.gemma4
 
 open Lean

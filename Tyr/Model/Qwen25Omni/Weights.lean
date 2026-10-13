@@ -12,6 +12,12 @@ import Tyr.Model.Qwen25Omni.Config
 import Tyr.Model.Qwen3.Model
 import Tyr.Model.Qwen.Model
 
+/-! # Qwen2.5-Omni weights
+
+Loads `torch.qwen25omni.Qwen25OmniForCausalLM` from single or sharded
+SafeTensors, mapping thinker tensor names onto the Qwen core.
+-/
+
 namespace torch.qwen25omni
 
 open torch.Log

@@ -8,6 +8,12 @@ import Tyr.Torch
 import Tyr.GPU.Ops.AttentionProblem
 import Tyr.GPU.Kernels.MhaH100
 
+/-! # mha_h100 launch wrappers
+
+Tensor shapes and launch configuration (`Tyr.GPU.Ops.MhaH100.LaunchCfg`,
+shared-memory sizes) for the `mha_h100` kernels.
+-/
+
 namespace Tyr.GPU.Ops.MhaH100
 
 open torch

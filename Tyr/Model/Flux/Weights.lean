@@ -9,6 +9,14 @@ import Tyr.Log
 import Tyr.Model.Flux.Config
 import Tyr.Model.Flux.Model
 
+/-! # Flux checkpoint loading
+
+Loaders that map Flux2 SafeTensors names onto Tyr structures, e.g.
+`torch.flux.loadRMSNormFlux2` (which reads the `.scale` suffix),
+`torch.flux.loadDoubleStreamBlockFlux2` and
+`torch.flux.loadSingleStreamBlockFlux2`.
+-/
+
 namespace torch.flux
 
 open torch.Log

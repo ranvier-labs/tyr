@@ -10,6 +10,14 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen.Config
 
+/-! # Qwen attention
+
+`torch.qwen.QwenAttention` implements grouped-query attention with per-head Q/K
+normalization and rotary embeddings, plus an incremental
+`torch.qwen.QwenAttention.KVCache` used by
+`torch.qwen.QwenAttention.forwardStep`.
+-/
+
 namespace torch.qwen
 
 /-- Qwen attention with Grouped Query Attention (GQA).

@@ -47,6 +47,14 @@ import Tyr.Model.Laguna.Config
 import Tyr.Model.Laguna.NvFp4
 import Tyr.Model.Laguna.Fused
 
+/-! # Laguna mixture of experts
+
+Top-$k$ sigmoid router `torch.laguna.LagunaTopKRouter` (aux-loss-free load
+balancing), dense and NVFP4-packed expert banks
+(`torch.laguna.LagunaDenseExperts`, `torch.laguna.LagunaPackedExperts`) and the
+combined `torch.laguna.LagunaSparseMoeBlock`.
+-/
+
 namespace torch.laguna
 
 /-- Top-k sigmoid router for Laguna MoE (aux-loss-free load balancing). -/

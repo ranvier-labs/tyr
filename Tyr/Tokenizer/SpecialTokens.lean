@@ -5,6 +5,12 @@
 -/
 import Tyr.Tokenizer.Types
 
+/-! # Special tokens
+
+Special-token vocabularies: core, value bins, Greek letters, math operators,
+Lean, tool and chat tokens, collected in `tokenizer.allSpecialTokens`.
+-/
+
 namespace tokenizer
 
 /-- Core special tokens -/

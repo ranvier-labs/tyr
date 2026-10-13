@@ -13,6 +13,13 @@ import Tyr.SafeTensors.Load
 import Tyr.Model.Utils
 import Tyr.Model.Gemma4.Model
 
+/-! # Gemma 4 text weights
+
+Loads `torch.gemma4.Gemma4ForCausalLM` from a single SafeTensors file or a
+sharded Hugging Face directory, resolving each parameter through candidate
+tensor names.
+-/
+
 namespace torch.gemma4
 
 open torch.Log

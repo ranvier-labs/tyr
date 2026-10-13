@@ -11,6 +11,13 @@ import Tyr.Module.RMSNorm
 import Tyr.Model.Utils
 import Tyr.Model.Qwen3ASR.Model
 
+/-! # Qwen3-ASR weights
+
+Loads the audio encoder and text decoder of
+`torch.qwen3asr.Qwen3ASRForConditionalGeneration` from a sharded SafeTensors
+directory and resolves the target device.
+-/
+
 namespace torch.qwen3asr
 
 open torch.Log

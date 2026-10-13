@@ -17,6 +17,14 @@ import Tyr.Module.Derive
 import Tyr.Model.Gemma4.Model
 import Tyr.Model.Gemma4.VLConfig
 
+/-! # Gemma 4 vision tower
+
+Vision encoder and multimodal glue for Gemma 4: patch grids
+(`torch.gemma4.ImagePatchGrid`), the optional clipped linear
+`torch.gemma4.Gemma4VisionLinear` used by small towers, the resulting
+`torch.gemma4.ImageFeatures`, and per-layer inputs merged into the text model.
+-/
+
 namespace torch.gemma4
 
 open torch

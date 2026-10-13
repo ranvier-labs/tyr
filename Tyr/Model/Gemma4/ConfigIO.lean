@@ -7,6 +7,12 @@ import Tyr.Model.Gemma4.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Gemma 4 config loading
+
+Parses a Hugging Face `config.json` into `torch.gemma4.Gemma4Config`, with typed
+field helpers that fall back to defaults for missing keys.
+-/
+
 namespace torch.gemma4
 
 open Lean

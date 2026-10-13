@@ -15,6 +15,14 @@ import Tyr.Model.Qwen3ASR.Frontend
 import Tyr.Model.Qwen3ASR.PreprocessorConfig
 import Tyr.Tokenizer.Qwen3
 
+/-! # Whisper transcription
+
+Greedy and beam-search decoding with token rules
+(`torch.whisper.DecodeTokenRules`), configured by
+`torch.whisper.WhisperDecodeOptions` and returning
+`torch.whisper.WhisperTranscription`.
+-/
+
 namespace torch.whisper
 
 open torch.qwen3asr

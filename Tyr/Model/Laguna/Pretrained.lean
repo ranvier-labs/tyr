@@ -9,6 +9,13 @@ import Tyr.Hub
 import Tyr.Model.Laguna.ConfigIO
 import Tyr.Model.Laguna.Weights
 
+/-! # Laguna pretrained loading
+
+Covered repo ids (`torch.laguna.hub.lagunaCollectionRepoIds`), tokenizer files
+to download, and `torch.laguna.LagunaForCausalLM.loadFromPretrained` from a
+local directory or Hugging Face repo id.
+-/
+
 namespace torch.laguna.hub
 
 open torch.Hub
