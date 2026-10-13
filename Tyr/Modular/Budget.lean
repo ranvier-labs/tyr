@@ -1,5 +1,12 @@
 import Tyr.Modular.Norm
 
+/-!
+# Modular learning-rate budgets
+
+Compiles learning-rate multipliers from modular sensitivities
+(see [`Tyr.Modular.NormedModule`]), configured by [`Tyr.Modular.BudgetConfig`].
+-/
+
 namespace Tyr.Modular
 
 /-- Configuration for compiling learning-rate multipliers from modular sensitivities. -/
