@@ -64,6 +64,9 @@ jobs:
           cd docbuild
           lake build Tyr:docs
 
+      - name: Append Tyr custom CSS
+        run: cat docs/site/custom.css >> docbuild/.lake/build/doc/style.css
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
