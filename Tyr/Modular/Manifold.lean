@@ -4,6 +4,15 @@ import Tyr.Modular.Compose
 import Tyr.Manifolds.Optimizer
 import Tyr.Optim.DualOptimizer
 
+/-!
+# Manifold-native modules
+
+Layers whose parameters live on matrix or vector manifolds (Stiefel, Grassmann,
+orthogonal, hyperbolic), with `Tyr.Modular.NormedModule` instances and the
+`Tyr.Modular.ManifoldUpdatable` class for manifold-native update steps through
+products and `Tyr.Modular.Sequential` networks.
+-/
+
 namespace Tyr.Modular
 
 open torch
@@ -13,6 +22,7 @@ open Tyr.AD
 class ShapeFact (p : Prop) : Prop where
   out : p
 
+/-- Trivial shape witness. -/
 instance : ShapeFact True := ⟨trivial⟩
 
 /-- Matrix-manifold carrier interface for manifold-native linear layers. -/
@@ -28,8 +38,10 @@ class MatrixManifoldCarrier (M : UInt64 → UInt64 → Type) where
   /-- Take one geometry-aware step and retract on-manifold. -/
   dualMapStep : {m n : UInt64} → [ShapeFact (ShapeOK m n)] → M m n → T #[m, n] → Float → M m n
 
+/-- Reflexive equality witness for `UInt64` shapes. -/
 instance factEqReflUInt64 (n : UInt64) : ShapeFact (n = n) := ⟨rfl⟩
 
+/-- Stiefel-manifold carrier; steps project the gradient to the tangent space, then use `DualMapGeometry.dualMapStep`. -/
 instance : MatrixManifoldCarrier Stiefel where
   ShapeOK := fun _ _ => True
   project := fun {_ _} _ x => Stiefel.project _ _ x
@@ -40,9 +52,11 @@ instance : MatrixManifoldCarrier Stiefel where
     let tg := StiefelTangent.project x g
     exact DualMapGeometry.dualMapStep x tg lr
 
+/-- Every shape is legal for `Stiefel`. -/
 instance stiefelShapeOKFact (m n : UInt64) :
     ShapeFact (MatrixManifoldCarrier.ShapeOK (M := Stiefel) m n) := ⟨trivial⟩
 
+/-- Grassmann-manifold carrier; steps project the gradient to the tangent space, then use `DualMapGeometry.dualMapStep`. -/
 instance : MatrixManifoldCarrier Grassmann where
   ShapeOK := fun _ _ => True
   project := fun {_ _} _ x => Grassmann.project _ _ x
@@ -53,12 +67,14 @@ instance : MatrixManifoldCarrier Grassmann where
     let tg := GrassmannTangent.project x g
     exact DualMapGeometry.dualMapStep x tg lr
 
+/-- Every shape is legal for `Grassmann`. -/
 instance grassmannShapeOKFact (m n : UInt64) :
     ShapeFact (MatrixManifoldCarrier.ShapeOK (M := Grassmann) m n) := ⟨trivial⟩
 
 /-- Orthogonal manifold viewed in matrix-family form with square-shape legality. -/
 abbrev OrthogonalMatrix (_m n : UInt64) := Orthogonal n
 
+/-- Orthogonal-matrix carrier; legal only for square shapes (`m = n`). -/
 instance : MatrixManifoldCarrier OrthogonalMatrix where
   ShapeOK := fun m n => m = n
   project := by
@@ -82,6 +98,7 @@ instance : MatrixManifoldCarrier OrthogonalMatrix where
     let tg := OrthogonalTangent.fromAmbient x gSquare
     exact DualMapGeometry.dualMapStep x tg lr
 
+/-- Square shapes are legal for `Tyr.Modular.OrthogonalMatrix`. -/
 instance orthogonalShapeOKFact (n : UInt64) :
     ShapeFact (MatrixManifoldCarrier.ShapeOK (M := OrthogonalMatrix) n n) := ⟨rfl⟩
 
@@ -98,6 +115,7 @@ class VectorManifoldCarrier (V : UInt64 → Type) where
   /-- Take one geometry-aware step on the manifold. -/
   dualMapStep : {n : UInt64} → V n → T #[ambientDim n] → Float → V n
 
+/-- Hyperbolic-space carrier with ambient dimension `n + 1`. -/
 instance : VectorManifoldCarrier Hyperbolic where
   ambientDim n := n + 1
   project := Hyperbolic.project
@@ -199,6 +217,7 @@ def applyDualMapUpdate [VectorManifoldCarrier V] {n : UInt64}
 
 end ManifoldVectorParam
 
+/-- `TensorStruct` over the ambient weight matrix and optional bias of a `Tyr.Modular.ManifoldLinear`. -/
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
     [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
     TensorStruct (ManifoldLinear M in_dim out_dim) where
@@ -227,6 +246,7 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
     | some b => f b acc
     | none => acc
 
+/-- `TensorStruct` over the ambient coordinates of a `Tyr.Modular.ManifoldVectorParam`. -/
 instance [VectorManifoldCarrier V] (n : UInt64) : TensorStruct (ManifoldVectorParam V n) where
   map f p :=
     let v := VectorManifoldCarrier.toVector p.value
@@ -240,6 +260,7 @@ instance [VectorManifoldCarrier V] (n : UInt64) : TensorStruct (ManifoldVectorPa
     { value := VectorManifoldCarrier.fromAmbientUnchecked (f av bv) }
   fold f init p := f (VectorManifoldCarrier.toVector p.value) init
 
+/-- `Tyr.Modular.NormedModule` instance for `Tyr.Modular.ManifoldLinear`. -/
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
     [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
     NormedModule (ManifoldLinear M in_dim out_dim) where
@@ -280,6 +301,7 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
       | none => none
     { lin with weight, bias }
 
+/-- `Tyr.Modular.NormedModule` for `Tyr.Modular.ManifoldVectorParam`: $\ell_2$ norm of the ambient coordinates. -/
 instance [VectorManifoldCarrier V] (n : UInt64) :
     NormedModule (ManifoldVectorParam V n) where
   norm p := linalg.l2Norm (VectorManifoldCarrier.toVector p.value)
@@ -331,22 +353,26 @@ namespace ManifoldUpdatable
 def step [ManifoldUpdatable P] (params : P) (grad : ManifoldUpdatable.Cotangent params) (lr : Float) : P :=
   ManifoldUpdatable.applyUpdate params grad lr
 
+/-- Manifold update for `Tyr.Modular.ManifoldLinear` via `ManifoldLinear.applyDualMapUpdate`. -/
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
     [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
     ManifoldUpdatable (ManifoldLinear M in_dim out_dim) where
   Cotangent _ := ManifoldLinearCotangent in_dim out_dim
   applyUpdate lin g lr := ManifoldLinear.applyDualMapUpdate lin g.1 g.2 lr
 
+/-- Manifold update for `Tyr.Modular.ManifoldVectorParam` via `ManifoldVectorParam.applyDualMapUpdate`. -/
 instance [VectorManifoldCarrier V] (n : UInt64) :
     ManifoldUpdatable (ManifoldVectorParam V n) where
   Cotangent _ := T #[(VectorManifoldCarrier.ambientDim (V := V) n)]
   applyUpdate p g lr := ManifoldVectorParam.applyDualMapUpdate p g lr
 
+/-- Products update componentwise. -/
 instance [ManifoldUpdatable A] [ManifoldUpdatable B] : ManifoldUpdatable (A × B) where
   Cotangent p := ManifoldUpdatable.Cotangent p.1 × ManifoldUpdatable.Cotangent p.2
   applyUpdate p g lr :=
     (ManifoldUpdatable.applyUpdate p.1 g.1 lr, ManifoldUpdatable.applyUpdate p.2 g.2 lr)
 
+/-- `Tyr.Modular.Sequential` networks update each stage independently. -/
 instance [ManifoldUpdatable M₁] [ManifoldUpdatable M₂] :
     ManifoldUpdatable (Sequential M₁ M₂) where
   Cotangent net := ManifoldUpdatable.Cotangent net.first × ManifoldUpdatable.Cotangent net.second
