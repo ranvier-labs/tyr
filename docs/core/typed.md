@@ -111,7 +111,7 @@ Crossing from raw `T s` into the facade (`Tyr/Typed/Tensor.lean`):
 
 - `Tensor.assumeSpec` / `Tensor.assumeDType` — wrap unconditionally. Every
   typed op uses this internally, so each op encodes an assumption about
-  libtorch behavior; the parity tests in `Tests/TestTyped.lean` exist to keep
+  libtorch behavior; the parity tests in [`Tests/TestTyped.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestTyped.lean) exist to keep
   those assumptions honest. Treat it as the escape hatch it is in your own code.
 - `Tensor.ofTensor?` / `Tensor.ofTensor` — wrap after checking both the runtime
   shape and dtype (`Option` / `Except String`). The raw type annotation alone
@@ -309,8 +309,8 @@ explicitly (`.toBFloat16`) where HF-style dtype restoration is wanted.
 
 ## Usage example
 
-Reconstructed example (from `Tests/TestTyped.lean` and
-`launch/demos/shape_safety.lean`):
+Reconstructed example (from [`Tests/TestTyped.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestTyped.lean) and
+[`launch/demos/shape_safety.lean`](https://github.com/ranvier-labs/tyr/blob/main/launch/demos/shape_safety.lean)):
 
 ```lean
 import Tyr.Typed
@@ -351,7 +351,7 @@ def run : IO Unit := do
   | .error err => throw (IO.userError err)
 ```
 
-For the negative case, `launch/demos/shape_mismatch.lean` is an intentionally
+For the negative case, [`launch/demos/shape_mismatch.lean`](https://github.com/ranvier-labs/tyr/blob/main/launch/demos/shape_mismatch.lean) is an intentionally
 rejected file: passing a `#[768, 512]` weight where `linear` expects
 `#[n, 768]` fails to compile, with the expected and actual shapes in the error.
 
@@ -370,8 +370,8 @@ def checkRaw (raw : T #[2, 3]) : Except String (DTensor #[2, 3] .Float32) :=
 - [Core utilities](utilities.md) — PRNG, logging, widgets.
 - [Serialization](../serialization.md) — SafeTensors schema introspection and contract-checked loading built on `TensorContract`.
 - [Autodiff](../autodiff.md) — gradients; the typed layer only exposes `setRequiresGrad`.
-- [DiffEq](../diffeq.md) — `Tyr/DiffEq/Typed.lean` adds `DiffEqSpace`/`DiffEqElem`/`DiffEqSeminorm` instances for `Tensor σ`.
-- [Examples and testing](../examples-and-testing.md) — `Tests/TestTyped.lean` is the executable spec of the promotion algebra.
+- [DiffEq](../diffeq.md) — [`Tyr/DiffEq/Typed.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Typed.lean) adds `DiffEqSpace`/`DiffEqElem`/`DiffEqSeminorm` instances for `Tensor σ`.
+- [Examples and testing](../examples-and-testing.md) — [`Tests/TestTyped.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestTyped.lean) is the executable spec of the promotion algebra.
 
 For an exhaustive symbol listing, see the doc-gen4 API reference generated from
 `docbuild/`; this chapter is a guide, not a symbol dump.

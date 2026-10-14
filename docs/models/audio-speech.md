@@ -75,7 +75,7 @@ structure Qwen3TTSForConditionalGeneration (cfg : Qwen3TTSConfig) where
 
 `Tyr/Model/Qwen3TTS/Model.lean:25`. Pieces:
 
-- **Talker** (`Tyr/Model/Qwen3TTS/Talker.lean`): `TalkerModel` (codec + text embeddings,
+- **Talker** ([`Tyr/Model/Qwen3TTS/Talker.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen3TTS/Talker.lean)): `TalkerModel` (codec + text embeddings,
   text projection, transformer stack) plus `TalkerCodePredictor`, which predicts
   codebooks 1..N from codebook-0 context. Both reuse the Qwen LLM layer — `TalkerLayer
   cfg` is an abbrev for `qwen.QwenLayer` (Talker.lean:26).
@@ -91,7 +91,7 @@ structure Qwen3TTSForConditionalGeneration (cfg : Qwen3TTSConfig) where
 - **Speech tokenizer encoders** (`SpeechTokenizerEncoder.lean`,
   `SpeechTokenizer25HzEncoder.lean`): Lean-native audio → codes for the 12 Hz and 25 Hz
   variants (`encode`, `encodeMonoFrameMajor`), used for voice-clone reference codes.
-- **Streaming** (`Tyr/Model/Qwen3TTS/Streaming.lean`): `streamFromTalkerInputs` drives
+- **Streaming** ([`Tyr/Model/Qwen3TTS/Streaming.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen3TTS/Streaming.lean)): `streamFromTalkerInputs` drives
   frame-by-frame generation with per-frame and per-audio-chunk callbacks, optionally
   decoding in-process through a `SpeechTokenizer12HzDecoder.DecodeStreamState`. In-process
   streaming decode requires `cfg.talkerConfig.numCodeGroups == 16` (the upstream 12 Hz
@@ -124,7 +124,7 @@ is a standard Qwen3 model (see [LLM models](llms.md)). Generation is greedy:
 `generateGreedy`, `generateGreedyUncached`, and `generateGreedyWithPromptCache` over
 per-layer `LayerKVCache` / reusable `StreamingPromptCache`.
 
-Configs are layered (`Tyr/Model/Qwen3ASR/Config.lean`): `AudioEncoderConfig`,
+Configs are layered ([`Tyr/Model/Qwen3ASR/Config.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen3ASR/Config.lean)): `AudioEncoderConfig`,
 `TextConfig` (with `toQwenConfig`), `ThinkerConfig`, `Qwen3ASRConfig`.
 `ThinkerConfig.isForcedAligner` detects aligner checkpoints by `model_type`, and
 `lmHeadOutDim` switches the LM head between vocab size and `classifyNum` accordingly.
@@ -223,12 +223,12 @@ structure WhisperForConditionalGeneration (cfg : WhisperConfig) where
 ```
 
 with `encode`, `decode`, and the incremental path `initLayerKVCaches` +
-`precomputeCrossCaches` + `decodeStepWithCache` (`Tyr/Model/Whisper/Model.lean`).
+`precomputeCrossCaches` + `decodeStepWithCache` ([`Tyr/Model/Whisper/Model.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Whisper/Model.lean)).
 `WhisperForConditionalGeneration.loadSharded modelDir cfg` loads HF-layout weights, ties
 `projOut` to the token embedding when missing, and picks a device from `TYR_DEVICE`
 (`cpu`/`cuda`/`mps`/`auto`), falling back to `getBestDevice`.
 
-The user API (`Tyr/Model/Whisper/Transcribe.lean`) is a bundle plus transcribe functions:
+The user API ([`Tyr/Model/Whisper/Transcribe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Whisper/Transcribe.lean)) is a bundle plus transcribe functions:
 
 ```lean
 structure WhisperBundle where
@@ -288,7 +288,7 @@ Running:
 
 ## Usage examples
 
-Reconstructed example (from `Examples/KittenTTSPretrained.lean`):
+Reconstructed example (from [`Examples/KittenTTSPretrained.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/KittenTTSPretrained.lean)):
 
 ```lean
 import Tyr.Model.KittenTTS
@@ -302,7 +302,7 @@ def main (args : List String) : IO UInt32 := do
   return 0
 ```
 
-Reconstructed example (from `Examples/Qwen3TTS/EndToEnd.lean`):
+Reconstructed example (from [`Examples/Qwen3TTS/EndToEnd.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Qwen3TTS/EndToEnd.lean)):
 
 ```lean
 import Tyr.Model.Qwen3TTS
@@ -327,7 +327,7 @@ let out ← model.streamFromTalkerInputs talkerInputs streamOpts (some dec)
   { onAudioChunk := fun chunk => data.wavAppend chunk "out.wav" }
 ```
 
-Reconstructed example (from `Examples/Qwen3ASR/Transcribe.lean`):
+Reconstructed example (from [`Examples/Qwen3ASR/Transcribe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Qwen3ASR/Transcribe.lean)):
 
 ```lean
 import Tyr.Model.Qwen3ASR
@@ -355,7 +355,7 @@ for chunk in pcm16kChunks do
 let _ ← flush sm ss
 ```
 
-Reconstructed example (from `Examples/Whisper/Transcribe.lean`):
+Reconstructed example (from [`Examples/Whisper/Transcribe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Whisper/Transcribe.lean)):
 
 ```lean
 import Tyr.Model.Whisper
@@ -368,7 +368,7 @@ let out ← transcribeWav bundle.model bundle.tok bundle.preprocessor
 IO.println out.text
 ```
 
-Reconstructed example (from `Tests/TestSileroVAD.lean`):
+Reconstructed example (from [`Tests/TestSileroVAD.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestSileroVAD.lean)):
 
 ```lean
 import Tyr.Model.SileroVAD
@@ -382,7 +382,7 @@ let tss ← timestampsFromProbabilities probs (audioLengthSamples := wav16k.size
 let (p, rt1) ← rt.step (Array.replicate 512 0.0)   -- single-chunk streaming form
 ```
 
-For live microphone input, `Examples/Qwen3ASR/LiveMic.lean` and `Examples/Whisper/VoiceMode.lean`
+For live microphone input, [`Examples/Qwen3ASR/LiveMic.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Qwen3ASR/LiveMic.lean) and [`Examples/Whisper/VoiceMode.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Whisper/VoiceMode.lean)
 combine these models with the `Tyr/Audio` capture layer — see
 [Audio capture and playback](../audio.md).
 

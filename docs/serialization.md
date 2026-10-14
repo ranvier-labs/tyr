@@ -99,8 +99,8 @@ that take a discovered `TensorSchema`. Checking happens after the load via
 ### Try-load helpers
 
 `Tyr/SafeTensors/Load.lean` is a thin error-handling layer over the FFI, used by
-the per-model `Weights` modules (`Tyr/Model/Qwen35/Weights.lean`,
-`Tyr/Model/Gemma4/Weights.lean`, etc.). The two flavors matter:
+the per-model `Weights` modules ([`Tyr/Model/Qwen35/Weights.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen35/Weights.lean),
+[`Tyr/Model/Gemma4/Weights.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Gemma4/Weights.lean), etc.). The two flavors matter:
 
 - `tryLoadTensor` / `tryLoadTensorSharded` return `none` on **any** failure —
   missing tensor, shape mismatch, unreadable file.
@@ -185,7 +185,7 @@ def resolvePretrainedDir (source : String) (opts : DownloadOptions := {})
 
 Downloads shell out to `curl -fL --retry 3` with `.tmp`-file resume and an
 optional `HF_TOKEN` bearer header (`Tyr/Hub.lean:89-118`). The generic entry point
-used by every `Tyr/Model/*/Pretrained.lean` is:
+used by every [`Tyr/Model/*/Pretrained.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/Model) is:
 
 ```lean
 def loadModelFromPretrained
@@ -327,7 +327,7 @@ return `IO (Option (T s))` resp. `IO (T s)`.
 ## Usage examples
 
 Reconstructed example (from `Tests/TestSafeTensorsTypeProvider.lean:13-219` and
-`launch/demos/safetensors_schema.lean`):
+[`launch/demos/safetensors_schema.lean`](https://github.com/ranvier-labs/tyr/blob/main/launch/demos/safetensors_schema.lean)):
 
 ```lean
 import Tyr.SafeTensors

@@ -88,7 +88,7 @@ return `lean_io_result_mk_error` values instead. Two sites carry workarounds
 for a libc++abi/libstdc++ exception-ABI mismatch (Lean's toolchain vs.
 libtorch's): `lean_torch_manual_seed` seeds only the CPU generator, and CUDA
 synchronization calls `cudaDeviceSynchronize` via cudart directly
-(`cc/src/tyr.cpp:311-352`). `Tests/FfiCrashProbe.lean` is a manual probe for
+(`cc/src/tyr.cpp:311-352`). [`Tests/FfiCrashProbe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/FfiCrashProbe.lean) is a manual probe for
 this failure mode (own `ffi_crash_probe` exe, not part of the test suite).
 
 ### Translation units in `cc/src`
@@ -102,8 +102,8 @@ this failure mode (own `ffi_crash_probe` exe, not part of the test suite).
 | `tyr_parquet.cpp` | 6 `lean_parquet_*` Arrow/Parquet readers, `__has_include`-gated | `Tyr/Data/Pretraining.lean:48-73` |
 | `tyr_execution.cpp` | `lean_exec_python_sandboxed`, `lean_exec_shell_sandboxed` (fork + rlimit sandbox) | `Examples/NanoChat/Eval/Execution.lean:82` |
 | `tyr_qwen35.cpp` | `lean_torch_qwen35_{chunk,recurrent}_gated_delta_rule` linear attention | `Tyr/Model/Qwen35/Model.lean:50,60` |
-| `float_buffer.cpp` | `lean_float_buffer_*` streaming-audio ring buffer | `Tyr/Audio/FloatBuffer.lean` |
-| `apple_*.mm` (Darwin only) | MPS probing, VL image/video preprocessing, mic I/O | `Tyr/Audio/Apple*.lean` |
+| `float_buffer.cpp` | `lean_float_buffer_*` streaming-audio ring buffer | [`Tyr/Audio/FloatBuffer.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/FloatBuffer.lean) |
+| `apple_*.mm` (Darwin only) | MPS probing, VL image/video preprocessing, mic I/O | [`Tyr/Audio/Apple*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/Audio) |
 | `tyr_media_stub.cpp` | non-Apple error stubs for the media entry points | same |
 | `tk_vendor_mha_h100.cu` / `tk_vendor_stubs.cpp` | vendored ThunderKittens Hopper MHA kernels, or throwing stubs | `tyr_ops.cpp` |
 | `generated/tyr_gpu_kernel_stubs.cpp` | weak `lean_launch_Tyr_GPU_Kernels_*` launchers (generated) | GPU codegen |
@@ -301,7 +301,7 @@ missing.
 
 ## Usage example
 
-Reconstructed example (from `Tests/FfiCrashProbe.lean`, `Tyr/Torch.lean:44-51,
+Reconstructed example (from [`Tests/FfiCrashProbe.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/FfiCrashProbe.lean), `Tyr/Torch.lean:44-51,
 984-989`, `Tyr/Distributed.lean:61-119`):
 
 ```lean

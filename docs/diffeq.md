@@ -17,7 +17,7 @@ import Tyr.DiffEq.Adjoint.Torch
 ```
 
 `Tyr.DiffEq.Adjoint` re-exports only `Adjoint/Core`; the `AdjointBackend`
-instances for `TensorStruct` states live in `Adjoint/Torch.lean` and need the
+instances for `TensorStruct` states live in [`Adjoint/Torch.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Adjoint/Torch.lean) and need the
 separate import (see `Tests/TestDiffEqAdjoint.lean:3`).
 
 ## Architecture and main abstractions
@@ -50,7 +50,7 @@ class DiffEqElem (α : Type) where
 `Time` and `Scalar` are both `Float` abbreviations. Instances exist for
 `Float`, raw tensors `T s`, `[TensorStruct α]` model trees (priority 50, so
 network parameters can be integrated directly), pairs, `Fin n → α`,
-`Vector n α`, `List`, `Array`, `Option`. `Tyr/DiffEq/Typed.lean` adds the same
+`Vector n α`, `List`, `Array`, `Option`. [`Tyr/DiffEq/Typed.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Typed.lean) adds the same
 instances for the spec-typed `Tensor (σ : StaticSpec)` via `Tensor.assumeSpec`.
 Arithmetic operators are opt-in: bring `DiffEqArithmetic.hAddInst`,
 `hSubInst`, `hMulInst`, `smulInst` in as `local instance`s for `+`, `-`, `*`.
@@ -85,7 +85,7 @@ Concrete terms:
 Terms compose additively: the `(T1 × T2)` `TermLike` instance sums the two
 `prod`s, so a drift + diffusion SDE is just a pair. `MultiTerm`, the
 `MultiTerm3..6` abbreviations, and `MultiTermArray` generalize this
-(`Term.lean:645`, `Term.lean:742`). `Solver/SDE.lean` defines the aliases:
+(`Term.lean:645`, `Term.lean:742`). [`Solver/SDE.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Solver/SDE.lean) defines the aliases:
 
 ```lean
 abbrev SDETerm (Drift Diffusion : Type) : Type := MultiTerm Drift Diffusion
@@ -143,7 +143,7 @@ structure AbstractSolver (Term Y VF Control Args : Type) where
 ```
 
 Each concrete solver is a thin `structure X` plus `def X.solver : AbstractSolver ...`.
-Explicit RK solvers are built from a shared engine (`Solver/RungeKutta.lean`:
+Explicit RK solvers are built from a shared engine ([`Solver/RungeKutta.lean`](../Tyr/DiffEq/Solver/RungeKutta.html):
 `ButcherTableau s`, `ExplicitRK s` with Hermite or quartic-polynomial dense
 output); implicit ones from `ImplicitRungeKutta.lean` with a configurable root
 finder. Marker traits (`ExplicitSolver`, `ImplicitSolver`, `AdaptiveSolver`,
@@ -243,7 +243,7 @@ Real-valued conditions are localized by bisection on the dense interpolation.
 `EventSpec.steadyState` builds a boolean "vector field norm below tolerance"
 event. `EventTree` / `EventMaskTree` plus `diffeqsolveEventTree` give
 diffrax-style pytree event masks. The read-only bridge
-`Tyr/DiffEq/EventSkeleton.lean` projects accepted `SolveLoopAttempt`s into
+[`Tyr/DiffEq/EventSkeleton.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/EventSkeleton.lean) projects accepted `SolveLoopAttempt`s into
 `Tyr.EventSkeleton` interval segments — see [Event skeleton](event-skeleton.md).
 
 ### Adjoints
@@ -259,7 +259,7 @@ structure AdjointResult (Y Args : Type) where
   adjArgs : Args
 ```
 
-`Adjoint/Torch.lean` implements this for any `[TensorStruct Y] [TensorStruct Args]`
+[`Adjoint/Torch.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Adjoint/Torch.lean) implements this for any `[TensorStruct Y] [TensorStruct Args]`
 via `TensorStruct.makeLeafParams` and `autograd.grad`. Entry points:
 
 | Function | Mode |
@@ -277,7 +277,7 @@ error string instead of failing opaquely.
 
 ### Root finders
 
-Implicit solvers solve their stage equations with `Tyr/DiffEq/RootFinder.lean`:
+Implicit solvers solve their stage equations with [`Tyr/DiffEq/RootFinder.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/RootFinder.lean):
 the `RootFinder` class plus `FixedPoint` (default for `ImplicitEuler`),
 `AdaptiveFixedPoint`, and `NormRatioFixedPoint`, all with scaled-RMS convergence
 tests and `rtol`/`atol`/`maxIters` configs. The latter two apply scalar relaxation
@@ -397,19 +397,19 @@ def adjointExample : IO Unit := do
 
 For a larger system, `Tyr/EventSkeleton/Examples/Pendulum.lean:1306-1350`
 integrates a custom record state (hand-written `DiffEqSpace` instances) with
-`RK4`; `Tyr/Model/BranchingFlows/DiffEq.lean` wraps `diffeqsolve` for
-generative modeling; `Examples/GPU/RunRKFusedSolve.lean` is a fused CUDA bench.
+`RK4`; [`Tyr/Model/BranchingFlows/DiffEq.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/BranchingFlows/DiffEq.lean) wraps `diffeqsolve` for
+generative modeling; [`Examples/GPU/RunRKFusedSolve.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunRKFusedSolve.lean) is a fused CUDA bench.
 
 ## Related guides
 
-- [Automatic differentiation](autodiff.md) — the `autograd.grad` engine behind `Adjoint/Torch.lean`
+- [Automatic differentiation](autodiff.md) — the `autograd.grad` engine behind [`Adjoint/Torch.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/DiffEq/Adjoint/Torch.lean)
 - [Tensors](core/tensors.md) — `T s`, the raw tensor state type
 - [TensorStruct](core/tensorstruct.md) — model-tree states for neural ODEs
 - [Typed tensors](core/typed.md) — `Tensor σ` states with static shape/dtype specs
 - [Event skeleton](event-skeleton.md) — the hybrid-systems representation the DiffEq bridge projects into
 - [Generative models](models/generative.md) — BranchingFlows, a downstream `diffeqsolve` consumer
 - [GPU kernels](gpu/kernels.md) — fused RK solve kernels
-- [Examples and testing](examples-and-testing.md) — the DiffEq parity test suites (`Tests/TestDiffEq*.lean`)
+- [Examples and testing](examples-and-testing.md) — the DiffEq parity test suites ([`Tests/TestDiffEq*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tests))
 
 Exhaustive, per-symbol API documentation is generated separately by doc-gen4
 (see `docbuild/`); this chapter is a guide, not a symbol dump.

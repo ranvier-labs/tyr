@@ -183,8 +183,8 @@ Brief orientation only — details live in the linked guides.
 
 ## Usage example
 
-Reconstructed example (from `Examples/GPT/GPT.lean`, `Examples/GPT/Train.lean`,
-`Examples/NanoChat/ModdedTrain.lean`):
+Reconstructed example (from [`Examples/GPT/GPT.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPT/GPT.lean), [`Examples/GPT/Train.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPT/Train.lean),
+[`Examples/NanoChat/ModdedTrain.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/NanoChat/ModdedTrain.lean)):
 
 ```lean
 import Tyr

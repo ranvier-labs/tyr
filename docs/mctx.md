@@ -338,16 +338,16 @@ lake exe AlphaGradPortSweep                  # task sweep
 lake exe AlphaGradPolicyTrain <mode> [task] [epochs] [episodes-per-epoch]
 ```
 
-Tests live in `Tests/TestMctx*.lean` and `Tests/TestMctxDag.lean` (run via
+Tests live in [`Tests/TestMctx*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tests) and [`Tests/TestMctxDag.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestMctxDag.lean) (run via
 `lake exe test_runner`); `Tests/MctxData/` holds reference data with upstream
 provenance. The strict reference tests compare deterministic search topology,
 actions, visits, values, and Q-values. The original large dumps remain unchanged
-as historical data. See the [fixture guide](../Tests/MctxData/README.md) for
+as historical data. See the [fixture guide](https://github.com/ranvier-labs/tyr/blob/main/Tests/MctxData/README.md) for
 generation and migration details.
 
 The native `mctx_bench` executable compares cached scheduling and constant-time
 allocation with the previous algorithms, checking equivalent results before
-reporting CPU timings. See [the benchmark guide](../benchmarks/README-mcts.md).
+reporting CPU timings. See [the benchmark guide](https://github.com/ranvier-labs/tyr/blob/main/benchmarks/README-mcts.md).
 
 ## Exploration and reproducibility
 
@@ -396,7 +396,7 @@ at least one legal action has a finite logit.
 
 - [Getting started](getting-started.md) — build and run the test suite.
 - [Tensors](core/tensors.md) — the tensor stack; Mctx is deliberately
-  tensor-free, `Examples/AlphaGradPort/PolicyTrain.lean` shows the bridge
+  tensor-free, [`Examples/AlphaGradPort/PolicyTrain.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/AlphaGradPort/PolicyTrain.lean) shows the bridge
   (network outputs feed `RootFnOutput`).
 - [Autodiff](autodiff.md) — the `Tyr/AD/Elim` elimination machinery the
   AlphaGrad bridge plans over.

@@ -22,9 +22,9 @@ AudioQueue, a sample FIFO, lifecycle mutexes) lives in C++:
 
 | Lean module | C++ backing | Off macOS |
 | --- | --- | --- |
-| `Tyr/Audio/FloatBuffer.lean` | `cc/src/float_buffer.cpp` | works everywhere |
-| `Tyr/Audio/AppleInput.lean` | `cc/src/apple_audio_input.mm` | `start` raises `IO.userError`; `read`/`readBuffer` return empty, `stop` is a no-op |
-| `Tyr/Audio/AppleOutput.lean` | `cc/src/apple_audio_output.mm` | silent no-ops |
+| [`Tyr/Audio/FloatBuffer.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/FloatBuffer.lean) | `cc/src/float_buffer.cpp` | works everywhere |
+| [`Tyr/Audio/AppleInput.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/AppleInput.lean) | `cc/src/apple_audio_input.mm` | `start` raises `IO.userError`; `read`/`readBuffer` return empty, `stop` is a no-op |
+| [`Tyr/Audio/AppleOutput.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/AppleOutput.lean) | `cc/src/apple_audio_output.mm` | silent no-ops |
 
 `AudioToolbox` is linked into `libTyrC` by `cc/Makefile`, so no extra build
 flags are needed on macOS.
@@ -44,7 +44,7 @@ model frontend.
 
 ### Inference: a preallocated, shape-indexed KV cache
 
-`Tyr/Inference/KVCache.lean` provides a key/value cache for transformer decode
+[`Tyr/Inference/KVCache.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Inference/KVCache.lean) provides a key/value cache for transformer decode
 loops. Each layer owns preallocated K and V buffers of shape
 `[batch, numKvHeads, maxSeqLen, headDim]`; a decode step writes the new token's
 K/V at position `cache.currentLen` (in place, via
@@ -66,7 +66,7 @@ One namespace quirk: the module is named `Tyr.Inference.KVCache` but declares
 `namespace torch.Generator.KVCache` (`Tyr/Inference/KVCache.lean:24`), a
 leftover from its NanoChat origin. Call sites write
 `torch.Generator.KVCache.Cache`, or `open torch.Generator` and use
-`KVCache.Cache`. The older `Examples/NanoChat/Generator/KVCache.lean` is a thin
+`KVCache.Cache`. The older [`Examples/NanoChat/Generator/KVCache.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/NanoChat/Generator/KVCache.lean) is a thin
 re-export shim; new code should import `Tyr.Inference.KVCache` directly.
 
 **Position bookkeeping is the caller's job.** `Cache.attendLayer` appends and
@@ -82,7 +82,7 @@ Both cache structures have `TensorStruct` instances
 
 ## Key APIs
 
-### `FloatBuffer` (`Tyr/Audio/FloatBuffer.lean`)
+### `FloatBuffer` ([`Tyr/Audio/FloatBuffer.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/FloatBuffer.lean))
 
 Opaque contiguous `Float64` buffer backed by native memory, registered as a
 Lean external class with a finalizer. Mutation is gated behind `IO` and returns
@@ -109,7 +109,7 @@ Two sharp edges: `uget` performs no bounds check, and the auto-derived
 `Inhabited` instance is the `Unit` witness, not a valid native buffer — never
 call an op on `(default : FloatBuffer)`.
 
-### `Tyr.Audio.AppleInput` (`Tyr/Audio/AppleInput.lean`)
+### `Tyr.Audio.AppleInput` ([`Tyr/Audio/AppleInput.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/AppleInput.lean))
 
 ```lean
 opaque start (sampleRate : UInt64 := 16000) (channels : UInt64 := 1)
@@ -134,7 +134,7 @@ opaque rms (xs : @& Array Float) : IO Float
   supported on macOS"`); `read`/`readBuffer` just return empty results, so a
   capture loop that never checks for `start` failure would spin silently.
 
-### `Tyr.Audio.AppleOutput` (`Tyr/Audio/AppleOutput.lean`)
+### `Tyr.Audio.AppleOutput` ([`Tyr/Audio/AppleOutput.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Audio/AppleOutput.lean))
 
 ```lean
 opaque beep (freqHz : Float) (durationMs : UInt64 := 120)
@@ -154,7 +154,7 @@ tone — do not mix it with synchronous `beep` in the same run unless you know
 the async tone has finished (hazard documented at
 `Tyr/Audio/AppleOutput.lean:8`).
 
-### `torch.Generator.KVCache` (`Tyr/Inference/KVCache.lean`)
+### `torch.Generator.KVCache` ([`Tyr/Inference/KVCache.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Inference/KVCache.lean))
 
 ```lean
 structure LayerCache (batch maxSeqLen numKvHeads headDim : UInt64) where
@@ -197,7 +197,7 @@ Notes:
 - An out-of-range `layerIdx` makes `attendLayer` panic with a message naming
   the index and the layer count — keep indices valid.
 - The in-tree consumer is the GPU parity harness
-  `Examples/GPU/RunMhaH100Decode.lean`. Model families under `Tyr/Model/`
+  [`Examples/GPU/RunMhaH100Decode.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100Decode.lean). Model families under `Tyr/Model/`
   (Qwen, Whisper, …) currently define their own caches instead of reusing this
   one.
 

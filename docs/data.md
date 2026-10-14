@@ -22,7 +22,7 @@ unrelated roots:
 - `tokenizer` (global, no `Tyr` prefix) — the BPE stack in `Tyr/Tokenizer/`.
   Umbrella import: `import Tyr.Tokenizer` (re-exports all 13 submodules).
 - `torch.DataLoader` (`Tyr/DataLoader.lean`) and `torch.Data.*`
-  (`Tyr/Data/{Task,TaskClass,Tasks,Pipeline,Pretraining,Download,HuggingFace}.lean`).
+  ([`Tyr/Data/{Task,TaskClass,Tasks,Pipeline,Pretraining,Download,HuggingFace}.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/Data)).
   Umbrella `import Tyr.Data` re-exports only Task/TaskClass/Tasks/Pipeline/
   Pretraining, not Download or HuggingFace.
 - `Tyr.Text` (`Tyr/Text/`) — streaming-ASR utilities; no umbrella module and

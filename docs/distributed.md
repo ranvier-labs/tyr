@@ -7,7 +7,7 @@ checkpoint/resume (`Tyr.Pipeline`), and reusable training-loop recipes
 (`Tyr.Train.RunLedger`). Use it when one GPU is not enough — data-parallel
 training with averaged gradients is the well-trodden path — or when you want a
 resumable, multi-stage training run with structured artifacts. All of it is
-exercised end-to-end by the NanoChat example (`Examples/NanoChat/Pipeline.lean`).
+exercised end-to-end by the NanoChat example ([`Examples/NanoChat/Pipeline.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/NanoChat/Pipeline.lean)).
 
 ## Architecture and main abstractions
 
@@ -395,7 +395,7 @@ Script knobs (`TORCHRUN_BIN`, `NPROC_PER_NODE`, `SKIP_BUILD`, `TYR_DEVICE`,
 - [Optimization](optimization.md) — `Optim.adamw` / `AdamWState` used by both recipe loops, and the Polar Express kernels hosted in `Tyr/Distributed.lean`.
 - [Data](data.md) — `TaskIterator` and conversation batches behind `makeTaskDataGenerator`.
 - [Serialization](serialization.md) — checkpoint files referenced by `checkpoints.jsonl`.
-- [Examples and testing](examples-and-testing.md) — the NanoChat pipeline and `Tests/TestPipeline.lean` / `Tests/TestRunLedger.lean`.
+- [Examples and testing](examples-and-testing.md) — the NanoChat pipeline and [`Tests/TestPipeline.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestPipeline.lean) / [`Tests/TestRunLedger.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestRunLedger.lean).
 
 For exhaustive, per-symbol documentation of every definition in these modules,
 see the doc-gen4 API reference generated from `docbuild/`.

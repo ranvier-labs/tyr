@@ -25,7 +25,7 @@ The pipeline has four stages:
    a `Kernel`-valued constant `<decl>.kernel` and an opaque FFI launcher
    `<decl>.launch`.
 4. **Emission and build** — `lake exe GenerateGpuKernels <Module>…`
-   (`Tyr/GPU/GenerateGpuKernels.lean`) imports kernel modules, `evalExpr`s
+   ([`Tyr/GPU/GenerateGpuKernels.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/GenerateGpuKernels.lean)) imports kernel modules, `evalExpr`s
    the companion constants, lowers each `Kernel` to guarded ThunderKittens C++
    via `generateKernel` (`Tyr/GPU/Codegen/EmitNew.lean:1654`), and writes one
    `.cu` file per Lean module (default `cc/src/generated`). The C++ side is
@@ -164,7 +164,7 @@ takes a runtime `KVal UInt32` bound; `kstride` iterates between kernel scalars.
 
 ### Sugar and patterns
 
-- `Tyr/GPU/Codegen/Notation.lean` — expression-style wrappers:
+- [`Tyr/GPU/Codegen/Notation.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Codegen/Notation.lean) — expression-style wrappers:
   `matmul a b .Float32`, the scoped infix `a ⬝ b` / `a ⬝ᵀ b`
   (`Notation.lean:192-195`, Float32 accumulators via `matmulF32`), and scoped
   `HAdd`/`HSub`/`HMul`/`HDiv` instances on `RT`/`RV` returning
@@ -261,7 +261,7 @@ broadcasts, reductions (including masked max/min/prod), all four
 `MMATranspose` modes, and loops (reversed in the VJP). Custom rules hook in
 through `LinearInst.custom`, resolved against `gpuAdRegistry` via
 `registerGpuVJPRule` (`Tyr/AutoGrad.lean:726`). Status: exercised by
-`Tests/TestGPUAutoGrad.lean` only — no `@[gpu_grad]`-style attribute exists,
+[`Tests/TestGPUAutoGrad.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestGPUAutoGrad.lean) only — no `@[gpu_grad]`-style attribute exists,
 and nothing in the repository registers custom GPU rules today.
 
 `Tyr/GPU/AD.lean` is a *different* system sharing the same namespace:
@@ -289,11 +289,11 @@ Authoring surface (all in `Tyr.GPU.Codegen`, re-exported by
 
 | API | Location | Purpose |
 |---|---|---|
-| `KernelM`, `emit`, `freshVar`, `comment` | `Codegen/Monad.lean` | Builder monad and raw IR emission |
+| `KernelM`, `emit`, `freshVar`, `comment` | [`Codegen/Monad.lean`](../../Tyr/GPU/Codegen/Monad.html) | Builder monad and raw IR emission |
 | `buildKernelM` | `Codegen/Monad.lean:125` | Seal a `KernelM Unit` into a `Kernel` |
-| `setArch`, `setFamily`, `setLaunchBounds` | `Codegen/Monad.lean` | Target/family guards, `__launch_bounds__` |
-| `RT`/`ST`/`RV`/`SV`/`GPtr`/`KVal`/`TT` | `Codegen/TileTypes.lean` | Typed phantom handles |
-| `allocRT`/`allocST`/`zeroRT`/`allocRV` | `Codegen/Primitives.lean` | Tile/vector allocation |
+| `setArch`, `setFamily`, `setLaunchBounds` | [`Codegen/Monad.lean`](../../Tyr/GPU/Codegen/Monad.html) | Target/family guards, `__launch_bounds__` |
+| `RT`/`ST`/`RV`/`SV`/`GPtr`/`KVal`/`TT` | [`Codegen/TileTypes.lean`](../../Tyr/GPU/Codegen/TileTypes.html) | Typed phantom handles |
+| `allocRT`/`allocST`/`zeroRT`/`allocRV` | [`Codegen/Primitives.lean`](../../Tyr/GPU/Codegen/Primitives.html) | Tile/vector allocation |
 | `load`/`store`, `loadGlobal`/`storeGlobal` | `Primitives.lean`, `GlobalLayout.lean` | Shared↔register and global↔shared movement |
 | `mma`/`mm`/`mmaT` | `Primitives.lean:608-644` | Tensor-core MMA with checked dims |
 | `sync` | `Primitives.lean:1769` | Block barrier |
@@ -301,7 +301,7 @@ Authoring surface (all in `Tyr.GPU.Codegen`, re-exported by
 | `krange`/`kvrange`/`kstride` | `Loop.lean:75-83` | `for`-loop ranges emitting device loops |
 | `matmul`, `⬝`, `⬝ᵀ` | `Notation.lean:96,192` | Expression-style MMA sugar |
 | `DoubleBuffer`, `onlineSoftmax`, `attentionBlockIter` | `Macros.lean` | Common kernel patterns |
-| `GpuCapabilities`, `RequiresTMA/WGMMA/TMEM` | `GPU/Capabilities.lean` | Feature gates at instance resolution |
+| `GpuCapabilities`, `RequiresTMA/WGMMA/TMEM` | [`GPU/Capabilities.lean`](../../Tyr/GPU/Capabilities.html) | Feature gates at instance resolution |
 
 Codegen/build surface:
 
@@ -312,7 +312,7 @@ Codegen/build surface:
 | `#generate_gpu_kernels` | `Codegen/Attribute.lean:775` | List companion constants in the environment |
 | `generateKernel` | `Codegen/EmitNew.lean:1654` | `Kernel → String` ThunderKittens CUDA |
 | `writeKernelCudaUnitsByModuleFrom` | `Codegen/FFI.lean:282` | Per-module `.cu` emission with change detection |
-| `lake exe GenerateGpuKernels` | `Tyr/GPU/GenerateGpuKernels.lean` | CLI driver used by the Lake build |
+| `lake exe GenerateGpuKernels` | [`Tyr/GPU/GenerateGpuKernels.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/GenerateGpuKernels.lean) | CLI driver used by the Lake build |
 | `-Kkernels` | `lakefile.lean` (`gpuKernels`, `target libtyr`) | Build-time kernel module selection |
 
 ## Usage example
@@ -380,7 +380,7 @@ let _ ← torch.cuda_synchronize
 
 Scratch/output buffers must be allocated through `IO` (as above); kernels
 mutate the tensors you pass in, and pure-looking `let` bindings can alias
-through CSE — see the caveat in `Tyr/GPU/Ops/RKFused.lean`.
+through CSE — see the caveat in [`Tyr/GPU/Ops/RKFused.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/RKFused.lean).
 
 ## Related guides
 
@@ -389,7 +389,7 @@ through CSE — see the caveat in `Tyr/GPU/Ops/RKFused.lean`.
 - [Getting started](../getting-started.md) — build instructions, including `-Kkernels`
 - [Autodiff](../autodiff.md) — the host-side `Tyr.AutoGrad` engine that `Tyr/GPU/AutoGrad.lean` plugs into
 - [FFI and build](../ffi-and-build.md) — the `cc/` C++ layer the generated `.cu` files compile into
-- [Examples and testing](../examples-and-testing.md) — `Examples/GPU/Run*.lean` harnesses and GPU test entry points
+- [Examples and testing](../examples-and-testing.md) — [`Examples/GPU/Run*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Examples/GPU) harnesses and GPU test entry points
 
 Exhaustive symbol documentation for every module mentioned here is generated
 by doc-gen4 from the source docstrings (see `docbuild/`); this chapter is a

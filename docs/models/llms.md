@@ -148,7 +148,7 @@ Three `@[extern]` opaque kernels sit inside this component (declared `private`, 
 
 ### FLM: flow-matching language models (`torch.flm`)
 
-`Tyr/Model/FLM.lean` ports the FLM/FMLM tensor contracts (continuous one-hot corruption, flow-matching loss, ODE sampling, PSD semigroup targets) from the sibling FLM repository. It is backbone-agnostic: the caller supplies the denoiser through an interface structure, so it works with any transformer, including the families above.
+[`Tyr/Model/FLM.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/FLM.lean) ports the FLM/FMLM tensor contracts (continuous one-hot corruption, flow-matching loss, ODE sampling, PSD semigroup targets) from the sibling FLM repository. It is backbone-agnostic: the caller supplies the denoiser through an interface structure, so it works with any transformer, including the families above.
 
 ```lean
 structure FlowDenoiser (seq vocab : UInt64) (Params : Type) where
@@ -160,7 +160,7 @@ structure FlowDenoiser (seq vocab : UInt64) (Params : Type) where
     → IO (T #[batch])) := none
 ```
 
-`forwardPure` is required for generation because `Tyr.DiffEq` vector fields are pure functions; `generateFLM` throws if it is absent. Sampling treats the flow as an ODE from Gaussian noise to one-hot data and integrates it with `DiffEq.Euler` (`generateFLM`) or any `DiffEq.AbstractSolver` you supply (`generateFLMWithSolver`). FLM is currently library-only: its sole consumer in the repo is `Tests/TestFLM.lean`.
+`forwardPure` is required for generation because `Tyr.DiffEq` vector fields are pure functions; `generateFLM` throws if it is absent. Sampling treats the flow as an ODE from Gaussian noise to one-hot data and integrates it with `DiffEq.Euler` (`generateFLM`) or any `DiffEq.AbstractSolver` you supply (`generateFLMWithSolver`). FLM is currently library-only: its sole consumer in the repo is [`Tests/TestFLM.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestFLM.lean).
 
 ## Key APIs
 
@@ -239,7 +239,7 @@ Same pattern: `Gemma4ForCausalLM.generate` / `generateStream` / `generateFromEmb
 
 ### Pretrained Qwen3.5 text generation
 
-Reconstructed example (from `Examples/Qwen35/RunHF.lean`, built as `lake exe Qwen35RunHF`):
+Reconstructed example (from [`Examples/Qwen35/RunHF.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/Qwen35/RunHF.lean), built as `lake exe Qwen35RunHF`):
 
 ```lean
 import Tyr.Hub
@@ -275,7 +275,7 @@ def main : IO Unit := do
 
 ### Random-weight Qwen3: forward and cached/uncached parity
 
-Reconstructed example (from `Tests/TestQwen3Model.lean`):
+Reconstructed example (from [`Tests/TestQwen3Model.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestQwen3Model.lean)):
 
 ```lean
 import Tyr
@@ -298,7 +298,7 @@ def main : IO Unit := do
   IO.println s!"logits: {logits.runtimeShape}, generated {outSeq} tokens total"
 ```
 
-This tiny-config pattern is how the test suites exercise the models without checkpoints; `Tests/TestQwen35Model.lean` does the same for dense and MoE Qwen3.5 configs, including cached-vs-uncached parity.
+This tiny-config pattern is how the test suites exercise the models without checkpoints; [`Tests/TestQwen35Model.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestQwen35Model.lean) does the same for dense and MoE Qwen3.5 configs, including cached-vs-uncached parity.
 
 ### Flux text encoding with the Qwen embedder
 
@@ -314,7 +314,7 @@ let txtEmb := qwen.encodeMasked qwenCfg maxSeqLen tokens attnMask
 
 ### FLM training loss and ODE sampling
 
-Reconstructed example (from `Tests/TestFLM.lean`):
+Reconstructed example (from [`Tests/TestFLM.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tests/TestFLM.lean)):
 
 ```lean
 import Tyr.Model.FLM

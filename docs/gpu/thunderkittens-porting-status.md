@@ -15,7 +15,7 @@ The GPU catalog is grouped into logical family entrypoints:
 ## Coverage
 
 Every vendored ThunderKittens `.cu` source under
-[external/git/ThunderKittens/kernels](../../external/git/ThunderKittens/kernels)
+external/git/ThunderKittens/kernels
 now has a built Lean counterpart in the catalog.
 
 The important distinction now is not coverage vs missing families. It is:
@@ -26,7 +26,7 @@ The important distinction now is not coverage vs missing families. It is:
   packed-scale construct as a first-class operation.
 
 The working exhaustive source-to-Lean matrix lives in
-[dev/thunderkittens_porting_tracker.md](../../dev/thunderkittens_porting_tracker.md).
+[dev/thunderkittens_porting_tracker.md](https://github.com/ranvier-labs/tyr/tree/main/dev).
 
 ## Canonical Public Surface
 
@@ -84,14 +84,14 @@ Current performance checkpoint:
   - Loading `CUDA/12.9.1` after the PyTorch module builds the extension without
     a source compatibility shim.
 - [x] Added a direct vendored-TK benchmark harness:
-  - [benchmarks/bench_tk_mha_h100.py](../../benchmarks/bench_tk_mha_h100.py)
+  - [benchmarks/bench_tk_mha_h100.py](https://github.com/ranvier-labs/tyr/blob/main/benchmarks/bench_tk_mha_h100.py)
   - It records TK rows as `unsupported` when the vendored source cannot provide
     a valid apples-to-apples case.
 - [x] Switched the native C++ flash-attention benchmark to CUDA-event timing so
   Tyr/SDPA rows use the same timing style as the ThunderKittens benchmark.
 - [x] Captured one-H100 CUDA-event benchmark outputs:
-  - [benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl](../../benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl)
-  - [benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl](../../benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl)
+  - [benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl](https://github.com/ranvier-labs/tyr/blob/main/benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl)
+  - [benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl](https://github.com/ranvier-labs/tyr/blob/main/benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl)
 - [x] Reached generated-vs-TK parity on the direct performance target:
   - `native_dense_768x64`, fwd+bwd, BF16, non-causal, `B=1,H=1`
   - generated Tyr: `0.135669 ms` / `0.152279 ms` across opposite backend
@@ -151,8 +151,8 @@ Current one-H100 flash-attention bring-up status:
     on the accidental old reshape contract.
 - [x] The direct example runners can now dump raw backward partial tiles for
   `dK` / `dV` before reduction:
-  - `Examples/GPU/RunMhaH100.lean`
-  - `Examples/GPU/RunMhaH100Seq768.lean`
+  - [`Examples/GPU/RunMhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100.lean)
+  - [`Examples/GPU/RunMhaH100Seq768.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100Seq768.lean)
   - output files:
     - `data/gpu_fixtures/mha_h100_128x64/diag_dK_tiles.pt`
     - `data/gpu_fixtures/mha_h100_128x64/diag_dV_tiles.pt`
@@ -165,7 +165,7 @@ Current one-H100 flash-attention bring-up status:
   - `Tyr/GPU/Codegen/GlobalLayout.lean` now exposes direct RV global loads for
     row vectors,
   - `Tyr/GPU/Kernels/MhaH100.lean` and
-    `Tyr/GPU/Kernels/AttentionFactory.lean` now load `l` / `d` directly into
+    [`Tyr/GPU/Kernels/AttentionFactory.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels) now load `l` / `d` directly into
     RV registers instead of staging them through an extra shared
     `SV<float, 64>`,
   - this removes the extra `0x100` shared-memory allocation that had pushed
@@ -226,8 +226,8 @@ Current one-H100 flash-attention bring-up status:
   - the Lean kernels write final gradients directly with `storeGlobalAdd`
     instead of writing `[seq, seq]` scratch partials and reducing them on the
     host side,
-  - `Tyr/GPU/Ops/MhaH100.lean`,
-    `Examples/GPU/RunMhaH100*.lean`, and
+  - [`Tyr/GPU/Ops/MhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean),
+    [`Examples/GPU/RunMhaH100*.lean`](https://github.com/ranvier-labs/tyr/tree/main/Examples/GPU), and
     `cc/src/tyr_ops.cpp`
     were simplified accordingly.
 - The remaining exact-route mismatch was traced to a backend/codegen gap rather
@@ -282,10 +282,10 @@ in progress. The execution order is:
     `CUDA/13.1.0`, plus matching NCCL builds such as
     `NCCL/2.27.7-GCCcore-14.3.0-CUDA-12.9.1`.
   - A direct `nvcc` compile of the generated
-    [Tyr_GPU_Kernels_MhaH100.cu](../../cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu)
+    [Tyr_GPU_Kernels_MhaH100.cu](https://github.com/ranvier-labs/tyr/tree/main/cc/src)
     object succeeded under `CUDA/12.9.1` without the old
     `cudaLaunchAttributePreferredClusterDimension` compatibility define, so the
-    shim has now been removed from [cc/Makefile](../../cc/Makefile).
+    shim has now been removed from [cc/Makefile](https://github.com/ranvier-labs/tyr/blob/main/cc/Makefile).
 - Preferred direct build/run path:
   - `lake -R build GenerateGpuKernels Tyr.GPU.Kernels.MhaH100 RunFlashAttn`
   - `lake -R env ./.lake/build/bin/GenerateGpuKernels Tyr.GPU.Kernels.MhaH100 --out-dir cc/src/generated`
@@ -356,7 +356,7 @@ in progress. The execution order is:
   - purpose: measure the practical end-to-end value of the H100 path using the
     existing forward + backward + SGD step loop.
   - immediate implementation target: extend the existing
-    [RunMhaH100Train.lean](../../Examples/GPU/RunMhaH100Train.lean)
+    [RunMhaH100Train.lean](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100Train.lean)
     path as the training benchmark reference until a generalized op-wrapper
     route exists.
 - `Family C: kernel-generation generality sweep`
@@ -465,7 +465,7 @@ The high-level runtime bridge for FlashAttention now exists.
 ### Runtime Validation Snapshot
 
 There is now a dedicated smoke test at
-`Examples/GPU/RunFlashAttnOp.lean`.
+[`Examples/GPU/RunFlashAttnOp.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunFlashAttnOp.lean).
 
 It checks three cases:
 
@@ -540,10 +540,10 @@ The current direct H100 path proves that Tyr can run generated TK-style
 attention kernels on one H100, but it is still a narrow benchmark surface:
 
 - The published wrapper/op layer is not parameterized by shape:
-  [MhaH100.lean](../../Tyr/GPU/Ops/MhaH100.lean)
+  [MhaH100.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean)
   still hard-codes `[1, 1, seq, 64]` with manual dispatch for `seq=128` and
   `seq=768`, and
-  [FlashAttn.lean](../../Tyr/GPU/Ops/FlashAttn.lean)
+  [FlashAttn.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/FlashAttn.lean)
   still advertises TK coverage only for the same `headDim=64` / non-causal
   shapes.
 
@@ -571,16 +571,16 @@ The next specialization work should be driven by the model code already in the
 tree, not by the current `headDim=64` benchmark alone.
 
 - `Qwen`
-  - [Tyr/Model/Qwen/Attention.lean](../../Tyr/Model/Qwen/Attention.lean)
+  - [Tyr/Model/Qwen/Attention.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen/Attention.lean)
     uses grouped-query attention directly.
-  - [Tyr/Model/Qwen35/Config.lean](../../Tyr/Model/Qwen35/Config.lean)
+  - [Tyr/Model/Qwen35/Config.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Qwen35/Config.lean)
     defaults to `head_dim=256`, with common ratios such as
     `num_attention_heads=16`, `num_key_value_heads=4` and some variants with
     `num_key_value_heads=2`.
   - Qwen also needs decode-time KV-cache paths (`q_len=1`, growing `kv_len`)
     for incremental generation.
 - `Gemma4`
-  - [Tyr/Model/Gemma4/Config.lean](../../Tyr/Model/Gemma4/Config.lean)
+  - [Tyr/Model/Gemma4/Config.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/Model/Gemma4/Config.lean)
     uses `head_dim=256`, sometimes `global_head_dim=512`, plus sliding-window
     attention with periodic full-attention layers.
   - Gemma variants also use nontrivial KV-head ratios and global/sliding mixes,
@@ -630,7 +630,7 @@ That implies the near-term native target matrix should be:
 Implementation status on 2026-04-20:
 
 - The first operator-facing `AttentionProblem` layer is now in tree at
-  [Tyr/GPU/Ops/AttentionProblem.lean](../../Tyr/GPU/Ops/AttentionProblem.lean).
+  [Tyr/GPU/Ops/AttentionProblem.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/AttentionProblem.lean).
 - It records runtime attention metadata and centralizes the current
   specialization decision instead of leaving fixed-shape predicates duplicated
   across wrappers.
@@ -639,15 +639,15 @@ Implementation status on 2026-04-20:
   - `tkMhaH1002Block`
   - `tkMhaH10012Block`
   - otherwise `portable`
-- [MhaH100.lean](../../Tyr/GPU/Ops/MhaH100.lean)
+- [MhaH100.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean)
   now dispatches through `AttentionProblem.currentSpecialization` and stores the
   selected specialization in its forward context.
-- [FlashAttn.lean](../../Tyr/GPU/Ops/FlashAttn.lean)
+- [FlashAttn.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/FlashAttn.lean)
   now constructs the same `AttentionProblem` descriptor instead of maintaining a
   separate hand-written shape predicate.
 - Because the dedicated C++ op registration still does not exist, the current
   `torch.nn.tyrFlashAttn4d` symbol is temporarily implemented as a Lean-side
-  fallback wrapper in [Tyr/Torch.lean](../../Tyr/Torch.lean).
+  fallback wrapper in [Tyr/Torch.lean](../../Tyr/Torch.html).
   That keeps the wrapper layer buildable and makes the remaining missing piece
   explicit: the next step is still the real runtime bridge in `cc/src`.
 
@@ -796,7 +796,7 @@ but they should not define the long-term specialization policy.
 - Add a dedicated runner rather than overloading the generalized op wrapper too
   early.
 - Immediate preferred shape:
-  - `Examples/GPU/RunFlashAttnBench.lean`
+  - [`Examples/GPU/RunFlashAttnBench.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunFlashAttnBench.lean)
 - Required backend modes:
   - `tyr_tk_direct`
   - `torch_sdpa`
@@ -821,10 +821,10 @@ but they should not define the long-term specialization policy.
   making the TK/codegen backend accept varying `seq` and `headDim` through one
   stable calling convention.
 - Current state in-tree:
-  - [MhaH100.lean](../../Tyr/GPU/Ops/MhaH100.lean)
+  - [MhaH100.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean)
     still publishes only a small fixed set of runtime variants (`seq=128` and
     `seq=768`, `headDim=64`),
-  - and [FlashAttn.lean](../../Tyr/GPU/Ops/FlashAttn.lean)
+  - and [FlashAttn.lean](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/FlashAttn.lean)
     still classifies coverage with a hard-coded predicate before calling a
     torch-registered runtime op.
 - Target direction, taking inspiration from ThunderKittens' PyTorch-side call
@@ -926,7 +926,7 @@ but they should not define the long-term specialization policy.
 
 ### Stage 3: NanoChat integration
 
-- Route compatible attention calls in `Examples/NanoChat/ModdedGPT.lean`
+- Route compatible attention calls in [`Examples/NanoChat/ModdedGPT.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/NanoChat/ModdedGPT.lean)
   through the GPU op wrapper path with explicit fallback.
 - Keep unsupported shapes/features on the portable SDPA route.
 - Add one-run fallback reason reporting and parity tests at block level.
@@ -943,11 +943,11 @@ but they should not define the long-term specialization policy.
 The old sketch-only kernel modules that duplicated the canonical ports were
 removed from the core catalog:
 
-- `Tyr/GPU/Kernels/LayerNorm.lean`
-- `Tyr/GPU/Kernels/LayerNormBwd.lean`
-- `Tyr/GPU/Kernels/LayerNormResidual.lean`
-- `Tyr/GPU/Kernels/Mamba.lean`
-- `Tyr/GPU/Kernels/MambaBwd.lean`
+- [`Tyr/GPU/Kernels/LayerNorm.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels)
+- [`Tyr/GPU/Kernels/LayerNormBwd.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels)
+- [`Tyr/GPU/Kernels/LayerNormResidual.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels)
+- [`Tyr/GPU/Kernels/Mamba.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels)
+- [`Tyr/GPU/Kernels/MambaBwd.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels)
 
 That leaves the build/docs surface centered on the actual source-backed
 ThunderKittens counterparts instead of parallel educational shims.
@@ -1016,7 +1016,7 @@ ThunderKittens counterparts instead of parallel educational shims.
   CUDA for the non-crashing accumulation workaround:
   - `Tyr/GPU/Kernels/MhaH100.lean` now emits q-block-major stacked
     `dK`/`dV` partial writes via plain `storeGlobal`,
-  - `Tyr/GPU/Ops/MhaH100.lean` and the `RunMhaH100*` examples were updated to
+  - [`Tyr/GPU/Ops/MhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean) and the `RunMhaH100*` examples were updated to
     reduce `[1, 1, kvBlocks * seq, 64]` stacks back to `[1, 1, seq, 64]`.
 - The remaining split is now explicit:
   - raw kernel forward + `dQ` + `dK` are coming from the TK/Mha path,
@@ -1041,7 +1041,7 @@ ThunderKittens counterparts instead of parallel educational shims.
 - That means the present `MhaH100` experiment is not add-a-wait-after-`storeGlobal`.
   - The closer reference-oriented change is to keep `dK` and `dV` staging disjoint.
   - `Tyr/GPU/Kernels/MhaH100.lean` now uses separate `dKShared` and `dVShared` buffers for backward writeback.
-  - `Tyr/GPU/Kernels/AttentionFactory.lean` was updated the same way so future regeneration preserves the same direction.
+  - [`Tyr/GPU/Kernels/AttentionFactory.lean`](https://github.com/ranvier-labs/tyr/tree/main/Tyr/GPU/Kernels) was updated the same way so future regeneration preserves the same direction.
 - A separate generality limitation also became explicit during this review:
   - the stacked-partials reduction currently only behaves correctly for the supported fixed shapes because `qBlocks == kvBlocks` for `seq=128` and `seq=768`.
   - this is acceptable for the current bring-up target, but it is not the general reduction contract needed for arbitrary sequence families.
@@ -1128,10 +1128,10 @@ ThunderKittens counterparts instead of parallel educational shims.
     memory, which made `dk_ref_ok=false` and `dv_ref_ok=true` look like a raw
     `dK` bug.
 - The fix was applied in the caller layer, not the kernel math:
-  - `Examples/GPU/RunMhaH100.lean`
-  - `Examples/GPU/RunMhaH100Train.lean`
-  - `Examples/GPU/RunMhaH100Seq768.lean`
-  - `Tyr/GPU/Ops/MhaH100.lean`
+  - [`Examples/GPU/RunMhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100.lean)
+  - [`Examples/GPU/RunMhaH100Train.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100Train.lean)
+  - [`Examples/GPU/RunMhaH100Seq768.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunMhaH100Seq768.lean)
+  - [`Tyr/GPU/Ops/MhaH100.lean`](https://github.com/ranvier-labs/tyr/blob/main/Tyr/GPU/Ops/MhaH100.lean)
   - each now derives `dK` and `dV` partial buffers from distinct
     `torch.mul_scalar` expressions on a shared zero seed so the generated code
     cannot alias them.
@@ -1210,7 +1210,7 @@ ThunderKittens counterparts instead of parallel educational shims.
 
 ### Benchmark Scaffold Status
 
-- `Examples/GPU/RunFlashAttnBench.lean` now provides a structured one-H100
+- [`Examples/GPU/RunFlashAttnBench.lean`](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunFlashAttnBench.lean) now provides a structured one-H100
   benchmark surface with:
   - case selection,
   - backend selection,
@@ -1228,8 +1228,8 @@ ThunderKittens counterparts instead of parallel educational shims.
 ### Clean Minimal Benchmark Path
 
 - The cleanest one-H100 benchmark path in-tree is still the native Lean runner:
-  - [Examples/GPU/RunFlashAttnBench.lean](../../Examples/GPU/RunFlashAttnBench.lean)
-  - [scripts/gpu/bench_flash_attn_matrix.sh](../../scripts/gpu/bench_flash_attn_matrix.sh)
+  - [Examples/GPU/RunFlashAttnBench.lean](https://github.com/ranvier-labs/tyr/blob/main/Examples/GPU/RunFlashAttnBench.lean)
+  - [scripts/gpu/bench_flash_attn_matrix.sh](https://github.com/ranvier-labs/tyr/blob/main/scripts/gpu/bench_flash_attn_matrix.sh)
 - Reason:
   - it keeps Tyr, ThunderKittens-backed runtime dispatch, and the PyTorch
     reference inside one process and one timing harness,
@@ -1325,7 +1325,7 @@ ThunderKittens counterparts instead of parallel educational shims.
 ### Runtime Bridge Benchmark
 
 - Added a compiled C++ benchmark path for the current native runtime rows:
-  - [cc/tools/bench_flash_attn.cpp](../../cc/tools/bench_flash_attn.cpp)
+  - [cc/tools/bench_flash_attn.cpp](https://github.com/ranvier-labs/tyr/blob/main/cc/tools/bench_flash_attn.cpp)
   - build:
     - `source ./load_modules.sh && make -C cc bench-flash-attn TYR_GPU_CODEGEN_MODULE=Tyr.GPU.Kernels.MhaH100`
 - The benchmark calls `tyr_ops::flash_attn_dispatch` directly and compares
