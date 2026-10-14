@@ -1,5 +1,11 @@
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Int64 pointer probe
+
+Test kernel `Tyr.GPU.Codegen.Int64PointerTests.int64PointerProbe` checking
+64-bit pointer arithmetic in generated code.
+-/
+
 namespace Tyr.GPU.Codegen.Int64PointerTests
 
 open Tyr.GPU

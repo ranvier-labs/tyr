@@ -14,6 +14,15 @@ import Tyr.Model.Flux.RoPE
 import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.QKNorm
 
+/-! # Flux double-stream block
+
+Joint image/text transformer block in which each stream keeps its own weights
+but attends over the concatenated sequence. Built from
+`torch.flux.SelfAttention` and `torch.flux.SwiGLUMLP`;
+`torch.flux.DoubleStreamBlock.forward` applies modulated attention and MLP to
+both streams.
+-/
+
 namespace torch.flux
 
 /-- Self-attention layer for double-stream block -/

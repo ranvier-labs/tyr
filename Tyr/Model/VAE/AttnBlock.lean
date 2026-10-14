@@ -10,6 +10,12 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.VAE.ResnetBlock
 
+/-! # VAE attention block
+
+`torch.vae.AttnBlock`: single-head spatial self-attention with GroupNorm and
+residual connection.
+-/
+
 namespace torch.vae
 
 /-- Self-attention block for VAE.

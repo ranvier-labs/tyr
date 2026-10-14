@@ -48,6 +48,13 @@ import Tyr.SafeTensors.Load
 import Tyr.Model.Utils
 import Tyr.Model.Laguna.Model
 
+/-! # Laguna weights
+
+`torch.laguna.WeightSource` abstracts one SafeTensors file or a sharded
+directory; loaders resolve tolerant candidate names and check element counts
+against the expected shape.
+-/
+
 namespace torch.laguna
 
 open torch.Log

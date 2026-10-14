@@ -9,6 +9,12 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-! # Qwen MLP
+
+`torch.qwen.QwenMLP` computes
+$W_{down}(\operatorname{SiLU}(W_{gate} x) \odot W_{up} x)$.
+-/
+
 namespace torch.qwen
 
 /-- Qwen MLP with SwiGLU activation.

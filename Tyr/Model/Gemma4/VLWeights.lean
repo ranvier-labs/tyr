@@ -10,6 +10,13 @@ import Tyr.Model.Utils
 import Tyr.Model.Gemma4.Weights
 import Tyr.Model.Gemma4.Multimodal
 
+/-! # Gemma 4 multimodal weights
+
+Loads `torch.gemma4.Gemma4ForConditionalGeneration` (text + vision) from a
+single SafeTensors file or a sharded directory, trying several candidate tensor
+names per parameter.
+-/
+
 namespace torch.gemma4
 
 open torch.Log

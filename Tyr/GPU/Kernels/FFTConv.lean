@@ -25,6 +25,13 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # FFT convolution kernels
+
+ThunderKittens-aligned FFT convolution for the 1024-length path
+(`Tyr.GPU.Kernels.tkFFTConvPC1024`) and the non-persistent 64 variant
+(`Tyr.GPU.Kernels.tkFFTConvNonPC64`).
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

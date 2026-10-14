@@ -9,6 +9,12 @@ import Tyr.Hub
 import Tyr.Model.Qwen35.Pretrained
 import Tyr.Model.Qwen36.ConfigIO
 
+/-! # Qwen3.6 pretrained loading
+
+Covered Qwen3.6 repo ids, download options and pretrained loaders for the
+causal-LM and conditional-generation models.
+-/
+
 namespace torch.qwen36
 
 namespace hub

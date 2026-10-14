@@ -9,6 +9,12 @@ import Tyr.Model.Qwen3TTS.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen3-TTS config loading
+
+Loads `torch.qwen3tts.Qwen3TTSConfig` from a Hugging Face `config.json` or model
+directory.
+-/
+
 namespace torch.qwen3tts
 
 open Lean

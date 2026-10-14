@@ -20,6 +20,12 @@ import Tyr.Torch
 import Tyr.GPU.Kernels.BrownianSample
 import Tyr.GPU.Ops.BrownianFused
 
+/-! # Fused Euler–Maruyama
+
+Fused Euler–Maruyama SDE steps (`Tyr.GPU.Ops.SDEFused.emStepFused`,
+`Tyr.GPU.Ops.SDEFused.emSolveFused`) driven by uploaded Brownian schedules.
+-/
+
 namespace Tyr.GPU.Ops.SDEFused
 
 open torch

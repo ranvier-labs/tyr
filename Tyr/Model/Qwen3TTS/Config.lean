@@ -9,6 +9,14 @@
 -/
 import Tyr.Basic
 
+/-! # Qwen3-TTS configuration
+
+`torch.qwen3tts.Qwen3TTSConfig` combining `torch.qwen3tts.SpeakerEncoderConfig`
+(ECAPA-TDNN), `torch.qwen3tts.TalkerConfig` and
+`torch.qwen3tts.TalkerCodePredictorConfig`, which predicts codebooks $1..N$ from
+codebook 0.
+-/
+
 namespace torch.qwen3tts
 
 /-- Speaker encoder config (ECAPA-TDNN style). -/

@@ -5,6 +5,13 @@
 -/
 import Tyr.Model.Gemma4.Config
 
+/-! # Gemma 4 multimodal configuration
+
+`torch.gemma4.Gemma4VisionConfig`, `torch.gemma4.Gemma4ImageProcessorConfig`
+(from `processor_config.json`) and the composite `torch.gemma4.Gemma4VLConfig`,
+with derived sizes such as `torch.gemma4.Gemma4VisionConfig.patchDim`.
+-/
+
 namespace torch.gemma4
 
 /-- Vision backbone config published in Gemma 4 `config.json`. -/

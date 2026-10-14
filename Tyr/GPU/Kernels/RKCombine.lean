@@ -19,6 +19,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Runge–Kutta combination kernels
+
+Fused stage sums and the Dopri5 solution + error combination on 64×64 tiles,
+with the Dormand–Prince tableau coefficients.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

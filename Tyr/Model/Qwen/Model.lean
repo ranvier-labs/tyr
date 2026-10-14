@@ -12,6 +12,12 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Layer
 import Tyr.Model.Qwen.RoPE
 
+/-! # Qwen3 decoder
+
+`torch.qwen.Qwen3Model`: token embedding, the layer stack and final norm, with
+forward passes that also return hidden states from every layer.
+-/
+
 namespace torch.qwen
 
 /-- Qwen3 model structure.

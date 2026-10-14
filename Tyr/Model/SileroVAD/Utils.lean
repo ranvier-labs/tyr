@@ -9,6 +9,14 @@
 import Tyr.Model.SileroVAD.Model
 import Tyr.Model.Qwen3ASR.Frontend
 
+/-! # Silero VAD utilities
+
+Ports of Silero's `get_speech_timestamps`
+(`torch.silerovad.timestampsFromProbabilities`, configured by
+`torch.silerovad.TimestampConfig`) and the streaming
+`torch.silerovad.VADIterator`.
+-/
+
 namespace torch.silerovad
 
 structure SpeechTimestamp where

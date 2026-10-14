@@ -15,6 +15,15 @@ import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.SingleStreamBlock
 import Tyr.Model.Flux.DoubleStreamBlock
 
+/-! # Flux model
+
+Top-level Flux transformer `torch.flux.FluxModel`: the timestep
+`torch.flux.MLPEmbedder` (linear → SiLU → linear), the stacks of double- and
+single-stream blocks (`torch.flux.FluxModel.processDoubleBlocks`,
+`torch.flux.FluxModel.processSingleBlocks`) and the modulated output projection
+`torch.flux.LastLayer`.
+-/
+
 namespace torch.flux
 
 /-- MLP embedder for timestep -/

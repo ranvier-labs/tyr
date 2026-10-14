@@ -9,6 +9,13 @@
 import Tyr.Torch
 import Tyr.Model.Qwen3ASR.Config
 
+/-! # Qwen3-ASR forced alignment
+
+Text-side forced-alignment processing: tokenization rules for
+CJK/Japanese/Korean text, prompt construction and monotonic timestamp repair,
+producing `torch.qwen3asr.ForcedAlignResult`.
+-/
+
 namespace torch.qwen3asr
 
 structure ForcedAlignItem where

@@ -13,6 +13,13 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Utils
 
+/-! # Silero VAD model
+
+Lean port of the `TinySileroVAD` layout: 16 kHz chunking with context, right
+reflect padding, a convolutional encoder and LSTM state
+(`torch.silerovad.VADLstmState`) producing per-chunk speech probabilities.
+-/
+
 namespace torch.silerovad
 
 open torch.Model

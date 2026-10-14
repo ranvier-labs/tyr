@@ -6,6 +6,12 @@ import Tyr.Text.StreamingConsensus
 import Tyr.Text.VADProvider
 import Tyr.Tokenizer.Qwen3
 
+/-! # Qwen3-ASR stream model
+
+`torch.qwen3asr.StreamModel` and `torch.qwen3asr.StreamSession` wrap streaming
+inference: push 16 kHz PCM, decode incrementally, and flush.
+-/
+
 namespace torch.qwen3asr
 
 /-- Separate streaming-native model wrapper.

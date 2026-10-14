@@ -9,6 +9,12 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Fused residual LayerNorm
+
+ThunderKittens-aligned fused residual + LayerNorm for $d_{model} = 1024$ in BF16
+and FP32, with Blackwell-family variants.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

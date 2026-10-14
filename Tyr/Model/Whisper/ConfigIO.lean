@@ -7,6 +7,11 @@ import Tyr.Model.Whisper.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Whisper config loading
+
+Parses a Hugging Face `config.json` into `torch.whisper.WhisperConfig`.
+-/
+
 namespace torch.whisper
 
 open Lean

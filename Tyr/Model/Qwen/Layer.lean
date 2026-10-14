@@ -13,6 +13,12 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Attention
 import Tyr.Model.Qwen.MLP
 
+/-! # Qwen transformer layer
+
+`torch.qwen.QwenLayer`: pre-norm attention and SwiGLU MLP with residual
+connections, with full, masked and single-step forward variants.
+-/
+
 namespace torch.qwen
 
 /-- Qwen transformer layer.

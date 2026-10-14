@@ -16,6 +16,13 @@ import Tyr.Model.Qwen.Attention
 import Tyr.Model.Gemma4.Config
 import Tyr.Model.Generation
 
+/-! # Gemma 4 text model
+
+Gemma 4 causal language model: `torch.gemma4.Gemma4RMSNorm`, dense and
+routed-expert MLPs, attention with the per-layer schedule from
+`torch.gemma4.Gemma4Config`, and the decoder stack used by generation.
+-/
+
 namespace torch.gemma4
 
 open torch

@@ -21,6 +21,12 @@ import Tyr.Model.VAE.ResnetBlock
 import Tyr.Model.VAE.AttnBlock
 import Tyr.Model.VAE.Upsample
 
+/-! # VAE decoder
+
+`torch.vae.Decoder` (BFL layout) maps latents to images through ResNet,
+attention and upsampling stages.
+-/
+
 namespace torch.vae
 
 /-- Full VAE Decoder (BFL format).

@@ -13,3 +13,10 @@ import Tyr.Model.Qwen35.Multimodal
 import Tyr.Model.Qwen35.Media
 import Tyr.Model.Qwen35.VLWeights
 import Tyr.Model.Qwen35.Pretrained
+
+/-! # Qwen3.5
+
+Umbrella import for Qwen3.5 in `torch.qwen35`: hybrid linear/full-attention text
+model, MoE weights, multimodal config, vision tower, media loading and
+pretrained loading.
+-/

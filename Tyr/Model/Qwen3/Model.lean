@@ -16,6 +16,12 @@ import Tyr.Model.Qwen
 import Tyr.Model.Qwen3.Config
 import Tyr.Model.Utils
 
+/-! # Qwen3 causal LM model
+
+`torch.qwen3.Qwen3ForCausalLM` adds an LM head (tied to the token embeddings by
+default) on top of the Qwen decoder and returns `torch.qwen3.CausalLMOutput`.
+-/
+
 namespace torch.qwen3
 
 open torch

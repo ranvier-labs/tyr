@@ -18,6 +18,13 @@
 import Tyr.Torch
 import Tyr.GPU.Types
 
+/-! # Attention problem descriptors
+
+Runtime classification of attention calls: `Tyr.GPU.Ops.AttentionMode`, mask
+kinds, head-dimension and GQA classes, and `Tyr.GPU.Ops.AttentionSpecialization`
+used to choose native kernels.
+-/
+
 namespace Tyr.GPU.Ops
 
 open torch

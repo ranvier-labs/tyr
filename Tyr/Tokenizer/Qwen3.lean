@@ -9,6 +9,12 @@ import Tyr.Tokenizer.ByteLevel
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen3 tokenizer
+
+`tokenizer.qwen3.QwenTokenizer`: byte-level BPE loaded from `tokenizer.json`,
+with greedy longest-first matching of special tokens.
+-/
+
 namespace tokenizer.qwen3
 
 open Lean

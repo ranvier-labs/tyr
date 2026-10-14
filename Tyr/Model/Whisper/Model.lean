@@ -9,6 +9,13 @@ import Tyr.Module.LayerNorm
 import Tyr.Model.Whisper.Config
 import Tyr.Model.Utils
 
+/-! # Whisper model
+
+Encoder-decoder transformer: `torch.whisper.WhisperAttention` with an
+incremental `torch.whisper.WhisperAttention.KVCache` and cross-attention over
+key/value states projected once from the encoder.
+-/
+
 namespace torch.whisper
 
 open torch.Model

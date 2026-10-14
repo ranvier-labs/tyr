@@ -15,6 +15,13 @@ import Tyr.Model.Qwen3ASR.Streaming
 import Tyr.Model.Qwen3ASR.Pretrained
 import Tyr.Tokenizer.Qwen3
 
+/-! # Qwen3-ASR transcription
+
+Offline transcription (`torch.qwen3asr.ASRTranscription`) with input length
+limits and padding, and the standalone `torch.qwen3asr.Qwen3ForcedAligner` for
+word timestamps.
+-/
+
 namespace torch.qwen3asr
 
 /-- One offline ASR transcription result. -/

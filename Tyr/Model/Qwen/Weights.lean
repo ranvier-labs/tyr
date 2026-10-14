@@ -13,6 +13,13 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.Embedder
 
+/-! # Qwen weights
+
+Loads Qwen3 layers from single or sharded SafeTensors, dequantizing FP8 linear
+weights where present (`torch.qwen.loadLinearWeight`,
+`torch.qwen.loadQwen3ModelSharded`).
+-/
+
 namespace torch.qwen
 
 open torch.Log

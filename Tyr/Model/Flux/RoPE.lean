@@ -6,6 +6,13 @@
 -/
 import Tyr.Torch
 
+/-! # Flux rotary embeddings
+
+4-axis rotary position embeddings for Flux. `torch.flux.ropeEmbed` builds the
+per-axis cos/sin tables from position ids, and `torch.flux.applyRope` /
+`torch.flux.applyRopeAttn` rotate the Q/K tensors.
+-/
+
 namespace torch.flux
 
 private def axisIds {batch seq : UInt64} (ids : T #[batch, seq, 4]) (axis : UInt64) : T #[batch, seq] :=

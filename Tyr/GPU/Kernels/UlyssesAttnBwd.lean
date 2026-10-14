@@ -11,6 +11,13 @@
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Kernels.Support
 
+/-! # Ulysses attention backward
+
+Backward all-to-all phases for Ulysses attention (redistributing $dO$ and
+returning $dQ, dK, dV$) and the orchestration shell
+`Tyr.GPU.Kernels.UlyssesAttn.ulyssesAttnBwd`.
+-/
+
 namespace Tyr.GPU.Kernels.UlyssesAttn
 
 open Tyr.GPU

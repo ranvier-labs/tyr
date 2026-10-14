@@ -7,6 +7,12 @@ import Tyr.Model.Laguna.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Laguna config loading
+
+Loads and normalizes a Laguna `config.json`, including nested
+`rope_parameters.<section>.<field>` lookups.
+-/
+
 namespace torch.laguna
 
 open Lean

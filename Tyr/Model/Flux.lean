@@ -14,3 +14,11 @@ import Tyr.Model.Flux.DoubleStreamBlock
 import Tyr.Model.Flux.Model
 import Tyr.Model.Flux.Sampling
 import Tyr.Model.Flux.Weights
+
+/-! # Flux
+
+Umbrella import for the Flux2 (Klein) image-generation transformer in
+`torch.flux`: configuration, 4-axis RoPE, timestep modulation, QK-norm,
+single/double-stream blocks, the full model, flow-matching sampling and
+checkpoint loading.
+-/

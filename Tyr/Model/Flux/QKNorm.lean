@@ -10,6 +10,13 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Module.RMSNorm
 
+/-! # Query-key normalization
+
+`torch.flux.QKNorm` applies RMS normalization to queries and keys before
+attention, which stabilises the attention logits;
+`torch.flux.QKNorm.forwardAttn` works on the attention layout.
+-/
+
 namespace torch.flux
 
 /-- Query-Key normalization.

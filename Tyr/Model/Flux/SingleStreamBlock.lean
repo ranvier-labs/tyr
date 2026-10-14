@@ -14,6 +14,13 @@ import Tyr.Model.Flux.RoPE
 import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.QKNorm
 
+/-! # Flux single-stream block
+
+`torch.flux.SingleStreamBlock` processes the concatenated image+text sequence
+with one set of weights, computing attention and MLP in parallel from a fused
+projection under timestep modulation.
+-/
+
 namespace torch.flux
 
 /-- Single-stream transformer block.

@@ -13,3 +13,10 @@ import Tyr.Model.Qwen35.VLWeights
 import Tyr.Model.Qwen36.Config
 import Tyr.Model.Qwen36.ConfigIO
 import Tyr.Model.Qwen36.Pretrained
+
+/-! # Qwen3.6
+
+Umbrella import for Qwen3.6 in `torch.qwen36`, which reuses the Qwen3.5 model,
+multimodal and weight modules and adds its own config, media and pretrained
+entry points.
+-/

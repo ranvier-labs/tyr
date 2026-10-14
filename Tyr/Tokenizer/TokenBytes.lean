@@ -11,6 +11,12 @@
 import Tyr.Tokenizer.Types
 import Tyr.Torch
 
+/-! # Token byte counts
+
+`tokenizer.TokenBytes` maps each token to its byte length so bits-per-byte can
+be computed, with totals over arrays, tensors and masks.
+-/
+
 namespace tokenizer
 
 open torch

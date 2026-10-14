@@ -14,6 +14,13 @@ import Tyr.Model.Qwen35.Model
 import Tyr.Model.Qwen35.VLConfig
 import Tyr.Model.Utils
 
+/-! # Qwen3.5 vision tower
+
+Vision encoder for Qwen3.5 multimodal checkpoints:
+`torch.qwen35.Qwen35VisionLayerNorm`, a linear patch embed over flattened
+patches, vision MLP/attention blocks, and patch merging into the text model.
+-/
+
 namespace torch.qwen35
 
 open torch

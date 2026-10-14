@@ -11,6 +11,12 @@ import Tyr.SafeTensors.Load
 import Tyr.Model.Utils
 import Tyr.Model.Qwen35.Model
 
+/-! # Qwen3.5 text weights
+
+Loads `torch.qwen35.Qwen35ForCausalLM` from single or sharded SafeTensors,
+including MoE expert weights and dequantization for the target device.
+-/
+
 namespace torch.qwen35
 
 open torch.Log

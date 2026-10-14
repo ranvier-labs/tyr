@@ -11,6 +11,12 @@ import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Codegen.Attribute
 
+/-! # Causal FlashAttention (64)
+
+Causal FlashAttention forward for one KV block with sequence 64 and head dim 64,
+with and without log-sum-exp output.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

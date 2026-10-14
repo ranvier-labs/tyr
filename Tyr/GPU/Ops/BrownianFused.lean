@@ -14,6 +14,12 @@ import Tyr.Torch
 import Tyr.PRNG
 import Tyr.GPU.Kernels.BrownianSample
 
+/-! # Fused Brownian increments
+
+Builds and uploads the virtual Brownian tree node schedule for value queries
+$w(t)$ over $[T_0, T_1]$ and computes increments on device.
+-/
+
 namespace Tyr.GPU.Ops.BrownianFused
 
 open torch

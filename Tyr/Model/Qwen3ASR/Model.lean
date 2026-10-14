@@ -19,6 +19,13 @@ import Tyr.Model.Qwen3ASR.AudioEncoder
 import Tyr.Model.Qwen3ASR.ForcedAligner
 import Tyr.Model.Utils
 
+/-! # Qwen3-ASR thinker model
+
+`torch.qwen3asr.Qwen3ASRThinkerForConditionalGeneration` merges audio encoder
+outputs into the Qwen text decoder, with mask-derived rotary positions and a
+causal-LM output.
+-/
+
 namespace torch.qwen3asr
 
 open torch.Model

@@ -47,6 +47,14 @@ import Tyr.Basic
 import Tyr.Torch
 import Tyr.Model.Laguna.Config
 
+/-! # Laguna rotary tables
+
+Dual cos/sin tables (`torch.laguna.LagunaRotaryTables`) for Laguna's hybrid
+attention: plain RoPE with $\text{inv\_freq}_j = \text{base}^{-2j/d}$
+(`torch.laguna.plainInvFreq`) and YaRN-scaled frequencies
+(`torch.laguna.yarnInvFreq`).
+-/
+
 namespace torch.laguna
 
 /-- Dual rotary-embedding cos/sin tables for Laguna's hybrid attention.

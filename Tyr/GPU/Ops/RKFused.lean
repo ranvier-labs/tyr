@@ -24,6 +24,12 @@
 import Tyr.Torch
 import Tyr.GPU.Kernels.RKCombine
 
+/-! # Fused Dopri5 integrator
+
+Preallocated workspace (`Tyr.GPU.Ops.RKFused.Workspace`) and fused Dopri5
+step/solve (`Tyr.GPU.Ops.RKFused.dopri5SolveFused`) on GPU tiles.
+-/
+
 namespace Tyr.GPU.Ops.RKFused
 
 open torch

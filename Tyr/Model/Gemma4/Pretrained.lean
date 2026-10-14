@@ -9,6 +9,14 @@ import Tyr.Hub
 import Tyr.Model.Gemma4.ConfigIO
 import Tyr.Model.Gemma4.Weights
 
+/-! # Gemma 4 pretrained loading
+
+Hugging Face integration: `torch.gemma4.hub.gemma4CollectionRepoIds` lists the
+covered repo ids, `torch.gemma4.hub.tokenizerFiles` the tokenizer files to
+fetch, and `torch.gemma4.Gemma4ForCausalLM.loadFromPretrained` loads a
+checkpoint from a local directory or repo id.
+-/
+
 namespace torch.gemma4.hub
 
 open torch.Hub

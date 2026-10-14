@@ -9,6 +9,13 @@ import Tyr.Hub
 import Tyr.Model.Qwen25Omni.ConfigIO
 import Tyr.Model.Qwen25Omni.Weights
 
+/-! # Qwen2.5-Omni pretrained loading
+
+Covered repo ids (`torch.qwen25omni.hub.qwen25OmniCollectionRepoIds`), tokenizer
+files, and `torch.qwen25omni.Qwen25OmniForCausalLM.loadFromPretrained` from a
+local directory or repo id.
+-/
+
 namespace torch.qwen25omni.hub
 
 open torch.Hub
