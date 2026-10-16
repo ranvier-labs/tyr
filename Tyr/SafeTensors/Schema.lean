@@ -6,7 +6,7 @@
   - introspect single-file or sharded-directory layouts
   - support HuggingFace `model.safetensors.index.json` when present
 -/
-import Tyr.Torch
+import Tyr.RawTensor.SafeTensors
 import Tyr.Typed.Tensor
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson
@@ -42,9 +42,9 @@ def toSpec (schema : TensorSchema) : TensorSpec :=
 def contract
     (schema : TensorSchema)
     (role : TensorRole := .parameter)
-    (devicePolicy : DevicePolicy := .any)
+    (expectedDevice : Option Device := none)
     : TensorContract :=
-  { spec := schema.toSpec, role, devicePolicy }
+  { spec := schema.toSpec, role, expectedDevice }
 
 end TensorSchema
 
@@ -59,27 +59,26 @@ structure Schema where
 def Schema.find? (schema : Schema) (tensorName : String) : Option TensorSchema :=
   schema.tensors.findSome? fun t => if t.name == tensorName then some t else none
 
-private def checkLoadedWithContractCore
-    {shape : Shape}
-    (context : String)
-    (contract : TensorContract)
-    (raw : T shape)
-    : IO (DTensor shape contract.spec.dtype) := do
-  let actual : TensorSpec := { shape := raw.runtimeShape, dtype := raw.dtype }
-  match contract.check actual raw.device with
-  | .ok () => pure (Tensor.assumeDType raw)
-  | .error err => throw <| IO.userError s!"{context}: {err}"
-
 /--
-Check a loaded tensor against a shape/dtype/device contract and return a
-dtype-indexed view over the same runtime tensor.
+Check a loaded raw tensor against a shape/dtype/device contract and return a
+view indexed by its actual device over the same runtime tensor.
 -/
 def checkLoadedWithContract
     (context : String)
     (contract : TensorContract)
-    (raw : T contract.spec.shape)
-    : IO (DTensor contract.spec.shape contract.spec.dtype) :=
-  checkLoadedWithContractCore context contract raw
+    (raw : RawTensor)
+    : IO (Tensor { shape := contract.spec.shape, dtype := contract.spec.dtype, device := raw.device }) := do
+  match Tensor.ofTensorWithContract contract raw with
+  | .ok tensor => pure tensor
+  | .error err => throw <| IO.userError s!"{context}: {err}"
+
+private def checkLoadedOnDevice (context : String) (contract : TensorContract)
+    (device : Device) (raw : RawTensor) :
+    IO (Tensor { shape := contract.spec.shape, dtype := contract.spec.dtype, device }) := do
+  let _ ← checkLoadedWithContract context contract raw
+  match Tensor.ofRaw raw with
+  | .ok tensor => pure tensor
+  | .error err => throw <| IO.userError s!"{context}: {err}"
 
 /-- Load from an open SafeTensors handle and check against an explicit contract. -/
 def loadFromHandleWithContract
@@ -87,9 +86,9 @@ def loadFromHandleWithContract
     (name : String)
     (contract : TensorContract)
     (device : Device := Device.CPU)
-    : IO (DTensor contract.spec.shape contract.spec.dtype) := do
-  let raw ← loadFromHandleOnDevice handle name contract.spec.shape device
-  checkLoadedWithContract s!"SafeTensors tensor '{name}'" contract raw
+    : IO (Tensor { shape := contract.spec.shape, dtype := contract.spec.dtype, device }) := do
+  let raw ← RawTensor.safeTensorsLoadFromHandleOnDevice handle name device
+  checkLoadedOnDevice s!"SafeTensors tensor '{name}'" contract device raw
 
 /-- Load from a SafeTensors file and check against an explicit contract. -/
 def loadTensorWithContract
@@ -97,9 +96,9 @@ def loadTensorWithContract
     (name : String)
     (contract : TensorContract)
     (device : Device := Device.CPU)
-    : IO (DTensor contract.spec.shape contract.spec.dtype) := do
-  let raw ← loadTensorOnDevice path name contract.spec.shape device
-  checkLoadedWithContract s!"SafeTensors tensor '{name}'" contract raw
+    : IO (Tensor { shape := contract.spec.shape, dtype := contract.spec.dtype, device }) := do
+  let raw ← RawTensor.safeTensorsLoadOnDevice path name device
+  checkLoadedOnDevice s!"SafeTensors tensor '{name}'" contract device raw
 
 /-- Load from a sharded SafeTensors directory and check against an explicit contract. -/
 def loadTensorShardedWithContract
@@ -107,9 +106,9 @@ def loadTensorShardedWithContract
     (name : String)
     (contract : TensorContract)
     (device : Device := Device.CPU)
-    : IO (DTensor contract.spec.shape contract.spec.dtype) := do
-  let raw ← loadTensorShardedOnDevice dir name contract.spec.shape device
-  checkLoadedWithContract s!"SafeTensors tensor '{name}'" contract raw
+    : IO (Tensor { shape := contract.spec.shape, dtype := contract.spec.dtype, device }) := do
+  let raw ← RawTensor.safeTensorsLoadShardedOnDevice dir name device
+  checkLoadedOnDevice s!"SafeTensors tensor '{name}'" contract device raw
 
 /-- Load from an open SafeTensors handle and check shape, dtype, and target device. -/
 def loadFromHandleWithSpec
@@ -117,9 +116,9 @@ def loadFromHandleWithSpec
     (name : String)
     (spec : TensorSpec)
     (device : Device := Device.CPU)
-    : IO (DTensor spec.shape spec.dtype) :=
+    : IO (Tensor { shape := spec.shape, dtype := spec.dtype, device }) :=
   loadFromHandleWithContract handle name
-    { spec, role := .parameter, devicePolicy := .exact device }
+    { spec, role := .parameter, expectedDevice := some device }
     device
 
 /-- Load from a SafeTensors file and check shape, dtype, and target device. -/
@@ -128,9 +127,9 @@ def loadTensorWithSpec
     (name : String)
     (spec : TensorSpec)
     (device : Device := Device.CPU)
-    : IO (DTensor spec.shape spec.dtype) :=
+    : IO (Tensor { shape := spec.shape, dtype := spec.dtype, device }) :=
   loadTensorWithContract path name
-    { spec, role := .parameter, devicePolicy := .exact device }
+    { spec, role := .parameter, expectedDevice := some device }
     device
 
 /-- Load from a sharded SafeTensors directory and check shape, dtype, and target device. -/
@@ -139,9 +138,9 @@ def loadTensorShardedWithSpec
     (name : String)
     (spec : TensorSpec)
     (device : Device := Device.CPU)
-    : IO (DTensor spec.shape spec.dtype) :=
+    : IO (Tensor { shape := spec.shape, dtype := spec.dtype, device }) :=
   loadTensorShardedWithContract dir name
-    { spec, role := .parameter, devicePolicy := .exact device }
+    { spec, role := .parameter, expectedDevice := some device }
     device
 
 /-- Load using a discovered tensor schema from an open handle. -/
@@ -149,7 +148,7 @@ def loadFromHandleWithSchema
     (handle : @& SafeTensorsHandle)
     (schema : TensorSchema)
     (device : Device := Device.CPU)
-    : IO (DTensor schema.shape schema.dtype) :=
+    : IO (Tensor { shape := schema.shape, dtype := schema.dtype, device }) :=
   loadFromHandleWithSpec handle schema.name schema.toSpec device
 
 /-- Load using a discovered tensor schema from a SafeTensors file. -/
@@ -157,7 +156,7 @@ def loadTensorWithSchema
     (path : String)
     (schema : TensorSchema)
     (device : Device := Device.CPU)
-    : IO (DTensor schema.shape schema.dtype) :=
+    : IO (Tensor { shape := schema.shape, dtype := schema.dtype, device }) :=
   loadTensorWithSpec path schema.name schema.toSpec device
 
 /-- Load using a discovered tensor schema from a sharded SafeTensors directory. -/
@@ -165,7 +164,7 @@ def loadTensorShardedWithSchema
     (dir : String)
     (schema : TensorSchema)
     (device : Device := Device.CPU)
-    : IO (DTensor schema.shape schema.dtype) :=
+    : IO (Tensor { shape := schema.shape, dtype := schema.dtype, device }) :=
   loadTensorShardedWithSpec dir schema.name schema.toSpec device
 
 private def getObjVal? (j : Json) (key : String) : Option Json :=
