@@ -24,7 +24,7 @@ structure AutoEncoder (dtypes : AutoEncoderDTypes := float32AutoEncoderDTypes) w
   /-- The VAE decoder -/
   decoder : (Decoder (device := device) dtypes.compute.val)
   /-- BatchNorm running mean for latent normalization [128] -/
-  bn_running_mean : Tensor { dtype := dtypes.mean.val, device := device, shape := #[128] }
+  bn_running_mean : Tensor { dtype := dtypes.mean, device := device, shape := #[128] }
   /-- BatchNorm running variance for latent normalization [128] -/
   bn_running_var : Tensor { dtype := dtypes.variance.val, device := device, shape := #[128] }
   deriving TensorStruct
@@ -88,7 +88,7 @@ def loadAutoEncoder (path : String) (log : Handlers := {}) (device : Device := .
   let dtypes ← IO.ofExcept (AutoEncoderDTypes.ofDTypes? compute.1 mean.1 variance.1)
   let decoder ← loadDecoderAtDType (dtype := dtypes.compute.val) path log device
   let bn_running_mean ← IO.ofExcept (mean.atDType? dtypes.mean)
-  let bn_running_var ← IO.ofExcept (variance.atDType? dtypes.variance.toExactDType)
+  let bn_running_var ← IO.ofExcept (variance.atDType? dtypes.variance.val)
   log.onInfo "AutoEncoder loaded successfully!"
   pure ⟨dtypes, {
     decoder

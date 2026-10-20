@@ -115,7 +115,7 @@ void testDtypeRegistry() {
             "Canonical native dtype metadata must roundtrip");
   }
   for (bool present : seen) require(present, "Missing native ScalarType entry");
-  require(!scalarTypeFromLeanDTypeTag(static_cast<unsigned>(tyr::lean::DType::Unknown)), "Unknown payload is not a concrete dtype tag");
+  require(!scalarTypeFromLeanDTypeTag(tyr::lean::DTypeCount), "Tags past the last constructor are not dtypes");
   require(!parseDtype("Undefined") && !parseDtype("NumOptions") && !parseDtype("dynamic"),
           "Sentinels and wildcard tokens must not request a native dtype");
   require(parseDtype("chalf") == c10::ScalarType::ComplexHalf &&
@@ -159,6 +159,8 @@ std::string dtypeThroughRawABI(const std::filesystem::path& directory,
   require(lean_is_scalar(device.get()) &&
               lean_unbox(device.get()) == static_cast<unsigned>(tyr::lean::DeviceKind::CPU),
           "RawTensor CPU metadata must report CPU");
+  require(lean_torch_get_dtype_enum(lean_alloc_array(0, 0), raw) == tyr::metadata::leanDTypeTag(dtype),
+          "RawTensor dtype tag must match " + name);
   return lean_string_cstr(dtype_name.get());
 }
 

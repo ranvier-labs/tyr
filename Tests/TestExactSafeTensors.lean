@@ -16,7 +16,7 @@ example (_packed : SomeDTypeTensor #[2] .CPU) : True := by
   fail_if_success
     have _ : Tensor ⟨#[2], .Float32, .CPU⟩ := _packed.2
   fail_if_success
-    have _ : Tensor ⟨#[2], .Unknown "dynamic", .CPU⟩ := _packed
+    have _ : Tensor ⟨#[2], .Float32, .CPU⟩ := _packed
   trivial
 
 @[test] def testExactSafeTensorsStoredDTypeAndExplicitConversion : IO Unit :=
@@ -27,7 +27,7 @@ example (_packed : SomeDTypeTensor #[2] .CPU) : True := by
     let stored ← IO.ofExcept (source.castDType? dtype)
     stored.saveSafeTensor path "weight"
     let packed ← safetensors.loadTensorExact path "weight" #[2]
-    LeanTest.assertEqual packed.1.val dtype
+    LeanTest.assertEqual packed.1 dtype
     LeanTest.assertEqual packed.2.dtype dtype
     LeanTest.assertEqual packed.2.raw.dtype dtype
     LeanTest.assertTrue packed.2.validate.toOption.isSome
@@ -59,7 +59,7 @@ example (_packed : SomeDTypeTensor #[2] .CPU) : True := by
     (← safetensors.loadOptionalTensorShardedExact dir.toString "absent" #[2]).isNone
   let present ← safetensors.loadOptionalTensorShardedExact dir.toString "weight" #[2]
   let some packed := present | throw (IO.userError "expected stored weight")
-  LeanTest.assertEqual packed.1.val .Float32
+  LeanTest.assertEqual packed.1 .Float32
   LeanTest.assertEqual (← packed.2.toFloatArray) #[2, 3]
   Tests.assertThrows
     (safetensors.loadOptionalTensorExact (dir / "absent.safetensors").toString "absent" #[2])

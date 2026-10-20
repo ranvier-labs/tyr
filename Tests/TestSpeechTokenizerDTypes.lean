@@ -26,7 +26,7 @@ example (_layout : SpeechTokenizerDTypes)
 example : True := by
   fail_if_success
     have _ : SpeechTokenizerDTypes := {
-      compute := bf16, usage := float32DType.toExactDType, sum := bf16.toExactDType,
+      compute := bf16, usage := float32DType.val, sum := bf16.val,
       promoted := .Float32, promotion := ⟨rfl⟩, resultEq := rfl }
   trivial
 
@@ -35,9 +35,9 @@ example : True := by
   -- BF16; neither source is converted to make matrix multiplication typecheck.
   for (compute, usage, sum) in #[(float32DType, float32DType, bf16),
       (float32DType, bf16, float32DType), (bf16, bf16, bf16)] do
-    let layout ← IO.ofExcept (SpeechTokenizerDTypes.ofDTypes? compute.toExactDType usage.toExactDType sum.toExactDType)
-    let sums ← IO.ofExcept ((Tensor.fromFloatArray #[6, 8]).castDType? layout.sum.val)
-    let counts ← IO.ofExcept ((Tensor.fromFloatArray #[2, 4]).castDType? layout.usage.val)
+    let layout ← IO.ofExcept (SpeechTokenizerDTypes.ofDTypes? compute.val usage.val sum.val)
+    let sums ← IO.ofExcept ((Tensor.fromFloatArray #[6, 8]).castDType? layout.sum)
+    let counts ← IO.ofExcept ((Tensor.fromFloatArray #[2, 4]).castDType? layout.usage)
     let result : Tensor ⟨#[2], layout.compute.val, .CPU⟩ := layout.divideCodebook sums counts
     LeanTest.assertEqual result.raw.dtype compute.val
     LeanTest.assertEqual (← result.toFloatArray) #[3, 2]
@@ -47,7 +47,7 @@ example : True := by
     LeanTest.assertEqual (← counts.toFloatArray) #[2, 4]
 
 @[test] def testSpeechCodebookRejectsWrongProjectionPrecision : IO Unit := do
-  let invalid := SpeechTokenizerDTypes.ofDTypes? bf16.toExactDType float32DType.toExactDType bf16.toExactDType
+  let invalid := SpeechTokenizerDTypes.ofDTypes? bf16.val float32DType.val bf16.val
   match invalid with
   | .ok _ => throw (IO.userError "Mixed BF16/F32 codebook cannot feed a BF16 projection")
   | .error message =>
@@ -82,8 +82,8 @@ private def writeAnchors (path : System.FilePath) (computeShape : Array Nat)
   writeAnchors path #[2] false false true
   let layout ← SpeechTokenizerDTypes.load path.toString "compute" #[2] "usage" "sum" .CPU
   LeanTest.assertEqual layout.compute.val .Float32
-  LeanTest.assertEqual layout.usage.val .Float32
-  LeanTest.assertEqual layout.sum.val .BFloat16
+  LeanTest.assertEqual layout.usage .Float32
+  LeanTest.assertEqual layout.sum .BFloat16
   let sums ← safetensors.loadTensorExact path.toString "sum" #[2048, 256]
   let checked ← IO.ofExcept (sums.atDType? layout.sum)
   LeanTest.assertEqual checked.raw.dtype .BFloat16

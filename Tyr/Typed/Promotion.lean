@@ -33,8 +33,8 @@ instance {dtype : DType} [h : SomeResult (nonBool? dtype) ()] : NonBool dtype :=
   constructor
   cases dtype <;> first | rfl | cases h.valid
 
-/-- A type-level witness of ordinary tensor dtype promotion. Unknown or
-unsupported pairs require a checked runtime path rather than a fabricated
+/-- A type-level witness of ordinary tensor dtype promotion. Unsupported
+pairs require a checked runtime path rather than a fabricated
 instance. Generic functions can accept this class as an explicit constraint. -/
 class Promotes (lhs rhs : DType) (result : outParam DType) : Prop where
   valid : promote? lhs rhs = some result

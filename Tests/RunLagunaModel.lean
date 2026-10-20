@@ -262,7 +262,7 @@ private def withStableRoutes (cfg : Config) (m : LagunaForCausalLM (device := de
           let bias : Tensor { shape := #[cfg.num_experts], device := device, dtype := .Float32 } := Tensor.reshapeChecked
             (Tensor.mulScalar (floatDynamic ((Tensor.arange cfg.num_experts).to moe.router.weight.2.device)) 2.0)
             #[cfg.num_experts]
-          { moe with router := { moe.router with eScoreCorrectionBias := some (bias.packDType (by simp)) } } } } }
+          { moe with router := { moe.router with eScoreCorrectionBias := some (bias.packDType) } } } } }
 
 /-- Materialize the original NVFP4 weights once, preserving their BF16
 rounding, then upcast the entire model. The oracle exercises the same MoE

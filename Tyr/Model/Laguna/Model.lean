@@ -184,8 +184,8 @@ def init (cfg : Config) (numHeads : UInt64) (device : Device := .CPU) (dtype : D
     v_proj := v
     o_proj := o
     g_proj := g
-    q_norm := qn.packDType (by simp)
-    k_norm := kn.packDType (by simp)
+    q_norm := qn.packDType
+    k_norm := kn.packDType
   }
 
 /-- QKV projection + per-head Q/K RMSNorm + (partial) RoPE.
@@ -465,15 +465,15 @@ private def initPackedExperts (cfg : Config) (device : Device := .CPU) : IO (Lag
   let upScale := Tensor.mulScalar (← randDynamic (device := device) #[e, mi, h / 16]) scaleVal
   let downScale := Tensor.mulScalar (← randDynamic (device := device) #[e, h, mi / 16]) scaleVal
   pure {
-    gatePacked := gatePacked.packDType (by simp)
-    gateScale := gateScale.packDType (by simp)
-    gateGlobal := (onesDynamic (device := device) #[e]).packDType (by simp)
-    upPacked := upPacked.packDType (by simp)
-    upScale := upScale.packDType (by simp)
-    upGlobal := (onesDynamic (device := device) #[e]).packDType (by simp)
-    downPacked := downPacked.packDType (by simp)
-    downScale := downScale.packDType (by simp)
-    downGlobal := (onesDynamic (device := device) #[e]).packDType (by simp)
+    gatePacked := gatePacked.packDType
+    gateScale := gateScale.packDType
+    gateGlobal := (onesDynamic (device := device) #[e]).packDType
+    upPacked := upPacked.packDType
+    upScale := upScale.packDType
+    upGlobal := (onesDynamic (device := device) #[e]).packDType
+    downPacked := downPacked.packDType
+    downScale := downScale.packDType
+    downGlobal := (onesDynamic (device := device) #[e]).packDType
   }
 
 /-- Random-init sparse MoE block (random router + packed-expert stand-ins +
@@ -487,7 +487,7 @@ def initSparseMoeBlock (cfg : Config) (device : Device := .CPU) (dtype : DType :
   let sharedDown ← initDynamicWeight (device := device) (dtype := dtype) #[cfg.hidden_size, cfg.shared_expert_intermediate_size]
     cfg.shared_expert_intermediate_size
   pure {
-    router := { weight := routerW.packDType (by simp), eScoreCorrectionBias := none }
+    router := { weight := routerW.packDType, eScoreCorrectionBias := none }
     experts := experts
     sharedGateProj := sharedGate
     sharedUpProj := sharedUp
@@ -522,10 +522,10 @@ def init (cfg : Config) (layerIdx : UInt64) (device : Device := .CPU) (dtype : D
       let m ← initSparseMoeBlock (device := device) (dtype := dtype) cfg
       pure (some m)
   pure {
-    input_layernorm := inputNorm.packDType (by simp)
+    input_layernorm := inputNorm.packDType
     attnFull := attnFull
     attnSliding := attnSliding
-    post_attention_layernorm := postNorm.packDType (by simp)
+    post_attention_layernorm := postNorm.packDType
     denseMlp := denseMlp
     sparseMoe := sparseMoe
   }
@@ -671,7 +671,7 @@ def init (cfg : Config) (device : Device := .CPU) (dtype : DType := .Float32) : 
   for i in [:cfg.num_hidden_layers.toNat] do
     layers := layers.push (← LagunaLayer.init (device := device) (dtype := dtype) cfg i.toUInt64)
   let norm ← Tensor.parameter (onesDynamic (device := device) #[cfg.hidden_size])
-  pure { embed_tokens := embedTokens, layers := layers, norm := norm.packDType (by simp) }
+  pure { embed_tokens := embedTokens, layers := layers, norm := norm.packDType }
 
 /-- Allocate a fresh per-layer KV cache with capacity `maxLen` on `device`. -/
 def initCache {batch : UInt64}

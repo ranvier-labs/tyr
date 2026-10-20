@@ -37,10 +37,6 @@ example (_x : Tensor ⟨#[2, 2], .Float8E4M3FN, .CPU⟩) : True := by
   fail_if_success have _ := Tensor.matrixLog _x
   trivial
 
-example (_x : Tensor ⟨#[2, 2], .Unknown "dynamic", .CPU⟩) : True := by
-  fail_if_success have _ := Tensor.matrixLog _x
-  trivial
-
 @[test] def testComplexRowNormsAreReal : IO Unit := do
   for (complex, real) in #[(DType.Complex64, DType.Float32), (.Complex128, .Float64)] do
     let input := diagonal complex

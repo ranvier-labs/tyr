@@ -16,7 +16,7 @@ private def admitExact (name : String) (shape : Shape) (device : Device)
     | .error message => throw <| IO.userError s!"SafeTensors tensor '{name}': {message}"
   let moved ← RawTensor.convertIO shape stored.2.raw device none
   -- Conversion retains dtype; keep that same witness and verify the result.
-  match Tensor.ofRaw (σ := ⟨shape, stored.1.val, device⟩) moved with
+  match Tensor.ofRaw (σ := ⟨shape, stored.1, device⟩) moved with
   | .ok tensor => pure ⟨stored.1, tensor⟩
   | .error message => throw <| IO.userError s!"SafeTensors tensor '{name}': {message}"
 

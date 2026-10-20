@@ -25,15 +25,6 @@ example (_left : Tensor ⟨#[2], .Float32, .CPU⟩)
     have _ := Tensor.Promoting.add _left _right
   trivial
 
-@[test] def testUnknownDTypeIsNeverAWildcard : IO Unit := do
-  let input := Tensor.ones #[2]
-  match Tensor.ofRaw (σ := ⟨#[2], .Unknown "dynamic", .CPU⟩) input.raw with
-  | .ok _ => throw (IO.userError "Unknown dtype must not admit Float32 values")
-  | .error _ => pure ()
-  match input.castDType? (.Unknown "dynamic") with
-  | .ok _ => throw (IO.userError "Unknown dtype must not be a no-op cast")
-  | .error _ => pure ()
-
 @[test] def testRuntimePromotionRetainsItsResultIndex : IO Unit := do
   let left := Tensor.ones #[2]
   let right := (Tensor.ones #[2]).castDType .Float64
@@ -48,8 +39,8 @@ example (_left : Tensor ⟨#[2], .Float32, .CPU⟩)
     let input := (Tensor.fromFloatArray #[1.25, 2.5]).toBFloat16
     input.saveTensor path
     let packed ← SomeDTypeTensor.loadTensorExact #[2] .CPU path
-    LeanTest.assertEqual packed.1.val .BFloat16
-    LeanTest.assertEqual packed.2.raw.dtype packed.1.val
+    LeanTest.assertEqual packed.1 .BFloat16
+    LeanTest.assertEqual packed.2.raw.dtype packed.1
     LeanTest.assertEqual (← packed.2.toFloatArray) #[1.25, 2.5]
     Tests.assertThrows (SomeDTypeTensor.loadTensorExact #[1, 2] .CPU path)
     for device in ← Tests.acceleratorDevices do

@@ -11,10 +11,6 @@ results into erased, type-level witnesses used by typed arithmetic.
 
 namespace torch.DType
 
-@[reducible] def isKnown : DType → _root_.Bool
-  | .Unknown _ => false
-  | _ => true
-
 @[reducible] def isBool : DType → _root_.Bool
   | .Bool => true
   | _ => false
@@ -128,7 +124,6 @@ def bitWidth? : DType → Option Nat
   | .Int32 | .UInt32 | .Float32 | .Complex32 | .QInt32 => some 32
   | .Int64 | .UInt64 | .Float64 | .Complex64 => some 64
   | .Complex128 => some 128
-  | .Unknown _ => none
 
 /-- Integer true division uses Tyr's Float32 default. Floating and complex
 inputs retain their dtype; kernel availability is a separate precondition. -/
@@ -212,33 +207,29 @@ inputs retain their dtype; kernel availability is a separate precondition. -/
   | _, _ => false
 
 /-- Exact result of `torch.promote_types` for every known dtype in PyTorch
-2.10. Undefined results and native rejections are both `none`. Unknown tokens,
-including the dynamic wildcard, never establish a static promotion.
+2.10. Undefined results and native rejections are both `none`.
 Constructor matches keep this reducible during typeclass synthesis.
 No arithmetic kernel availability is implied by a successful result. -/
 @[reducible] def promote? (lhs rhs : DType) : Option DType :=
-  match lhs, rhs with
-  | .Unknown _, _ | _, .Unknown _ => none
-  | _, _ =>
-    match sameKnownDType lhs rhs with
-    | true => some lhs
-    | false =>
-      match lhs.isQuantized, rhs.isQuantized, lhs.isBits, rhs.isBits,
-          lhs.isFloat8, rhs.isFloat8 with
-      | true, _, _, _, _, _ | _, true, _, _, _, _
-      | _, _, true, _, _, _ | _, _, _, true, _, _
-      | _, _, _, _, true, _ | _, _, _, _, _, true => none
-      | _, _, _, _, _, _ =>
-        match lhs.isBarebonesUnsigned, rhs.isBarebonesUnsigned with
-        | false, false =>
-          match lhs.isStandard, rhs.isStandard with
-          | true, true => some (promoteStandard lhs rhs)
-          | _, _ => none
-        | _, _ =>
-          match lhs.isFloating, rhs.isFloating with
-          | true, _ => some lhs
-          | _, true => some rhs
-          | _, _ => none
+  match sameKnownDType lhs rhs with
+  | true => some lhs
+  | false =>
+    match lhs.isQuantized, rhs.isQuantized, lhs.isBits, rhs.isBits,
+        lhs.isFloat8, rhs.isFloat8 with
+    | true, _, _, _, _, _ | _, true, _, _, _, _
+    | _, _, true, _, _, _ | _, _, _, true, _, _
+    | _, _, _, _, true, _ | _, _, _, _, _, true => none
+    | _, _, _, _, _, _ =>
+      match lhs.isBarebonesUnsigned, rhs.isBarebonesUnsigned with
+      | false, false =>
+        match lhs.isStandard, rhs.isStandard with
+        | true, true => some (promoteStandard lhs rhs)
+        | _, _ => none
+      | _, _ =>
+        match lhs.isFloating, rhs.isFloating with
+        | true, _ => some lhs
+        | _, true => some rhs
+        | _, _ => none
 
 @[reducible] def toComplex? : DType → Option DType
   | .Float16 | .Complex32 => some .Complex32
@@ -251,20 +242,17 @@ No arithmetic kernel availability is implied by a successful result. -/
 category. This is distinct from `promote?`, and deliberately does not claim
 that an arithmetic kernel exists for the result. -/
 @[reducible] def promoteScalar? (tensor scalar : DType) : Option DType :=
-  match tensor, scalar with
-  | .Unknown _, _ | _, .Unknown _ => none
-  | _, _ =>
-    match tensor.isComplex, scalar.isComplex with
-    | true, _ => some tensor
-    | false, true =>
-      match tensor.isFloating with
-      | true => tensor.toComplex?
-      | false => some scalar
-    | false, false =>
-      match tensor.isFloating, tensor.isBool, scalar.isFloating with
-      | true, _, _ => some tensor
-      | false, true, _ | false, _, true => promote? tensor scalar
-      | _, _, _ => some tensor
+  match tensor.isComplex, scalar.isComplex with
+  | true, _ => some tensor
+  | false, true =>
+    match tensor.isFloating with
+    | true => tensor.toComplex?
+    | false => some scalar
+  | false, false =>
+    match tensor.isFloating, tensor.isBool, scalar.isFloating with
+    | true, _, _ => some tensor
+    | false, true, _ | false, _, true => promote? tensor scalar
+    | _, _, _ => some tensor
 
 /-- The real component dtype of a complex tensor. Magnitudes, norms, and
 singular values use this dtype; non-complex dtypes are unchanged. -/

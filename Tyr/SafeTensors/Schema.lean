@@ -20,7 +20,9 @@ instance : ToJson DType where
 
 instance : FromJson DType where
   fromJson?
-    | .str s => pure (DType.parse s)
+    | .str s => match DType.ofString? s with
+      | some dtype => pure dtype
+      | none => .error s!"unknown dtype {s}"
     | _ => .error "expected dtype string"
 
 /-- One tensor entry discovered in a SafeTensors source. -/

@@ -27,14 +27,11 @@ def copyInto {s : Shape} {d : DType} {dstDevice srcDevice : Device}
   | .ok result => pure result
   | .error message => throw (IO.userError s!"Tensor.copyInto: {message}")
 
-/-- Checked dtype conversion. Unsupported tokens and native conversions return errors;
+/-- Checked dtype conversion. Unsupported native conversions return errors;
 recognizing a dtype does not promise that a backend implements its conversion. -/
 def castDType? {σ : StaticSpec} (t : Tensor σ) (dtype : DType) :
     Except String (Tensor (σ.withDType dtype)) := do
-  let converted : Except String RawTensor := match dtype with
-    | .Unknown _ => throw s!"Unsupported target dtype {dtype}"
-    | _ => RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
-  let raw ← converted
+  let raw ← RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
   Device.check t.raw.device raw.device
   Tensor.ofRaw (σ := σ.withDType dtype) raw
 
@@ -44,16 +41,12 @@ def castDType {σ : StaticSpec} (t : Tensor σ) (dtype : DType) : Tensor (σ.wit
   | .ok result => result
   | .error message => nativeInvariantFailure s!"Tensor.castDType: {message}"
 
-/-- Match the reference's actual dtype and preserve input shape and placement.
-An unsupported native dtype may only be retained when both inputs already agree. -/
+/-- Match the reference's actual dtype and preserve input shape and placement. -/
 def castLike? {σ τ : StaticSpec} (reference : Tensor τ) (t : Tensor σ) :
     Except String (Tensor (σ.withDType τ.dtype)) := do
   let dtype := reference.raw.dtype
-  let converted : Except String RawTensor := if t.raw.dtype == dtype then pure t.raw else
-    match dtype with
-    | .Unknown _ => throw s!"Unsupported reference dtype {dtype}"
-    | _ => RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
-  let raw ← converted
+  let raw ← if t.raw.dtype == dtype then pure t.raw else
+    RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
   TensorSpec.checkDType dtype raw.dtype
   Device.check t.raw.device raw.device
   Tensor.ofRaw (σ := σ.withDType τ.dtype) raw

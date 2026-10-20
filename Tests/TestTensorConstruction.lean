@@ -80,8 +80,7 @@ def testCheckedAdmissionAndOpaqueAccessors : IO Unit := do
   LeanTest.assertEqual packaged.2.raw.getValues.toList [0, 0]
   let rejected : Array StaticSpec := #[
     { spec with shape := #[99] },
-    { spec with dtype := .Int64 },
-    { spec with dtype := .Unknown "Float32_typo" }]
+    { spec with dtype := .Int64 }]
   for device in ← Tests.acceleratorDevices do
     LeanTest.assertTrue (Tensor.ofRaw (σ := ⟨raw.runtimeShape, raw.dtype, device⟩) raw).toOption.isNone
       "A CPU handle cannot be admitted at an acquired accelerator placement"

@@ -58,9 +58,7 @@ def testRawAdmissionRejectsFalseClaims : IO Unit := do
   let raw := (Tensor.full #[2, 3] 7).raw
   let rejected : Array StaticSpec := #[
     { shape := #[6], dtype := .Float32, device := .CPU },
-    { shape := #[2, 3], dtype := .Int64, device := .CPU },
-    { shape := #[2, 3], dtype := .Unknown "Float32_typo", device := .CPU },
-    { shape := #[2, 3], dtype := .Unknown "dynamic", device := .CPU }]
+    { shape := #[2, 3], dtype := .Int64, device := .CPU }]
   for device in ← Tests.acceleratorDevices do
     LeanTest.assertTrue (Tensor.ofRaw (σ := ⟨raw.runtimeShape, raw.dtype, device⟩) raw).toOption.isNone
       "A CPU handle cannot be admitted at an acquired accelerator placement"
@@ -123,8 +121,8 @@ def testExplicitConversionsCheckNativeResults : IO Unit := do
       LeanTest.assertEqual (← converted.toFloatArray) #[1, 2, 3, 4]
       LeanTest.assertEqual converted.runtimeShape #[2, 2]
       LeanTest.assertEqual converted.raw.dtype .Int64
-  LeanTest.assertTrue ((original.castDType? (.Unknown "Float32_typo")).toOption.isNone)
-    "Unrecognized dtype tokens must not weaken a concrete dtype claim"
+  LeanTest.assertTrue ((original.castDType? .QInt8).toOption.isNone)
+    "A dtype without a native conversion must return an error"
   match original.reshapeChecked? #[4] with
   | .error message => LeanTest.fail message
   | .ok reshaped => LeanTest.assertEqual reshaped.runtimeShape #[4]
@@ -168,7 +166,7 @@ def testExistentialTensorPreservesFullSpec : IO Unit := do
   match (Tensor.onesFor spec).reifyDType with
   | .error message => LeanTest.fail message
   | .ok ⟨dtype, tensor⟩ =>
-      LeanTest.assertEqual dtype.val .Float64
+      LeanTest.assertEqual dtype .Float64
       LeanTest.assertEqual tensor.runtimeShape #[2, 3]
       LeanTest.assertTrue (tensor.staticSpec.device == .CPU)
         "Recovering the native dtype must retain the concrete device"

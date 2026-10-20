@@ -23,7 +23,7 @@ private def pack {σ : StaticSpec} (x : Tensor σ) : IO (SomeDTypeTensor σ.shap
 
 private def requireBF16 {shape : Shape} (x : SomeDTypeTensor shape device) :
     IO (Tensor ⟨shape, .BFloat16, device⟩) :=
-  IO.ofExcept (x.atDType? ⟨.BFloat16, by decide⟩)
+  IO.ofExcept (x.atDType? .BFloat16)
 
 private def moveStored {shape : Shape} {source : Device} (x : SomeDTypeTensor shape source)
     (target : Device) : SomeDTypeTensor shape target := ⟨x.1, x.2.to target⟩

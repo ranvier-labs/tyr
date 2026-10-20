@@ -17,15 +17,11 @@ example : True := by
   fail_if_success
     have _ : DType.ConstantSupported .QInt8 .CPU := inferInstance
   fail_if_success
-    have _ : DType.ConstantSupported (.Unknown "invalid") .CPU := ⟨by trivial⟩
+    have _ : DType.ConstantSupported .QInt8 .CPU := ⟨by trivial⟩
   fail_if_success
     have _ : DType.ConstantSupported .Float8E8M0FNU .CPU := inferInstance
   fail_if_success
     have _ : Inhabited (Tensor ⟨#[2], .QInt8, .CPU⟩) := inferInstance
-  fail_if_success
-    have _ : Inhabited (Tensor ⟨#[2], .Unknown "invalid", .CPU⟩) := inferInstance
-  fail_if_success
-    have _ : Inhabited (Tensor ⟨#[2], .Unknown "dynamic", .CPU⟩) := inferInstance
   trivial
 
 namespace Tests.TestConstantSupport
@@ -55,8 +51,7 @@ def testConstantSupportCoversExactCPUCapabilities : IO Unit := do
       Tests.assertThrows (dtype.acquireConstantSupport .CPU)
 
 @[test]
-def testConstantSupportRejectsUnknownAndUnrepresentableZero : IO Unit := do
-  Tests.assertThrows ((DType.Unknown "invalid").acquireConstantSupport .CPU)
+def testConstantSupportRejectsUnrepresentableZero : IO Unit := do
   -- E8M0 is recognized and native conversion succeeds, but it has no zero.
   Tests.assertThrows (DType.Float8E8M0FNU.acquireConstantSupport .CPU)
     (some "cannot represent exact zero and one")

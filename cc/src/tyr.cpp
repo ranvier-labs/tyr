@@ -456,6 +456,12 @@ lean_object* lean_torch_get_dtype(lean_obj_arg s, b_lean_obj_arg t) {
     return lean_mk_string(tyr::metadata::dtypeName(tensor.scalar_type()));
 }
 
+// DType has only nullary constructors, so Lean passes it as its tag.
+uint8_t lean_torch_get_dtype_enum(lean_obj_arg s, b_lean_obj_arg t) {
+  lean_dec(s);
+  return static_cast<uint8_t>(tyr::metadata::leanDTypeTag(borrowTensor(t).scalar_type()));
+}
+
 // Get device as string
 lean_object* lean_torch_get_device(lean_obj_arg s, b_lean_obj_arg t) {
   lean_dec(s);
@@ -5466,10 +5472,10 @@ lean_object* lean_torch_topk_2d_checked(uint64_t /*d1*/, uint64_t /*d2*/,
 // ============================================================================
 
 lean_object* lean_torch_acquire_constant_support(
-    b_lean_obj_arg dtype, b_lean_obj_arg device) {
+    uint8_t dtype, b_lean_obj_arg device) {
   return tyr::checkedIoCall("DType.acquireConstantSupport", [&] {
-    const auto scalar_type = tyr::metadata::scalarTypeFromLeanDTypeTag(lean_obj_tag(dtype));
-    TORCH_CHECK(scalar_type.has_value(), "Unknown dtype has no constant factory support");
+    const auto scalar_type = tyr::metadata::scalarTypeFromLeanDTypeTag(dtype);
+    TORCH_CHECK(scalar_type.has_value(), "Invalid Lean DType tag: ", static_cast<unsigned>(dtype));
     const auto placement = getDevice(device);
     const auto options = torch::TensorOptions().dtype(torch::kFloat32);
     const auto check = [&](const torch::Tensor& expected, const torch::Tensor& actual) {

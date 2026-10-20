@@ -166,7 +166,7 @@ def runOnce : IO Bool := do
 
   let x ← SomeDTypeTensor.loadTensorExact #[1, 64, 1024] device
     (fixtureFile "x").toString
-  let dtype := x.1.val
+  let dtype := x.1
   let inputs : LayerNormInputs dtype device := {
     x := x.2
     residual := ← Tensor.loadTensorExact { device := device, shape := #[1, 64, 1024], dtype } (fixtureFile "residual").toString

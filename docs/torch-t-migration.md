@@ -88,9 +88,9 @@ storage from the requested spec to bootstrap pure defaults, accepts no foreign
 handle, and relies on libtorch allocation/casting. Metadata introspection and
 the C ABI are also trusted. Native device conversion now rejects oversized CUDA
 indices, unsupported MPS requests, and unrepresentable native backends instead
-of wrapping or mislabeling them. Unsupported dtype metadata retains its native
-scalar-type name, so distinct types such as complex64 and complex128 cannot
-collapse to the same `Unknown` value. Pure convenience APIs retain Lean's panic/fallback
+of wrapping or mislabeling them. Every native scalar type has its own `DType`
+constructor, and native code reports it by constructor tag, so distinct types
+such as complex64 and complex128 cannot collapse. Pure convenience APIs retain Lean's panic/fallback
 behavior; callers requiring recoverable rejection should use `Except` or IO
 APIs. Native allocation and execution retain their existing LibTorch error
 behavior. This change is not a proof of native code or GPU execution.
@@ -198,7 +198,8 @@ checkpoint; the follow-up above completes the coordinated source/API migration.
 This cleanup does not change the representation.
 New generic helpers should preserve `σ : StaticSpec` or explicit dtype/device
 parameters. Replacing `STensor` text alone does not recover dtype relationships:
-two `.Unknown "dynamic"` claims can describe different native dtypes. Where a
+two claims through the former `.Unknown "dynamic"` wildcard could describe
+different native dtypes. Where a
 model requires one shared dtype, carry it as a parameter or package it once
 existentially at the loading boundary, while retaining deliberate mixed-dtype
 weights and checkpoint storage.

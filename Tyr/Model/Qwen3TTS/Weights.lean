@@ -26,7 +26,7 @@ open torch.Model (reqGradFalse)
 private def loadTensorShardedTarget (modelDir : String) (name : String) (s : Shape) :
     IO (Tensor { shape := s, dtype := dtype.val, device }) := do
   let packed ← safetensors.loadTensorShardedExact modelDir name s device
-  match packed.atDType? dtype.toExactDType with
+  match packed.atDType? dtype.val with
   | .ok tensor => pure tensor
   | .error message => throw <| IO.userError s!"Qwen3TTS tensor '{name}': {message}"
 
@@ -36,7 +36,7 @@ private def loadOptionalTensorShardedTarget (modelDir : String) (name : String) 
   match ← safetensors.loadOptionalTensorShardedExact modelDir name s device with
   | none => pure none
   | some packed =>
-    match packed.atDType? dtype.toExactDType with
+    match packed.atDType? dtype.val with
     | .ok tensor => pure (some tensor)
     | .error message => throw <| IO.userError s!"Qwen3TTS tensor '{name}': {message}"
 
@@ -374,9 +374,9 @@ def loadSharded
   let codecEmbedding ← safetensors.loadTensorShardedExact modelDir
     "talker.model.codec_embedding.weight"
     #[cfg.talkerConfig.vocabSize, cfg.talkerConfig.hiddenSize] targetDevice
-  let talkerFloating ← IO.ofExcept (DType.realFloating? codecEmbedding.1.val)
+  let talkerFloating ← IO.ofExcept (DType.realFloating? codecEmbedding.1)
   let _ := talkerFloating.down
-  let talkerDType := RealFloatingDType.ofDType codecEmbedding.1.val
+  let talkerDType := RealFloatingDType.ofDType codecEmbedding.1
   let talker ← loadTalkerForConditionalGenerationSharded
     (device := targetDevice) (dtype := talkerDType) modelDir cfg.talkerConfig codecEmbedding.2
 
@@ -385,9 +385,9 @@ def loadSharded
     let firstWeight ← safetensors.loadTensorShardedExact modelDir
       "speaker_encoder.blocks.0.conv.weight"
       #[scfg.encChannels.getD 0 512, scfg.melDim, scfg.encKernelSizes.getD 0 5] targetDevice
-    let speakerFloating ← IO.ofExcept (DType.realFloating? firstWeight.1.val)
+    let speakerFloating ← IO.ofExcept (DType.realFloating? firstWeight.1)
     let _ := speakerFloating.down
-    let speakerDType := RealFloatingDType.ofDType firstWeight.1.val
+    let speakerDType := RealFloatingDType.ofDType firstWeight.1
     let speakerEncoder ← loadSpeakerEncoderSharded
       (device := targetDevice) (dtype := speakerDType) modelDir scfg
     log.onInfo "Loaded Qwen3TTS weights (real checkpoint tensors)."

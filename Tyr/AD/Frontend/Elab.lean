@@ -54,9 +54,7 @@ private unsafe def indexedVarMeta (spec : Expr) (participation : DiffParticipati
   let dtype? ← if dtypeExpr.hasFVar then pure none else do
     try
       let dtype ← evalExpr torch.DType (mkConst ``torch.DType) dtypeExpr
-      pure <| match dtype with
-        | .Unknown _ => none
-        | dtype => some dtype.canonicalName
+      pure (some dtype.canonicalName)
     catch _ => pure none
   return { participation, shape := shape?, dtype := dtype? }
 

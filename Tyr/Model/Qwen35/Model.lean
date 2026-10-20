@@ -63,11 +63,11 @@ namespace Qwen35RMSNorm
 
 def initZeroCentered (dim : UInt64) (eps : Float := 1e-6) (device : Device := .CPU) : IO (Qwen35RMSNorm (device := device) dim) := do
   IO.ofExcept (Shape.validateAllocation #[dim])
-  pure { weight := ⟨⟨.Float32, by decide⟩, (← Tensor.parameter (Tensor.zeros #[dim] (device := device)))⟩, eps }
+  pure { weight := ⟨.Float32, (← Tensor.parameter (Tensor.zeros #[dim] (device := device)))⟩, eps }
 
 def initOneCentered (dim : UInt64) (eps : Float := 1e-6) (device : Device := .CPU) : IO (Qwen35RMSNorm (device := device) dim) := do
   IO.ofExcept (Shape.validateAllocation #[dim])
-  pure { weight := ⟨⟨.Float32, by decide⟩, (← Tensor.parameter (Tensor.ones #[dim] (device := device)))⟩, eps }
+  pure { weight := ⟨.Float32, (← Tensor.parameter (Tensor.ones #[dim] (device := device)))⟩, eps }
 
 /-- HuggingFace Qwen3.5 checkpoints already store the zero-centered RMSNorm
     parameter used by the `(1 + weight)` formulation, so the raw tensor should
@@ -110,7 +110,7 @@ namespace Qwen35RMSNormGated
 
 def init (dim : UInt64) (eps : Float := 1e-6) (device : Device := .CPU) : IO (Qwen35RMSNormGated (device := device) dim) := do
   IO.ofExcept (Shape.validateAllocation #[dim])
-  pure { weight := ⟨⟨.Float32, by decide⟩, (← Tensor.parameter (Tensor.ones #[dim] (device := device)))⟩, eps }
+  pure { weight := ⟨.Float32, (← Tensor.parameter (Tensor.ones #[dim] (device := device)))⟩, eps }
 
 def forward2d {n dim : UInt64}
     (m : Qwen35RMSNormGated (device := device) dim)
@@ -213,7 +213,7 @@ def forward2d {tokens : UInt64} {routingDType : DType}
   Id.run do
     let device := hidden.device
     let mut acc : SomeDTypeTensor #[tokens, cfg.hidden_size] device :=
-      ⟨⟨.Float32, by decide⟩, Tensor.zeros #[tokens, cfg.hidden_size] (device := device)⟩
+      ⟨.Float32, Tensor.zeros #[tokens, cfg.hidden_size] (device := device)⟩
 
     for slot in [:cfg.num_experts_per_tok.toNat] do
       -- Gather ONLY the routed expert's weights per token (an embedding row
@@ -618,8 +618,8 @@ def init (cfg : Config) (device : Device := .CPU) (dtype : DType := .Float32) : 
     in_proj_a := inA
     conv1d_weight := convW
     conv1d_bias := convB
-    dt_bias := ⟨⟨.Float32, by decide⟩, dtBias⟩
-    a_log := ⟨⟨.Float32, by decide⟩, aLog⟩
+    dt_bias := ⟨.Float32, dtBias⟩
+    a_log := ⟨.Float32, aLog⟩
     norm := (← Qwen35RMSNormGated.init (device := device) cfg.linear_value_head_dim cfg.rms_norm_eps)
     out_proj := outProj
   }
@@ -722,7 +722,7 @@ def forward {batch seq : UInt64}
 
   let beta : Tensor { device := device, shape := #[batch, seq, cfg.linear_num_value_heads], dtype := dtype } := Tensor.sigmoid b
 
-  let dt : Tensor { device := device, shape := #[batch, seq, cfg.linear_num_value_heads], dtype := m.dt_bias.1.val } :=
+  let dt : Tensor { device := device, shape := #[batch, seq, cfg.linear_num_value_heads], dtype := m.dt_bias.1 } :=
     Tensor.expand (Tensor.reshapeChecked m.dt_bias.2 #[1, 1, cfg.linear_num_value_heads]) #[batch, seq, cfg.linear_num_value_heads]
   let aExp : Tensor { device := device, shape := #[batch, seq, cfg.linear_num_value_heads], dtype := .Float32 } :=
     Tensor.expand (Tensor.reshapeChecked (Tensor.exp (floatDynamic m.a_log.2)) #[1, 1, cfg.linear_num_value_heads]) #[batch, seq, cfg.linear_num_value_heads]

@@ -15,7 +15,7 @@ let _ := support.down
 ```
 Known supported combinations use the static support table. Other combinations
 allocate small temporary tensors and verify exact zero/one values.
-Unknown, quantized-without-parameters, and unsupported shell formats fail here.
+Quantized-without-parameters and unsupported shell formats fail here.
 The witness says nothing about other numerical kernels or later resource
 exhaustion. Its proof erases, so factories carry no runtime support flag. -/
 def acquireConstantSupport (dtype : DType) (device : Device) :

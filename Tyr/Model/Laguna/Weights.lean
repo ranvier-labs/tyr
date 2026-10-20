@@ -122,21 +122,21 @@ end WeightSource
 private def freezeStored {shape : Shape} (tensor : SomeDTypeTensor shape device) :
     SomeDTypeTensor shape device := ⟨tensor.1, tensor.2.detach⟩
 
-private def requireDType {shape : Shape} (dtype : ExactDType)
-    (tensor : SomeDTypeTensor shape device) : IO (Tensor ⟨shape, dtype.val, device⟩) :=
+private def requireDType {shape : Shape} (dtype : DType)
+    (tensor : SomeDTypeTensor shape device) : IO (Tensor ⟨shape, dtype, device⟩) :=
   IO.ofExcept (tensor.atDType? dtype)
 
-private def stackBank (dtype : ExactDType) (tensors : Array (ShapePackedTensor dtype.val .CPU))
+private def stackBank (dtype : DType) (tensors : Array (ShapePackedTensor dtype .CPU))
     (shape : Shape) (device : Device) : IO (SomeDTypeTensor shape device) := do
   let tensor ← IO.ofExcept (Tensor.catMany? tensors 0 shape)
   let raw ← RawTensor.convertIO shape tensor.raw device none
-  let moved ← IO.ofExcept (Tensor.ofRaw (σ := ⟨shape, dtype.val, device⟩) raw)
+  let moved ← IO.ofExcept (Tensor.ofRaw (σ := ⟨shape, dtype, device⟩) raw)
   pure ⟨dtype, moved.detach⟩
 
 /-- Load one attention block (`numHeads` is the per-layer query head count).
     `self_attn.{k,v}_scale` scalars are intentionally not loaded. -/
 private def loadAttention (src : WeightSource) (cfg : Config) (layerIdx numHeads : UInt64)
-    (device : Device) (dtype : ExactDType) : IO (LagunaAttention (device := device) cfg numHeads dtype.val) := do
+    (device : Device) (dtype : DType) : IO (LagunaAttention (device := device) cfg numHeads dtype) := do
   let p := s!"model.layers.{layerIdx}.self_attn"
   let q ← src.loadCandidates (nameCandidates s!"{p}.q_proj.weight")
     #[numHeads * cfg.head_dim, cfg.hidden_size] device
@@ -162,7 +162,7 @@ private def loadAttention (src : WeightSource) (cfg : Config) (layerIdx numHeads
 
 /-- Load the dense SwiGLU MLP of a `mlp_only_layers` layer. -/
 private def loadDenseMLP (src : WeightSource) (cfg : Config) (layerIdx : UInt64)
-    (device : Device) (dtype : ExactDType) : IO (LagunaMLP (device := device) cfg dtype.val) := do
+    (device : Device) (dtype : DType) : IO (LagunaMLP (device := device) cfg dtype) := do
   let p := s!"model.layers.{layerIdx}.mlp"
   let gate ← src.loadCandidates (nameCandidates s!"{p}.gate_proj.weight")
     #[cfg.intermediate_size, cfg.hidden_size] device
@@ -185,15 +185,15 @@ private def placeholderPackedExperts (cfg : Config) (device : Device) : LagunaPa
   -- Broadcast views keep the unused placeholders small while retaining true shapes.
   let z := qwen35.zerosDynamic #[] false device
   {
-    gatePacked := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, mi, h / 2]⟩
-    gateScale := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, mi, h / 16]⟩
-    gateGlobal := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e]⟩
-    upPacked := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, mi, h / 2]⟩
-    upScale := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, mi, h / 16]⟩
-    upGlobal := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e]⟩
-    downPacked := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, h, mi / 2]⟩
-    downScale := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e, h, mi / 16]⟩
-    downGlobal := ⟨⟨.Float32, by decide⟩, Tensor.expand z #[e]⟩
+    gatePacked := ⟨.Float32, Tensor.expand z #[e, mi, h / 2]⟩
+    gateScale := ⟨.Float32, Tensor.expand z #[e, mi, h / 16]⟩
+    gateGlobal := ⟨.Float32, Tensor.expand z #[e]⟩
+    upPacked := ⟨.Float32, Tensor.expand z #[e, mi, h / 2]⟩
+    upScale := ⟨.Float32, Tensor.expand z #[e, mi, h / 16]⟩
+    upGlobal := ⟨.Float32, Tensor.expand z #[e]⟩
+    downPacked := ⟨.Float32, Tensor.expand z #[e, h, mi / 2]⟩
+    downScale := ⟨.Float32, Tensor.expand z #[e, h, mi / 16]⟩
+    downGlobal := ⟨.Float32, Tensor.expand z #[e]⟩
   }
 
 /-- Load and stack the per-expert NVFP4-packed banks of one MoE layer
@@ -218,24 +218,24 @@ private def loadPackedExpertBanks (src : WeightSource) (p : String) (cfg : Confi
     let ep := s!"{p}.experts.{i}"
     -- gate_proj / up_proj: packed [mi, h/2], scales [mi, h/16], global scalar.
     let gp ← src.load s!"{ep}.gate_proj.weight_packed" #[mi, h / 2] Device.CPU
-    let gp ← requireDType ⟨.UInt8, by decide⟩ gp
+    let gp ← requireDType .UInt8 gp
     let gs ← src.load s!"{ep}.gate_proj.weight_scale" #[mi, h / 16] Device.CPU
-    let gs ← requireDType ⟨.Float8E4M3FN, by decide⟩ gs
+    let gs ← requireDType .Float8E4M3FN gs
     let gg ← src.loadGlobal s!"{ep}.gate_proj.weight_global_scale"
-    let gg ← requireDType ⟨.Float32, by decide⟩ gg
+    let gg ← requireDType .Float32 gg
     let up ← src.load s!"{ep}.up_proj.weight_packed" #[mi, h / 2] Device.CPU
-    let up ← requireDType ⟨.UInt8, by decide⟩ up
+    let up ← requireDType .UInt8 up
     let us ← src.load s!"{ep}.up_proj.weight_scale" #[mi, h / 16] Device.CPU
-    let us ← requireDType ⟨.Float8E4M3FN, by decide⟩ us
+    let us ← requireDType .Float8E4M3FN us
     let ug ← src.loadGlobal s!"{ep}.up_proj.weight_global_scale"
-    let ug ← requireDType ⟨.Float32, by decide⟩ ug
+    let ug ← requireDType .Float32 ug
     -- down_proj: packed [h, mi/2], scales [h, mi/16], global scalar.
     let dp ← src.load s!"{ep}.down_proj.weight_packed" #[h, mi / 2] Device.CPU
-    let dp ← requireDType ⟨.UInt8, by decide⟩ dp
+    let dp ← requireDType .UInt8 dp
     let ds ← src.load s!"{ep}.down_proj.weight_scale" #[h, mi / 16] Device.CPU
-    let ds ← requireDType ⟨.Float8E4M3FN, by decide⟩ ds
+    let ds ← requireDType .Float8E4M3FN ds
     let dg ← src.loadGlobal s!"{ep}.down_proj.weight_global_scale"
-    let dg ← requireDType ⟨.Float32, by decide⟩ dg
+    let dg ← requireDType .Float32 dg
     gateP := gateP.push ((Tensor.reshapeChecked gp #[1, mi, h / 2]).packShape)
     gateS := gateS.push ((Tensor.reshapeChecked gs #[1, mi, h / 16]).packShape)
     gateG := gateG.push gg.packShape
@@ -246,22 +246,22 @@ private def loadPackedExpertBanks (src : WeightSource) (p : String) (cfg : Confi
     downS := downS.push ((Tensor.reshapeChecked ds #[1, h, mi / 16]).packShape)
     downG := downG.push dg.packShape
   pure {
-    gatePacked := (← stackBank ⟨.UInt8, by decide⟩ gateP #[e, mi, h / 2] device)
-    gateScale := (← stackBank ⟨.Float8E4M3FN, by decide⟩ gateS #[e, mi, h / 16] device)
-    gateGlobal := (← stackBank ⟨.Float32, by decide⟩ gateG #[e] device)
-    upPacked := (← stackBank ⟨.UInt8, by decide⟩ upP #[e, mi, h / 2] device)
-    upScale := (← stackBank ⟨.Float8E4M3FN, by decide⟩ upS #[e, mi, h / 16] device)
-    upGlobal := (← stackBank ⟨.Float32, by decide⟩ upG #[e] device)
-    downPacked := (← stackBank ⟨.UInt8, by decide⟩ downP #[e, h, mi / 2] device)
-    downScale := (← stackBank ⟨.Float8E4M3FN, by decide⟩ downS #[e, h, mi / 16] device)
-    downGlobal := (← stackBank ⟨.Float32, by decide⟩ downG #[e] device)
+    gatePacked := (← stackBank .UInt8 gateP #[e, mi, h / 2] device)
+    gateScale := (← stackBank .Float8E4M3FN gateS #[e, mi, h / 16] device)
+    gateGlobal := (← stackBank .Float32 gateG #[e] device)
+    upPacked := (← stackBank .UInt8 upP #[e, mi, h / 2] device)
+    upScale := (← stackBank .Float8E4M3FN upS #[e, mi, h / 16] device)
+    upGlobal := (← stackBank .Float32 upG #[e] device)
+    downPacked := (← stackBank .UInt8 downP #[e, h, mi / 2] device)
+    downScale := (← stackBank .Float8E4M3FN downS #[e, h, mi / 16] device)
+    downGlobal := (← stackBank .Float32 downG #[e] device)
   }
 
 /-- Load one sparse MoE block, auto-detecting the expert serialization:
     fused dense BF16 banks (layout A) when `mlp.experts.gate_up_proj`
     resolves, otherwise per-expert NVFP4-packed tensors (layout B). -/
 private def loadSparseMoe (src : WeightSource) (cfg : Config) (layerIdx : UInt64)
-    (device : Device) (dtype : ExactDType) : IO (LagunaSparseMoeBlock (device := device) cfg dtype.val) := do
+    (device : Device) (dtype : DType) : IO (LagunaSparseMoeBlock (device := device) cfg dtype) := do
   let p := s!"model.layers.{layerIdx}.mlp"
   let e := cfg.num_experts
   let mi := cfg.moe_intermediate_size
@@ -290,9 +290,9 @@ private def loadSparseMoe (src : WeightSource) (cfg : Config) (layerIdx : UInt64
       let gu ← requireDType dtype gu
       -- Layout A: fused dense banks; dim-1 first half gate, second half up.
       let down ← src.loadCandidates (nameCandidates s!"{p}.experts.down_proj") #[e, h, mi] device
-      let gate3 : Tensor { device := device, dtype := dtype.val, shape := #[e, mi, h] } := Tensor.reshapeChecked (sliceTyped gu 1 0 mi) #[e, mi, h]
-      let up3 : Tensor { device := device, dtype := dtype.val, shape := #[e, mi, h] } := Tensor.reshapeChecked (sliceTyped gu 1 mi mi) #[e, mi, h]
-      let dense : LagunaDenseExperts (device := device) cfg dtype.val := {
+      let gate3 : Tensor { device := device, dtype := dtype, shape := #[e, mi, h] } := Tensor.reshapeChecked (sliceTyped gu 1 0 mi) #[e, mi, h]
+      let up3 : Tensor { device := device, dtype := dtype, shape := #[e, mi, h] } := Tensor.reshapeChecked (sliceTyped gu 1 mi mi) #[e, mi, h]
+      let dense : LagunaDenseExperts (device := device) cfg dtype := {
         gateProj := reqGradFalse gate3
         upProj := reqGradFalse up3
         downProj := reqGradFalse (← requireDType dtype down)
@@ -315,7 +315,7 @@ private def loadSparseMoe (src : WeightSource) (cfg : Config) (layerIdx : UInt64
 /-- Load one decoder layer: exactly one attention variant (by
     `Config.layerType`) and one FFN variant (by `Config.isDenseMlpLayer`). -/
 private def loadLayer (src : WeightSource) (cfg : Config) (layerIdx : UInt64)
-    (device : Device) (dtype : ExactDType) : IO (LagunaLayer (device := device) cfg dtype.val) := do
+    (device : Device) (dtype : DType) : IO (LagunaLayer (device := device) cfg dtype) := do
   let p := s!"model.layers.{layerIdx}"
   let inputNorm ← src.loadCandidates (nameCandidates s!"{p}.input_layernorm.weight")
     #[cfg.hidden_size] device
@@ -366,8 +366,8 @@ private def loadCore (src : WeightSource) (desc : String) (cfg : Config)
     #[cfg.vocab_size, cfg.hidden_size] device
 
   let dtype := embedTokens.1
-  let floating ← IO.ofExcept (DType.realFloating? dtype.val)
-  let mut layers : Array (LagunaLayer (device := device) cfg dtype.val) := Array.mkEmpty cfg.num_hidden_layers.toNat
+  let floating ← IO.ofExcept (DType.realFloating? dtype)
+  let mut layers : Array (LagunaLayer (device := device) cfg dtype) := Array.mkEmpty cfg.num_hidden_layers.toNat
   for i in [:cfg.num_hidden_layers.toNat] do
     let layer ← loadLayer src cfg i.toUInt64 device dtype
     layers := layers.push layer
@@ -376,7 +376,7 @@ private def loadCore (src : WeightSource) (desc : String) (cfg : Config)
 
   let normW ← src.loadCandidates (nameCandidates "model.norm.weight") #[cfg.hidden_size] device
 
-  let model : LagunaModel (device := device) cfg dtype.val := {
+  let model : LagunaModel (device := device) cfg dtype := {
     embed_tokens := reqGradFalse embedTokens.2
     layers := layers
     norm := freezeStored normW
@@ -392,7 +392,7 @@ private def loadCore (src : WeightSource) (desc : String) (cfg : Config)
       pure (reqGradFalse model.embed_tokens, true)
 
   log.onInfo "Loaded LagunaForCausalLM weights."
-  pure ⟨⟨dtype.val, floating.down.valid⟩,
+  pure ⟨⟨dtype, floating.down.valid⟩,
     { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }⟩
 
 namespace LagunaForCausalLM

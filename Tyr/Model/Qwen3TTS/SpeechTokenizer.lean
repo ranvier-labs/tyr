@@ -251,8 +251,8 @@ end SpeechTokenizer12HzConfig
 
 /-! ## Decoder parameters -/
 
-private def loadFrozen {dtype : ExactDType} (path : String) (name : String) (s : Shape)
-    : IO (Tensor { shape := s, dtype := dtype.val, device := device }) := do
+private def loadFrozen {dtype : DType} (path : String) (name : String) (s : Shape)
+    : IO (Tensor { shape := s, dtype := dtype, device := device }) := do
   let packed ← safetensors.loadTensorExact path name s device
   match packed.atDType? dtype with
   | .ok t => pure (Tensor.detach t)
@@ -281,8 +281,8 @@ private def clampMin1d {n : UInt64} {dtype : DType}
   Tensor.maximum x minT
 
 structure QuantizerCodebook (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
-  clusterUsage : Tensor { shape := #[2048], dtype := dtypes.usage.val, device := device }
-  embeddingSum : Tensor { shape := #[2048, 256], dtype := dtypes.sum.val, device := device }
+  clusterUsage : Tensor { shape := #[2048], dtype := dtypes.usage, device := device }
+  embeddingSum : Tensor { shape := #[2048, 256], dtype := dtypes.sum, device := device }
   deriving TensorStruct
 
 structure RVQDecode (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
@@ -386,7 +386,7 @@ private def loadCodebook (weightsPath : String) (namePrefix : String) : IO (Quan
   pure { clusterUsage, embeddingSum }
 
 private def loadRVQ (weightsPath : String) (namePrefix : String) (nCodebooks : Nat) : IO (RVQDecode (device := device) (dtypes := dtypes)) := do
-  let outputProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.output_proj.weight" #[512, 256, 1]
+  let outputProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.output_proj.weight" #[512, 256, 1]
   let mut codebooks : Array (QuantizerCodebook (device := device) (dtypes := dtypes)) := #[]
   for i in [:nCodebooks] do
     let cb ← loadCodebook weightsPath s!"{namePrefix}.vq.layers.{i}._codebook"
@@ -395,17 +395,17 @@ private def loadRVQ (weightsPath : String) (namePrefix : String) (nCodebooks : N
 
 private def loadTransformerLayer (weightsPath : String) (i : Nat) : IO (DecoderTransformerLayer (device := device) (dtypes := dtypes)) := do
   let p := s!"decoder.pre_transformer.layers.{i}"
-  let inputLayernormWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.input_layernorm.weight" #[512]
-  let qProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.self_attn.q_proj.weight" #[1024, 512]
-  let kProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.self_attn.k_proj.weight" #[1024, 512]
-  let vProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.self_attn.v_proj.weight" #[1024, 512]
-  let oProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.self_attn.o_proj.weight" #[512, 1024]
-  let selfAttnLayerScale ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.self_attn_layer_scale.scale" #[512]
-  let postAttentionLayernormWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.post_attention_layernorm.weight" #[512]
-  let gateProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.mlp.gate_proj.weight" #[1024, 512]
-  let upProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.mlp.up_proj.weight" #[1024, 512]
-  let downProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.mlp.down_proj.weight" #[512, 1024]
-  let mlpLayerScale ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.mlp_layer_scale.scale" #[512]
+  let inputLayernormWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.input_layernorm.weight" #[512]
+  let qProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.self_attn.q_proj.weight" #[1024, 512]
+  let kProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.self_attn.k_proj.weight" #[1024, 512]
+  let vProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.self_attn.v_proj.weight" #[1024, 512]
+  let oProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.self_attn.o_proj.weight" #[512, 1024]
+  let selfAttnLayerScale ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.self_attn_layer_scale.scale" #[512]
+  let postAttentionLayernormWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.post_attention_layernorm.weight" #[512]
+  let gateProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.mlp.gate_proj.weight" #[1024, 512]
+  let upProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.mlp.up_proj.weight" #[1024, 512]
+  let downProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.mlp.down_proj.weight" #[512, 1024]
+  let mlpLayerScale ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.mlp_layer_scale.scale" #[512]
   pure {
     inputLayernormWeight
     qProj
@@ -421,15 +421,15 @@ private def loadTransformerLayer (weightsPath : String) (i : Nat) : IO (DecoderT
   }
 
 private def loadUpsampleConvNeXt (weightsPath : String) (namePrefix : String) : IO (UpsampleConvNeXtBlock (device := device) (dtypes := dtypes)) := do
-  let dwconvWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.dwconv.conv.weight" #[1024, 1, 7]
-  let dwconvBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.dwconv.conv.bias" #[1024]
-  let normWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.norm.weight" #[1024]
-  let normBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.norm.bias" #[1024]
-  let pwconv1Weight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.pwconv1.weight" #[4096, 1024]
-  let pwconv1Bias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.pwconv1.bias" #[4096]
-  let pwconv2Weight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.pwconv2.weight" #[1024, 4096]
-  let pwconv2Bias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.pwconv2.bias" #[1024]
-  let gamma ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.gamma" #[1024]
+  let dwconvWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.dwconv.conv.weight" #[1024, 1, 7]
+  let dwconvBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.dwconv.conv.bias" #[1024]
+  let normWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.norm.weight" #[1024]
+  let normBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.norm.bias" #[1024]
+  let pwconv1Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.pwconv1.weight" #[4096, 1024]
+  let pwconv1Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.pwconv1.bias" #[4096]
+  let pwconv2Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.pwconv2.weight" #[1024, 4096]
+  let pwconv2Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.pwconv2.bias" #[1024]
+  let gamma ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.gamma" #[1024]
   pure {
     dwconvWeight
     dwconvBias
@@ -444,21 +444,21 @@ private def loadUpsampleConvNeXt (weightsPath : String) (namePrefix : String) : 
 
 private def loadUpsampleStage (weightsPath : String) (idx : Nat) : IO (UpsampleStage (device := device) (dtypes := dtypes)) := do
   let p := s!"decoder.upsample.{idx}"
-  let transConvWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.0.conv.weight" #[1024, 1024, 2]
-  let transConvBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.0.conv.bias" #[1024]
+  let transConvWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.0.conv.weight" #[1024, 1024, 2]
+  let transConvBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.0.conv.bias" #[1024]
   let convNeXt ← loadUpsampleConvNeXt weightsPath s!"{p}.1"
   pure { transConvWeight, transConvBias, convNeXt }
 
 private def loadResidualUnit (weightsPath : String) (namePrefix : String) (dim : UInt64) (dilation : UInt64)
     : IO (DecoderResidualUnit (device := device) (dtypes := dtypes) dim) := do
-  let act1Alpha ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.act1.alpha" #[dim]
-  let act1Beta ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.act1.beta" #[dim]
-  let conv1Weight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.conv1.conv.weight" #[dim, dim, 7]
-  let conv1Bias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.conv1.conv.bias" #[dim]
-  let act2Alpha ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.act2.alpha" #[dim]
-  let act2Beta ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.act2.beta" #[dim]
-  let conv2Weight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.conv2.conv.weight" #[dim, dim, 1]
-  let conv2Bias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{namePrefix}.conv2.conv.bias" #[dim]
+  let act1Alpha ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act1.alpha" #[dim]
+  let act1Beta ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act1.beta" #[dim]
+  let conv1Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv1.conv.weight" #[dim, dim, 7]
+  let conv1Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv1.conv.bias" #[dim]
+  let act2Alpha ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act2.alpha" #[dim]
+  let act2Beta ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act2.beta" #[dim]
+  let conv2Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv2.conv.weight" #[dim, dim, 1]
+  let conv2Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv2.conv.bias" #[dim]
   pure {
     conv1Dilation := dilation
     act1Alpha
@@ -477,10 +477,10 @@ private def loadDecoderBlock
     (inDim outDim upRate : UInt64)
     : IO (DecoderBlock (device := device) (dtypes := dtypes) inDim outDim upRate) := do
   let p := s!"decoder.decoder.{idx}.block"
-  let snakeAlpha ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.0.alpha" #[inDim]
-  let snakeBeta ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.0.beta" #[inDim]
-  let transWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.1.conv.weight" #[inDim, outDim, 2 * upRate]
-  let transBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath s!"{p}.1.conv.bias" #[outDim]
+  let snakeAlpha ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.0.alpha" #[inDim]
+  let snakeBeta ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.0.beta" #[inDim]
+  let transWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.1.conv.weight" #[inDim, outDim, 2 * upRate]
+  let transBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{p}.1.conv.bias" #[outDim]
   let res1 ← loadResidualUnit weightsPath s!"{p}.2" outDim 1
   let res2 ← loadResidualUnit weightsPath s!"{p}.3" outDim 3
   let res3 ← loadResidualUnit weightsPath s!"{p}.4" outDim 9
@@ -498,36 +498,36 @@ def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : 
   let rvqFirst ← loadRVQ weightsPath "decoder.quantizer.rvq_first" 1
   let rvqRest ← loadRVQ weightsPath "decoder.quantizer.rvq_rest" 15
 
-  let preConvWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_conv.conv.weight" #[1024, 512, 3]
-  let preConvBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_conv.conv.bias" #[1024]
+  let preConvWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_conv.conv.weight" #[1024, 512, 3]
+  let preConvBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_conv.conv.bias" #[1024]
 
-  let preTransformerInputProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_transformer.input_proj.weight" #[512, 1024]
-  let preTransformerInputBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_transformer.input_proj.bias" #[512]
+  let preTransformerInputProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_transformer.input_proj.weight" #[512, 1024]
+  let preTransformerInputBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_transformer.input_proj.bias" #[512]
 
   let mut preTransformerLayers : Array (DecoderTransformerLayer (device := device) (dtypes := dtypes)) := #[]
   for i in [:8] do
     let layer ← loadTransformerLayer weightsPath i
     preTransformerLayers := preTransformerLayers.push layer
 
-  let preTransformerNormWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_transformer.norm.weight" #[512]
-  let preTransformerOutputProj ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_transformer.output_proj.weight" #[1024, 512]
-  let preTransformerOutputBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.pre_transformer.output_proj.bias" #[1024]
+  let preTransformerNormWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_transformer.norm.weight" #[512]
+  let preTransformerOutputProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_transformer.output_proj.weight" #[1024, 512]
+  let preTransformerOutputBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.pre_transformer.output_proj.bias" #[1024]
 
   let upsample0 ← loadUpsampleStage weightsPath 0
   let upsample1 ← loadUpsampleStage weightsPath 1
 
-  let decoderConv0Weight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.0.conv.weight" #[1536, 1024, 7]
-  let decoderConv0Bias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.0.conv.bias" #[1536]
+  let decoderConv0Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.0.conv.weight" #[1536, 1024, 7]
+  let decoderConv0Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.0.conv.bias" #[1536]
 
   let decoderBlock1 ← loadDecoderBlock weightsPath 1 1536 768 8
   let decoderBlock2 ← loadDecoderBlock weightsPath 2 768 384 5
   let decoderBlock3 ← loadDecoderBlock weightsPath 3 384 192 4
   let decoderBlock4 ← loadDecoderBlock weightsPath 4 192 96 3
 
-  let finalSnakeAlpha ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.5.alpha" #[96]
-  let finalSnakeBeta ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.5.beta" #[96]
-  let finalConvWeight ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.6.conv.weight" #[1, 96, 7]
-  let finalConvBias ← loadFrozen (dtype := dtypes.compute.toExactDType) weightsPath "decoder.decoder.6.conv.bias" #[1]
+  let finalSnakeAlpha ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.5.alpha" #[96]
+  let finalSnakeBeta ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.5.beta" #[96]
+  let finalConvWeight ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.6.conv.weight" #[1, 96, 7]
+  let finalConvBias ← loadFrozen (dtype := dtypes.compute.val) weightsPath "decoder.decoder.6.conv.bias" #[1]
 
   let dec : (SpeechTokenizer12HzDecoder (device := device) (dtypes := dtypes)) := {
     rvqFirst
@@ -560,8 +560,8 @@ def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : 
 private def decodeCodebook {batch frames : UInt64}
     (cb : (QuantizerCodebook (device := device) (dtypes := dtypes)))
     (codes : Tensor { shape := #[batch, frames], dtype := .Int64, device := device }) : Tensor { shape := #[batch, 256, frames], dtype := dtypes.compute.val, device := device } :=
-  let usage : Tensor { shape := #[2048], dtype := dtypes.usage.val, device := device } := clampMin1d cb.clusterUsage 1e-5
-  let usage2d : Tensor { shape := #[2048, 256], dtype := dtypes.usage.val, device := device } := Tensor.expand (Tensor.reshapeChecked usage #[2048, 1]) #[2048, 256]
+  let usage : Tensor { shape := #[2048], dtype := dtypes.usage, device := device } := clampMin1d cb.clusterUsage 1e-5
+  let usage2d : Tensor { shape := #[2048, 256], dtype := dtypes.usage, device := device } := Tensor.expand (Tensor.reshapeChecked usage #[2048, 1]) #[2048, 256]
   let embedding : Tensor { shape := #[2048, 256], dtype := dtypes.compute.val, device := device } := dtypes.divideCodebook cb.embeddingSum usage2d
   let q : Tensor { shape := #[batch, frames, 256], dtype := dtypes.compute.val, device := device } := Tensor.embedding codes embedding
   Tensor.reshapeChecked (Tensor.transpose q 1 2) #[batch, 256, frames]

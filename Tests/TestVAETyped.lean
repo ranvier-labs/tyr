@@ -15,7 +15,7 @@ example (_conv : Conv2dParams (device := .CPU) 1 1 3 1 .Float32)
   trivial
 
 private abbrev mixedStatistics : AutoEncoderDTypes := {
-  compute := ⟨.Float32, by decide⟩, mean := ⟨.BFloat16, by decide⟩,
+  compute := ⟨.Float32, by decide⟩, mean := .BFloat16,
   variance := ⟨.Float32, by decide⟩, scaled := .Float32,
   scalePromotion := ⟨rfl⟩, offsetPromotion := ⟨rfl⟩ }
 

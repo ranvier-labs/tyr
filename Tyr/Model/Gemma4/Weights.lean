@@ -14,7 +14,7 @@ import Tyr.Model.Gemma4.Model
 
 namespace torch.gemma4
 
-variable {device : Device} {dtype : ExactDType}
+variable {device : Device} {dtype : DType}
 
 open torch.Log
 open torch.Model (reqGradFalse)
@@ -73,8 +73,8 @@ private def tryLoadParameter (path : String) (name : String) (s : Shape) : IO (O
 private def freezeStored {shape : Shape} (tensor : SomeDTypeTensor shape device) :
     SomeDTypeTensor shape device := ⟨tensor.1, tensor.2.detach⟩
 
-private def requireDType {shape : Shape} (dtype : ExactDType)
-    (tensor : SomeDTypeTensor shape device) : IO (Tensor ⟨shape, dtype.val, device⟩) :=
+private def requireDType {shape : Shape} (dtype : DType)
+    (tensor : SomeDTypeTensor shape device) : IO (Tensor ⟨shape, dtype, device⟩) :=
   IO.ofExcept (tensor.atDType? dtype)
 
 private def pad1dTo {srcDim dstDim : UInt64} {dt : DType}
@@ -161,7 +161,7 @@ private def layerKVProjDim (cfg : Config) (layerType : LayerType) : UInt64 :=
   layerNumKVHeads cfg layerType * layerHeadDim cfg layerType
 
 private def loadAttentionSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4Attention (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4Attention (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}.self_attn"
   let layerType := Config.layerTypeAt cfg layerIdx
   let headDim := layerHeadDim cfg layerType
@@ -182,9 +182,9 @@ private def loadAttentionSharded (modelDir : String) (cfg : Config) (layerIdx : 
       (Config.maxKVProjDim cfg) cfg.hidden_size
   let vProj ←
     if cfg.attention_k_eq_v && layerType == .fullAttention then
-      let support ← dtype.val.acquireConstantSupport device
+      let support ← dtype.acquireConstantSupport device
       let _ := support.down
-      pure ⟨dtype, Tensor.zerosFor ⟨#[Config.maxKVProjDim cfg, cfg.hidden_size], dtype.val, device⟩⟩
+      pure ⟨dtype, Tensor.zerosFor ⟨#[Config.maxKVProjDim cfg, cfg.hidden_size], dtype, device⟩⟩
     else
       loadPadded2DSharded
         modelDir
@@ -211,7 +211,7 @@ private def loadAttentionSharded (modelDir : String) (cfg : Config) (layerIdx : 
   }
 
 private def loadAttention (path : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4Attention (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4Attention (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}.self_attn"
   let layerType := Config.layerTypeAt cfg layerIdx
   let headDim := layerHeadDim cfg layerType
@@ -232,9 +232,9 @@ private def loadAttention (path : String) (cfg : Config) (layerIdx : UInt64)
       (Config.maxKVProjDim cfg) cfg.hidden_size
   let vProj ←
     if cfg.attention_k_eq_v && layerType == .fullAttention then
-      let support ← dtype.val.acquireConstantSupport device
+      let support ← dtype.acquireConstantSupport device
       let _ := support.down
-      pure ⟨dtype, Tensor.zerosFor ⟨#[Config.maxKVProjDim cfg, cfg.hidden_size], dtype.val, device⟩⟩
+      pure ⟨dtype, Tensor.zerosFor ⟨#[Config.maxKVProjDim cfg, cfg.hidden_size], dtype, device⟩⟩
     else
       loadPadded2D
         path
@@ -261,7 +261,7 @@ private def loadAttention (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadDenseMLPSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4MLP (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4MLP (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}.mlp"
   let inter := Config.layerIntermediateSize cfg layerIdx
   let targetInter := Config.maxIntermediateSize cfg
@@ -290,7 +290,7 @@ private def loadDenseMLPSharded (modelDir : String) (cfg : Config) (layerIdx : U
   }
 
 private def loadDenseMLP (path : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4MLP (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4MLP (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}.mlp"
   let inter := Config.layerIntermediateSize cfg layerIdx
   let targetInter := Config.maxIntermediateSize cfg
@@ -319,7 +319,7 @@ private def loadDenseMLP (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadPerLayerInputBlockSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4PerLayerInputBlock (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4PerLayerInputBlock (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let gate ← loadParameterSharded modelDir s!"{p}.per_layer_input_gate" #[cfg.hidden_size_per_layer_input, cfg.hidden_size]
   let proj ← loadParameterSharded modelDir s!"{p}.per_layer_projection" #[cfg.hidden_size, cfg.hidden_size_per_layer_input]
@@ -331,7 +331,7 @@ private def loadPerLayerInputBlockSharded (modelDir : String) (cfg : Config) (la
   }
 
 private def loadPerLayerInputBlock (path : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4PerLayerInputBlock (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4PerLayerInputBlock (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let gate ← loadParameter path s!"{p}.per_layer_input_gate" #[cfg.hidden_size_per_layer_input, cfg.hidden_size]
   let proj ← loadParameter path s!"{p}.per_layer_projection" #[cfg.hidden_size, cfg.hidden_size_per_layer_input]
@@ -343,7 +343,7 @@ private def loadPerLayerInputBlock (path : String) (cfg : Config) (layerIdx : UI
   }
 
 private def loadMoeBranchSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4MoeBranch (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4MoeBranch (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let routerProj ← loadParameterSharded modelDir s!"{p}.router.proj" #[cfg.num_experts, cfg.hidden_size]
   let routerScale ← loadParameterSharded modelDir s!"{p}.router.scale" #[cfg.hidden_size]
@@ -377,7 +377,7 @@ private def loadMoeBranchSharded (modelDir : String) (cfg : Config) (layerIdx : 
   }
 
 private def loadMoeBranch (path : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4MoeBranch (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4MoeBranch (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let routerProj ← loadParameter path s!"{p}.router.proj" #[cfg.num_experts, cfg.hidden_size]
   let routerScale ← loadParameter path s!"{p}.router.scale" #[cfg.hidden_size]
@@ -411,7 +411,7 @@ private def loadMoeBranch (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadLayerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4Layer (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4Layer (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let layerType := Config.layerTypeAt cfg layerIdx
   let selfAttn ← loadAttentionSharded modelDir cfg layerIdx
@@ -446,7 +446,7 @@ private def loadLayerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt
   }
 
 private def loadLayer (path : String) (cfg : Config) (layerIdx : UInt64)
-    : IO (Gemma4Layer (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4Layer (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.language_model.layers.{layerIdx}"
   let layerType := Config.layerTypeAt cfg layerIdx
   let selfAttn ← loadAttention path cfg layerIdx
@@ -494,7 +494,7 @@ def loadSharded (modelDir : String) (cfg : Config := Config.gemma4_E4B)
       "model.language_model.embed_tokens"
       #[cfg.vocab_size, cfg.hidden_size]
   let dtype := embedTokens.1
-  let floating ← IO.ofExcept dtype.val.realFloating?
+  let floating ← IO.ofExcept dtype.realFloating?
   let _ := floating.down
 
   let embedTokensPerLayer ←
@@ -526,7 +526,7 @@ def loadSharded (modelDir : String) (cfg : Config := Config.gemma4_E4B)
     else
       pure none
 
-  let mut layers : Array (Gemma4Layer (dtype := dtype.val) (device := device) cfg) := #[]
+  let mut layers : Array (Gemma4Layer (dtype := dtype) (device := device) cfg) := #[]
   for i in [:cfg.num_hidden_layers.toNat] do
     let layer ← loadLayerSharded modelDir cfg i.toUInt64
     layers := layers.push layer
@@ -535,7 +535,7 @@ def loadSharded (modelDir : String) (cfg : Config := Config.gemma4_E4B)
 
   let norm ← loadRMSNormSharded modelDir "model.language_model.norm" cfg.hidden_size cfg.hidden_size cfg.rms_norm_eps
 
-  let model : Gemma4Model (dtype := dtype.val) (device := device) cfg := {
+  let model : Gemma4Model (dtype := dtype) (device := device) cfg := {
     embed_tokens := reqGradFalse (← requireDType dtype embedTokens)
     embed_tokens_per_layer := (← embedTokensPerLayer.mapM fun value => do pure (reqGradFalse (← requireDType dtype value)))
     per_layer_model_projection := (← perLayerModelProjection.mapM fun value => do pure (reqGradFalse (← requireDType dtype value)))
@@ -555,7 +555,7 @@ def loadSharded (modelDir : String) (cfg : Config := Config.gemma4_E4B)
         throw <| IO.userError "lm_head not found and tie_word_embeddings=false"
 
   log.onInfo "Loaded Gemma4ForCausalLM (device := device) weights."
-  pure ⟨RealFloatingDType.ofDType dtype.val, {
+  pure ⟨RealFloatingDType.ofDType dtype, {
     model := model
     lmHead := lmHead
     tieWordEmbeddings := cfg.tie_word_embeddings
@@ -573,7 +573,7 @@ def load (path : String) (cfg : Config := Config.gemma4_E4B)
       "model.language_model.embed_tokens"
       #[cfg.vocab_size, cfg.hidden_size]
   let dtype := embedTokens.1
-  let floating ← IO.ofExcept dtype.val.realFloating?
+  let floating ← IO.ofExcept dtype.realFloating?
   let _ := floating.down
 
   let embedTokensPerLayer ←
@@ -605,7 +605,7 @@ def load (path : String) (cfg : Config := Config.gemma4_E4B)
     else
       pure none
 
-  let mut layers : Array (Gemma4Layer (dtype := dtype.val) (device := device) cfg) := #[]
+  let mut layers : Array (Gemma4Layer (dtype := dtype) (device := device) cfg) := #[]
   for i in [:cfg.num_hidden_layers.toNat] do
     let layer ← loadLayer path cfg i.toUInt64
     layers := layers.push layer
@@ -614,7 +614,7 @@ def load (path : String) (cfg : Config := Config.gemma4_E4B)
 
   let norm ← loadRMSNorm path "model.language_model.norm" cfg.hidden_size cfg.hidden_size cfg.rms_norm_eps
 
-  let model : Gemma4Model (dtype := dtype.val) (device := device) cfg := {
+  let model : Gemma4Model (dtype := dtype) (device := device) cfg := {
     embed_tokens := reqGradFalse (← requireDType dtype embedTokens)
     embed_tokens_per_layer := (← embedTokensPerLayer.mapM fun value => do pure (reqGradFalse (← requireDType dtype value)))
     per_layer_model_projection := (← perLayerModelProjection.mapM fun value => do pure (reqGradFalse (← requireDType dtype value)))
@@ -634,7 +634,7 @@ def load (path : String) (cfg : Config := Config.gemma4_E4B)
         throw <| IO.userError "lm_head not found and tie_word_embeddings=false"
 
   log.onInfo "Loaded Gemma4ForCausalLM (device := device) weights."
-  pure ⟨RealFloatingDType.ofDType dtype.val, {
+  pure ⟨RealFloatingDType.ofDType dtype, {
     model := model
     lmHead := lmHead
     tieWordEmbeddings := cfg.tie_word_embeddings

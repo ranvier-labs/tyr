@@ -168,17 +168,17 @@ def forward {patchRows patchCols : UInt64}
     Tensor.reshapeChecked patchGrid #[tokens, VisionConfig.patchDim cfg.vision_config]
   let flat := Tensor.mulScalar (Tensor.addScalar flat (-0.5)) 2.0
   let hidden : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := dtype } := m.input_proj.forward2d flat
-  let xTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1.val } :=
+  let xTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } :=
     Tensor.reshapeChecked (sliceTyped m.position_embedding_table.2 0 0 1)
       #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
-  let yTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1.val } :=
+  let yTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } :=
     Tensor.reshapeChecked (sliceTyped m.position_embedding_table.2 0 1 1)
       #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
   let (xIdsCpu, yIdsCpu) := positionIds patchRows patchCols
   let xIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := xIdsCpu.to hidden.device
   let yIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := yIdsCpu.to hidden.device
-  let xPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1.val } := Tensor.embedding1d xIds xTable
-  let yPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1.val } := Tensor.embedding1d yIds yTable
+  let xPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } := Tensor.embedding1d xIds xTable
+  let yPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } := Tensor.embedding1d yIds yTable
   promotedAdd (promotedAdd hidden xPos).2 yPos
 
 end Gemma4VisionPatchEmbedder
@@ -326,9 +326,9 @@ def forward {patchRows patchCols : UInt64}
     match m.std_bias, m.std_scale with
     | some bias, some scale =>
       let nTok := (patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size)
-      let bias : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := bias.1.val } :=
+      let bias : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := bias.1 } :=
         Tensor.expand (Tensor.reshapeChecked bias.2 #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
-      let scale : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := scale.1.val } :=
+      let scale : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := scale.1 } :=
         Tensor.expand (Tensor.reshapeChecked scale.2 #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
       promotedMul (promotedSub pooled.2 bias).2 scale
     | _, _ =>

@@ -157,9 +157,9 @@ def forward {tokens : UInt64}
   let denom : Tensor { device := device, shape := #[tokens, cfg.top_k_experts], dtype := .Float32 } := Tensor.expand denom #[tokens, cfg.top_k_experts]
   let topVals : Tensor { device := device, shape := #[tokens, cfg.top_k_experts], dtype := .Float32 } := Tensor.div topValsRaw denom
   let flatIdx : Tensor { device := device, shape := #[tokens * cfg.top_k_experts], dtype := .Int64 } := Tensor.reshapeChecked topIdx #[tokens * cfg.top_k_experts]
-  let scalesFlat : Tensor { device := device, shape := #[tokens * cfg.top_k_experts], dtype := m.per_expert_scale.1.val } :=
+  let scalesFlat : Tensor { device := device, shape := #[tokens * cfg.top_k_experts], dtype := m.per_expert_scale.1 } :=
     Tensor.indexSelect m.per_expert_scale.2 flatIdx
-  let scales : Tensor { device := device, shape := #[tokens, cfg.top_k_experts], dtype := m.per_expert_scale.1.val } := Tensor.reshapeChecked scalesFlat #[tokens, cfg.top_k_experts]
+  let scales : Tensor { device := device, shape := #[tokens, cfg.top_k_experts], dtype := m.per_expert_scale.1 } := Tensor.reshapeChecked scalesFlat #[tokens, cfg.top_k_experts]
   (probs, promotedMul topVals scales, topIdx)
 
 end Gemma4TextRouter

@@ -182,10 +182,10 @@ structure PackedQKV where
   qSeq : UInt64
   kvSeq : UInt64
   headDim : UInt64
-  dtype : ExactDType
-  q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype.val, device := device }
-  k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype.val, device := device }
-  v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype.val, device := device }
+  dtype : DType
+  q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype, device := device }
+  k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device }
+  v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device }
 
 abbrev DynOut :=
   Sigma (fun batch =>
@@ -233,10 +233,10 @@ private def parseQKVDyn (qDyn kDyn vDyn : RawTensor) : IO (PackedQKV (device := 
   if !(kHeadDim == headDim && vHeadDim == headDim) then
     throw <| IO.userError s!"flashAttnDyn: head_dim mismatch q={headDim} k={kHeadDim} v={vHeadDim}"
 
-  let dtype ← IO.ofExcept (ExactDType.ofDType? qDyn.dtype)
-  let q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype.val, device := device } ← checkedRaw "query" qDyn
-  let k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype.val, device := device } ← checkedRaw "key" kDyn
-  let v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype.val, device := device } ← checkedRaw "value" vDyn
+  let dtype := qDyn.dtype
+  let q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype, device := device } ← checkedRaw "query" qDyn
+  let k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } ← checkedRaw "key" kDyn
+  let v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } ← checkedRaw "value" vDyn
   pure {
     batch := batch
     nHead := nHead
@@ -282,7 +282,7 @@ def flashAttnDyn
   let device := qDyn.device
   let packed ← parseQKVDyn qDyn kDyn vDyn
   let typedMask ← parseMaskDyn (device := device) packed.batch packed.kvSeq attnMask
-  let out : Tensor { shape := #[packed.batch, packed.nHead, packed.qSeq, packed.headDim], dtype := packed.dtype.val, device := device } ←
+  let out : Tensor { shape := #[packed.batch, packed.nHead, packed.qSeq, packed.headDim], dtype := packed.dtype, device := device } ←
     flashAttnIO packed.q packed.k packed.v dropoutP training typedMask isCausal scale enableGqa
   pure ⟨packed.batch, ⟨packed.nHead, ⟨packed.qSeq, ⟨packed.headDim, ⟨packed.dtype, out⟩⟩⟩⟩⟩
 

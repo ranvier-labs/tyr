@@ -92,7 +92,7 @@ def broadcastList? : List Shape → Option Shape
 
 /-- Dtype promotion distinguishes zero-dimensional tensor operands from
 non-scalars, whose precision takes precedence within a dtype category.
-Unsupported or unknown dtype combinations have no result. -/
+Unsupported dtype combinations have no result. -/
 @[reducible] def pointwiseDType? (lhs rhs : TensorSpec) : Option DType :=
   match lhs.shape.toList, rhs.shape.toList with
   | [], _ :: _ => DType.promoteScalar? rhs.dtype lhs.dtype

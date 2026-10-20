@@ -107,7 +107,6 @@ example : (DType.realFloating? .Float64).isOk = true := by decide
 example : (DType.realFloating? .Int64).isOk = false := by decide
 example : (DType.realFloating? .Complex64).isOk = false := by decide
 example : (DType.realFloating? .Float8E4M3FN).isOk = false := by decide
-example : (DType.realFloating? (.Unknown "dynamic")).isOk = false := by decide
 
 example {σ : StaticSpec} [DType.RealFloating σ.dtype] (x y : Tensor σ) : Tensor σ :=
   Tensor.maximum x y
@@ -124,12 +123,10 @@ example (selected : RealFloatingDType) {s : Shape} {device : Device}
     (x : Tensor ⟨s, selected.val, device⟩) : Tensor ⟨s, selected.val, device⟩ :=
   Tensor.mulScalar x 2
 
-example (selected : RealFloatingDType) : selected.toExactDType.val = selected.val := rfl
 example : (RealFloatingDType.ofDType? .BFloat16).isOk = true := by decide
 example : (RealFloatingDType.ofDType? .Int32).isOk = false := by decide
 example : (RealFloatingDType.ofDType? .Complex64).isOk = false := by decide
 example : (RealFloatingDType.ofDType? .Float8E4M3FN).isOk = false := by decide
 example : True := by
   fail_if_success have _ : RealFloatingDType := ⟨.Int32, rfl⟩
-  fail_if_success have _ : RealFloatingDType := ⟨.Unknown "dynamic", rfl⟩
   trivial

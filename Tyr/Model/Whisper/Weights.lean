@@ -15,19 +15,19 @@ namespace torch.whisper
 variable {device : Device}
 open torch.Log
 open torch.Model (reqGradFalse)
-private def loadWeight (dtype : ExactDType) (modelDir name : String) (shape : Shape)
-    (device : Device) : IO (Tensor { shape, dtype := dtype.val, device }) := do
+private def loadWeight (dtype : DType) (modelDir name : String) (shape : Shape)
+    (device : Device) : IO (Tensor { shape, dtype := dtype, device }) := do
   let packed ← safetensors.loadTensorShardedExact modelDir name shape device
   IO.ofExcept (packed.atDType? dtype)
 
-private def loadOptional (dtype : ExactDType) (modelDir name : String) (shape : Shape)
-    (device : Device) : IO (Option (Tensor { shape, dtype := dtype.val, device })) := do
+private def loadOptional (dtype : DType) (modelDir name : String) (shape : Shape)
+    (device : Device) : IO (Option (Tensor { shape, dtype := dtype, device })) := do
   match ← safetensors.loadOptionalTensorShardedExact modelDir name shape device with
   | none => pure none
   | some packed => pure (some (← IO.ofExcept (packed.atDType? dtype)))
 
 private def loadLayerNormSharded (modelDir : String) (namePrefix : String) (dim : UInt64) (eps : Float)
-    (dtype : ExactDType) (device : Device := .CPU) : IO (LayerNorm (device := device) dim dtype.val) := do
+    (dtype : DType) (device : Device := .CPU) : IO (LayerNorm (device := device) dim dtype) := do
   let weight ← loadWeight (device := device) dtype modelDir s!"{namePrefix}.weight" #[dim]
   let bias ← loadWeight (device := device) dtype modelDir s!"{namePrefix}.bias" #[dim]
   pure { weight := reqGradFalse weight, bias := reqGradFalse bias, eps := ⟨eps⟩ }
@@ -36,8 +36,8 @@ private def loadAttentionSharded
     (modelDir : String)
     (namePrefix : String)
     (dModel nHeads : UInt64)
-    (dtype : ExactDType) (device : Device := .CPU) : IO (WhisperAttention (device := device) (dtype := dtype.val) dModel nHeads) := do
-  let support ← dtype.val.acquireConstantSupport device
+    (dtype : DType) (device : Device := .CPU) : IO (WhisperAttention (device := device) (dtype := dtype) dModel nHeads) := do
+  let support ← dtype.acquireConstantSupport device
   let _ := support.down
   let qProjWeight ← loadWeight (device := device) dtype modelDir s!"{namePrefix}.q_proj.weight" #[dModel, dModel]
   let kProjWeight ← loadWeight (device := device) dtype modelDir s!"{namePrefix}.k_proj.weight" #[dModel, dModel]
@@ -46,19 +46,19 @@ private def loadAttentionSharded
   let qProjBias ←
     match (← loadOptional (device := device) dtype modelDir s!"{namePrefix}.q_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (Tensor.castLike qProjWeight (zerosFor (dtype := dtype.val) (device := device) #[dModel]))
+    | none => pure (Tensor.castLike qProjWeight (zerosFor (dtype := dtype) (device := device) #[dModel]))
   let kProjBias ←
     match (← loadOptional (device := device) dtype modelDir s!"{namePrefix}.k_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (Tensor.castLike kProjWeight (zerosFor (dtype := dtype.val) (device := device) #[dModel]))
+    | none => pure (Tensor.castLike kProjWeight (zerosFor (dtype := dtype) (device := device) #[dModel]))
   let vProjBias ←
     match (← loadOptional (device := device) dtype modelDir s!"{namePrefix}.v_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (Tensor.castLike vProjWeight (zerosFor (dtype := dtype.val) (device := device) #[dModel]))
+    | none => pure (Tensor.castLike vProjWeight (zerosFor (dtype := dtype) (device := device) #[dModel]))
   let outProjBias ←
     match (← loadOptional (device := device) dtype modelDir s!"{namePrefix}.out_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (Tensor.castLike outProjWeight (zerosFor (dtype := dtype.val) (device := device) #[dModel]))
+    | none => pure (Tensor.castLike outProjWeight (zerosFor (dtype := dtype) (device := device) #[dModel]))
   pure {
     qProjWeight := reqGradFalse qProjWeight
     qProjBias := reqGradFalse qProjBias
@@ -71,7 +71,7 @@ private def loadAttentionSharded
   }
 
 private def loadEncoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : WhisperConfig)
-    (dtype : ExactDType) (device : Device := .CPU) : IO (WhisperEncoderLayer (device := device) (dtype := dtype.val) cfg) := do
+    (dtype : DType) (device : Device := .CPU) : IO (WhisperEncoderLayer (device := device) (dtype := dtype) cfg) := do
   let p := s!"model.encoder.layers.{layerIdx}"
   let selfAttn ← loadAttentionSharded (dtype := dtype) (device := device) modelDir s!"{p}.self_attn" cfg.dModel cfg.encoderAttentionHeads
   let selfAttnLayerNorm ← loadLayerNormSharded (dtype := dtype) (device := device) modelDir s!"{p}.self_attn_layer_norm" cfg.dModel cfg.layerNormEps
@@ -91,7 +91,7 @@ private def loadEncoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg
   }
 
 private def loadDecoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : WhisperConfig)
-    (dtype : ExactDType) (device : Device := .CPU) : IO (WhisperDecoderLayer (device := device) (dtype := dtype.val) cfg) := do
+    (dtype : DType) (device : Device := .CPU) : IO (WhisperDecoderLayer (device := device) (dtype := dtype) cfg) := do
   let p := s!"model.decoder.layers.{layerIdx}"
   let selfAttn ← loadAttentionSharded (dtype := dtype) (device := device) modelDir s!"{p}.self_attn" cfg.dModel cfg.decoderAttentionHeads
   let selfAttnLayerNorm ← loadLayerNormSharded (dtype := dtype) (device := device) modelDir s!"{p}.self_attn_layer_norm" cfg.dModel cfg.layerNormEps
@@ -114,16 +114,16 @@ private def loadDecoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg
     finalLayerNorm
   }
 
-private def loadModelSharded (modelDir : String) (cfg : WhisperConfig) (dtype : ExactDType) (device : Device)
-    (encoderConv1Weight : Tensor { shape := #[cfg.dModel, cfg.numMelBins, 3], dtype := dtype.val, device }) :
-    IO (WhisperModel (device := device) (dtype := dtype.val) cfg) := do
+private def loadModelSharded (modelDir : String) (cfg : WhisperConfig) (dtype : DType) (device : Device)
+    (encoderConv1Weight : Tensor { shape := #[cfg.dModel, cfg.numMelBins, 3], dtype := dtype, device }) :
+    IO (WhisperModel (device := device) (dtype := dtype) cfg) := do
   let encoderConv1Bias ← loadWeight (device := device) dtype modelDir "model.encoder.conv1.bias" #[cfg.dModel]
   let encoderConv2Weight ← loadWeight (device := device) dtype modelDir "model.encoder.conv2.weight" #[cfg.dModel, cfg.dModel, 3]
   let encoderConv2Bias ← loadWeight (device := device) dtype modelDir "model.encoder.conv2.bias" #[cfg.dModel]
   let encoderPositionalEmbedding ←
     loadWeight (device := device) dtype modelDir "model.encoder.embed_positions.weight" #[cfg.maxSourcePositions, cfg.dModel]
 
-  let mut encoderLayers : Array (WhisperEncoderLayer (device := device) (dtype := dtype.val) cfg) := #[]
+  let mut encoderLayers : Array (WhisperEncoderLayer (device := device) (dtype := dtype) cfg) := #[]
   for i in [:cfg.encoderLayers.toNat] do
     encoderLayers := encoderLayers.push (← loadEncoderLayerSharded (dtype := dtype) (device := device) modelDir i.toUInt64 cfg)
   let encoderLayerNorm ← loadLayerNormSharded (dtype := dtype) (device := device) modelDir "model.encoder.layer_norm" cfg.dModel cfg.layerNormEps
@@ -133,7 +133,7 @@ private def loadModelSharded (modelDir : String) (cfg : WhisperConfig) (dtype : 
   let decoderPositionalEmbedding ←
     loadWeight (device := device) dtype modelDir "model.decoder.embed_positions.weight" #[cfg.maxTargetPositions, cfg.dModel]
 
-  let mut decoderLayers : Array (WhisperDecoderLayer (device := device) (dtype := dtype.val) cfg) := #[]
+  let mut decoderLayers : Array (WhisperDecoderLayer (device := device) (dtype := dtype) cfg) := #[]
   for i in [:cfg.decoderLayers.toNat] do
     decoderLayers := decoderLayers.push (← loadDecoderLayerSharded (dtype := dtype) (device := device) modelDir i.toUInt64 cfg)
   let decoderLayerNorm ← loadLayerNormSharded (dtype := dtype) (device := device) modelDir "model.decoder.layer_norm" cfg.dModel cfg.layerNormEps
@@ -174,7 +174,7 @@ def loadShardedAt (modelDir : String) (cfg : WhisperConfig := {}) (log : Handler
   log.onInfo s!"Loading Whisper weights from {modelDir}..."
   let ⟨dtype, encoderConv1Weight⟩ ← safetensors.loadTensorShardedExact modelDir
     "model.encoder.conv1.weight" #[cfg.dModel, cfg.numMelBins, 3] device
-  let floating ← IO.ofExcept (DType.realFloating? dtype.val)
+  let floating ← IO.ofExcept (DType.realFloating? dtype)
   let _ := floating.down
   let model ← loadModelSharded (dtype := dtype) (device := device) modelDir cfg encoderConv1Weight
   let projOut ←
@@ -184,7 +184,7 @@ def loadShardedAt (modelDir : String) (cfg : WhisperConfig := {}) (log : Handler
       log.onInfo "  proj_out.weight not found; tying output projection to decoder token embeddings."
       pure model.decoderTokenEmbedding
   log.onInfo s!"Whisper target device: {repr device}"
-  pure ⟨RealFloatingDType.ofDType dtype.val, { model, projOut }⟩
+  pure ⟨RealFloatingDType.ofDType dtype, { model, projOut }⟩
 
 /-- Load using the environment-selected device, retaining that index in the result. -/
 def loadSharded (modelDir : String) (cfg : WhisperConfig := {}) (log : Handlers := {}) :

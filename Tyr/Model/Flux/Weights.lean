@@ -133,7 +133,7 @@ def loadFluxModel (path : String) (cfg : FluxConfig := FluxConfig.klein4B)
 
   -- Input projections
   let anchor ← safetensors.loadTensorExact path "img_in.weight" #[cfg.hidden_size, cfg.in_channels] device
-  let dtype := anchor.1.val
+  let dtype := anchor.1
   let floating ← IO.ofExcept (DType.realFloating? dtype)
   let _ := floating.down
   let img_in := anchor.2

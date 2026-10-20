@@ -9,7 +9,7 @@ example : True := by
   fail_if_success
     have _ : Device := .CUDA 0
   fail_if_success
-    have _ : Device := .MPS
+    have _ : Device := ⟨.MPS, by decide⟩
   fail_if_success
     have _ : Device := ⟨.CUDA 0, by trivial⟩
   fail_if_success

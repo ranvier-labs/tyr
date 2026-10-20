@@ -11,7 +11,7 @@ import Tyr.Model.Gemma4.Multimodal
 
 namespace torch.gemma4
 
-variable {device : Device} {dtype : ExactDType}
+variable {device : Device} {dtype : DType}
 
 open torch.Log
 open torch.Model (reqGradFalse)
@@ -22,11 +22,11 @@ open torch.safetensors (pushUnique
 private def freezeStored {shape : Shape} (tensor : SomeDTypeTensor shape device) :
     SomeDTypeTensor shape device := ⟨tensor.1, tensor.2.detach⟩
 
-private def requireLinear {outDim inDim : UInt64} (dtype : ExactDType)
-    (layer : Σ stored : ExactDType, Gemma4VisionLinear (device := device) outDim inDim stored.val) :
-    IO (Gemma4VisionLinear (device := device) outDim inDim dtype.val) :=
+private def requireLinear {outDim inDim : UInt64} (dtype : DType)
+    (layer : Σ stored : DType, Gemma4VisionLinear (device := device) outDim inDim stored) :
+    IO (Gemma4VisionLinear (device := device) outDim inDim dtype) :=
   if h : layer.1 = dtype then pure (h ▸ layer.2)
-  else throw (IO.userError s!"Gemma4 vision linear expected {dtype.val}, got {layer.1.val}")
+  else throw (IO.userError s!"Gemma4 vision linear expected {dtype}, got {layer.1}")
 
 private def visionTensorNameCandidates (name : String) : Array String :=
   Id.run do
@@ -90,7 +90,7 @@ private def tryLoadVisionParameter {s : Shape}
   tryLoadOptionalTensorCandidates (device := device) path (visionParameterNameCandidates name) s
 
 private def loadVisionLinearSharded (modelDir : String) (name : String) (outDim inDim : UInt64)
-    : IO (Σ dtype : ExactDType, Gemma4VisionLinear (device := device) outDim inDim dtype.val) := do
+    : IO (Σ dtype : DType, Gemma4VisionLinear (device := device) outDim inDim dtype) := do
   let w ← loadVisionParameterSharded (s := #[outDim, inDim]) modelDir name
   let inputMin ← tryLoadVisionScalarSharded modelDir s!"{name}.input_min"
   let inputMax ← tryLoadVisionScalarSharded modelDir s!"{name}.input_max"
@@ -105,7 +105,7 @@ private def loadVisionLinearSharded (modelDir : String) (name : String) (outDim 
   }⟩
 
 private def loadVisionLinear (path : String) (name : String) (outDim inDim : UInt64)
-    : IO (Σ dtype : ExactDType, Gemma4VisionLinear (device := device) outDim inDim dtype.val) := do
+    : IO (Σ dtype : DType, Gemma4VisionLinear (device := device) outDim inDim dtype) := do
   let w ← loadVisionParameter (s := #[outDim, inDim]) path name
   let inputMin ← tryLoadVisionScalar path s!"{name}.input_min"
   let inputMax ← tryLoadVisionScalar path s!"{name}.input_max"
@@ -130,7 +130,7 @@ private def loadVisionRMSNorm (path : String) (name : String) (dim : UInt64) (ep
   pure (Gemma4RMSNorm.fromCheckpointWeight (freezeStored w) eps)
 
 private def loadVisionAttentionSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionAttention (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionAttention (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}.self_attn"
   pure {
     q_proj := (← requireLinear dtype (← loadVisionLinearSharded modelDir s!"{p}.q_proj" cfg.hidden_size cfg.hidden_size))
@@ -142,7 +142,7 @@ private def loadVisionAttentionSharded (modelDir : String) (cfg : VisionConfig) 
   }
 
 private def loadVisionAttention (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionAttention (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionAttention (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}.self_attn"
   pure {
     q_proj := (← requireLinear dtype (← loadVisionLinear path s!"{p}.q_proj" cfg.hidden_size cfg.hidden_size))
@@ -154,7 +154,7 @@ private def loadVisionAttention (path : String) (cfg : VisionConfig) (layerIdx :
   }
 
 private def loadVisionMLPSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionMLP (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionMLP (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}.mlp"
   pure {
     gate_proj := (← requireLinear dtype (← loadVisionLinearSharded modelDir s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size))
@@ -163,7 +163,7 @@ private def loadVisionMLPSharded (modelDir : String) (cfg : VisionConfig) (layer
   }
 
 private def loadVisionMLP (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionMLP (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionMLP (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}.mlp"
   pure {
     gate_proj := (← requireLinear dtype (← loadVisionLinear path s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size))
@@ -172,7 +172,7 @@ private def loadVisionMLP (path : String) (cfg : VisionConfig) (layerIdx : UInt6
   }
 
 private def loadVisionBlockSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionBlock (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionBlock (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}"
   pure {
     input_layernorm := (← loadVisionRMSNormSharded modelDir s!"{p}.input_layernorm" cfg.hidden_size cfg.rms_norm_eps)
@@ -184,7 +184,7 @@ private def loadVisionBlockSharded (modelDir : String) (cfg : VisionConfig) (lay
   }
 
 private def loadVisionBlock (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
-    : IO (Gemma4VisionBlock (dtype := dtype.val) (device := device) cfg) := do
+    : IO (Gemma4VisionBlock (dtype := dtype) (device := device) cfg) := do
   let p := s!"model.vision_tower.encoder.layers.{layerIdx}"
   pure {
     input_layernorm := (← loadVisionRMSNorm path s!"{p}.input_layernorm" cfg.hidden_size cfg.rms_norm_eps)
@@ -196,7 +196,7 @@ private def loadVisionBlock (path : String) (cfg : VisionConfig) (layerIdx : UIn
   }
 
 private def loadVisionPatchEmbedderSharded (modelDir : String) (cfg : VLConfig)
-    : IO (Σ dtype : ExactDType, Gemma4VisionPatchEmbedder (device := device) cfg dtype.val) := do
+    : IO (Σ dtype : DType, Gemma4VisionPatchEmbedder (device := device) cfg dtype) := do
   let inputProj ←
     loadVisionLinearSharded
       modelDir
@@ -213,7 +213,7 @@ private def loadVisionPatchEmbedderSharded (modelDir : String) (cfg : VLConfig)
   }⟩
 
 private def loadVisionPatchEmbedder (path : String) (cfg : VLConfig)
-    : IO (Σ dtype : ExactDType, Gemma4VisionPatchEmbedder (device := device) cfg dtype.val) := do
+    : IO (Σ dtype : DType, Gemma4VisionPatchEmbedder (device := device) cfg dtype) := do
   let inputProj ←
     loadVisionLinear
       path
@@ -232,14 +232,14 @@ private def loadVisionPatchEmbedder (path : String) (cfg : VLConfig)
 private def loadVisionModelSharded (modelDir : String) (cfg : VLConfig) : IO (Σ dtype : RealFloatingDType, Gemma4VisionModel (device := device) cfg dtype.val) := do
   let patchEmbedder ← loadVisionPatchEmbedderSharded modelDir cfg
   let dtype := patchEmbedder.1
-  let floating ← IO.ofExcept dtype.val.realFloating?
+  let floating ← IO.ofExcept dtype.realFloating?
   let _ := floating.down
-  let mut blocks : Array (Gemma4VisionBlock (dtype := dtype.val) (device := device) cfg.vision_config) := #[]
+  let mut blocks : Array (Gemma4VisionBlock (dtype := dtype) (device := device) cfg.vision_config) := #[]
   for i in [:cfg.vision_config.num_hidden_layers.toNat] do
     blocks := blocks.push (← loadVisionBlockSharded modelDir cfg.vision_config i.toUInt64)
   let stdBias ← tryLoadVisionParameterSharded (s := #[cfg.vision_config.hidden_size]) modelDir "model.vision_tower.std_bias"
   let stdScale ← tryLoadVisionParameterSharded (s := #[cfg.vision_config.hidden_size]) modelDir "model.vision_tower.std_scale"
-  pure ⟨RealFloatingDType.ofDType dtype.val, {
+  pure ⟨RealFloatingDType.ofDType dtype, {
     patch_embedder := patchEmbedder.2
     blocks := blocks
     std_bias := stdBias.map freezeStored
@@ -249,14 +249,14 @@ private def loadVisionModelSharded (modelDir : String) (cfg : VLConfig) : IO (Σ
 private def loadVisionModel (path : String) (cfg : VLConfig) : IO (Σ dtype : RealFloatingDType, Gemma4VisionModel (device := device) cfg dtype.val) := do
   let patchEmbedder ← loadVisionPatchEmbedder path cfg
   let dtype := patchEmbedder.1
-  let floating ← IO.ofExcept dtype.val.realFloating?
+  let floating ← IO.ofExcept dtype.realFloating?
   let _ := floating.down
-  let mut blocks : Array (Gemma4VisionBlock (dtype := dtype.val) (device := device) cfg.vision_config) := #[]
+  let mut blocks : Array (Gemma4VisionBlock (dtype := dtype) (device := device) cfg.vision_config) := #[]
   for i in [:cfg.vision_config.num_hidden_layers.toNat] do
     blocks := blocks.push (← loadVisionBlock path cfg.vision_config i.toUInt64)
   let stdBias ← tryLoadVisionParameter (s := #[cfg.vision_config.hidden_size]) path "model.vision_tower.std_bias"
   let stdScale ← tryLoadVisionParameter (s := #[cfg.vision_config.hidden_size]) path "model.vision_tower.std_scale"
-  pure ⟨RealFloatingDType.ofDType dtype.val, {
+  pure ⟨RealFloatingDType.ofDType dtype, {
     patch_embedder := patchEmbedder.2
     blocks := blocks
     std_bias := stdBias.map freezeStored
@@ -270,9 +270,9 @@ private def loadVisionProjectorSharded (modelDir : String) (cfg : VLConfig)
       (s := #[cfg.text_config.hidden_size, cfg.vision_config.hidden_size])
       modelDir
       "model.embed_vision.embedding_projection"
-  let floating ← IO.ofExcept embedProj.1.val.realFloating?
+  let floating ← IO.ofExcept embedProj.1.realFloating?
   let _ := floating.down
-  pure ⟨RealFloatingDType.ofDType embedProj.1.val, { embedding_projection := reqGradFalse embedProj.2 }⟩
+  pure ⟨RealFloatingDType.ofDType embedProj.1, { embedding_projection := reqGradFalse embedProj.2 }⟩
 
 private def loadVisionProjector (path : String) (cfg : VLConfig)
     : IO (Σ dtype : RealFloatingDType, Gemma4MultimodalEmbedder (device := device) cfg dtype.val) := do
@@ -281,9 +281,9 @@ private def loadVisionProjector (path : String) (cfg : VLConfig)
       (s := #[cfg.text_config.hidden_size, cfg.vision_config.hidden_size])
       path
       "model.embed_vision.embedding_projection"
-  let floating ← IO.ofExcept embedProj.1.val.realFloating?
+  let floating ← IO.ofExcept embedProj.1.realFloating?
   let _ := floating.down
-  pure ⟨RealFloatingDType.ofDType embedProj.1.val, { embedding_projection := reqGradFalse embedProj.2 }⟩
+  pure ⟨RealFloatingDType.ofDType embedProj.1, { embedding_projection := reqGradFalse embedProj.2 }⟩
 
 namespace Gemma4ForConditionalGeneration
 

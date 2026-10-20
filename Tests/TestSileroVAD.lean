@@ -121,7 +121,7 @@ def testSileroVADExactLoadingRetainsFloat32InferencePolicy : IO Unit := do
       let path := dir / "model.safetensors"
       writeSileroCheckpoint path bf16
       let stored ← safetensors.loadTensorExact path.toString "conv1.bias" #[128]
-      LeanTest.assertEqual stored.1.val (if bf16 then .BFloat16 else .Float32)
+      LeanTest.assertEqual stored.1 (if bf16 then .BFloat16 else .Float32)
       LeanTest.assertEqual (← stored.2.toFloatArray) (Array.replicate 128 0.25)
       let model ← SileroVAD.load path.toString
       let valid := TensorStruct.fold (fun {σ} (tensor : Tensor σ) valid =>

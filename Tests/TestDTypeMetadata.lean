@@ -72,6 +72,5 @@ open torch
     LeanTest.assertEqual (DType.ofString? token) (some dtype)
   for token in #["Undefined", "NumOptions", "dynamic", "ComplexFloat_typo"] do
     LeanTest.assertEqual (DType.ofString? token) none
-    LeanTest.assertEqual (DType.parse token) (.Unknown token)
 
 end Tests.DTypeMetadata

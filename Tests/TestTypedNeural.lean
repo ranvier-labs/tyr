@@ -127,9 +127,9 @@ open torch
   Tensor.wavBegin path 16000
   let emit (chunk : Sigma fun n => SomeDTypeTensor #[1, 1, n] .CPU) : IO Unit :=
     Tensor.wavAppend chunk.2.2 path
-  emit ⟨3, ((Tensor.fromFloatArray #[-1, 0, 1]).reshapeChecked #[1, 1, 3]).packDType (by decide)⟩
-  emit ⟨0, (Tensor.zeros #[1, 1, 0]).packDType (by decide)⟩
-  emit ⟨2, ((Tensor.fromFloatArray #[0.5, -0.5]).reshapeChecked #[1, 1, 2]).toBFloat16.packDType (by decide)⟩
+  emit ⟨3, ((Tensor.fromFloatArray #[-1, 0, 1]).reshapeChecked #[1, 1, 3]).packDType⟩
+  emit ⟨0, (Tensor.zeros #[1, 1, 0]).packDType⟩
+  emit ⟨2, ((Tensor.fromFloatArray #[0.5, -0.5]).reshapeChecked #[1, 1, 2]).toBFloat16.packDType⟩
   Tensor.wavFinalize path
   let bytes ← IO.FS.readBinFile path
   LeanTest.assertEqual bytes.size 54 "Five mono PCM16 samples plus the WAV header"

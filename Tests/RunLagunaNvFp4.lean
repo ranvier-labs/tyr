@@ -70,10 +70,7 @@ private def runMatrixCase (path : String) (device : Device) : IO Unit := do
     check (packed.actualSpec.dtype == .UInt8) s!"m_packed loads as UInt8 (got {packed.actualSpec.dtype})"
     check (globalS.actualSpec.dtype == .Float32) s!"m_global loads as Float32 (got {globalS.actualSpec.dtype})"
     check (expected.actualSpec.dtype == .BFloat16) s!"m_expected loads as BFloat16 (got {expected.actualSpec.dtype})"
-    -- NOTE: `lean_torch_get_dtype` has no float8 case, so an F8_E4M3 tensor
-    -- reports `Unknown(Unknown)` via `Tensor.actualSpec.dtype`. The numerical comparison below
-    -- is the actual validation that F8_E4M3 loading works.
-    IO.println s!"INFO: m_scales dtypeStr = {scales.raw.dtypeStr} (F8_E4M3 expected; FFI has no float8 dtype string)"
+    check (scales.actualSpec.dtype == .Float8E4M3FN) s!"m_scales loads as Float8E4M3FN (got {scales.actualSpec.dtype})"
   let got ← nvfp4.dequantMatrix (packed.to device) (scales.to device) (globalS.to device) 64 128
   check (got.actualSpec.dtype == .BFloat16) "dequantMatrix preserves BF16 output dtype"
   if device == .CPU then

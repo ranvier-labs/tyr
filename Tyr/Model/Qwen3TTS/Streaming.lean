@@ -94,7 +94,7 @@ def streamFromTalkerInputs {seq : UInt64}
           let (st', chunks) := dec.pushDecodeStream st frame16
           stRef.set st'
           for chunk in chunks do
-            callbacks.onAudioChunk ⟨chunk.1, ⟨codecDTypes.compute.toExactDType, chunk.2⟩⟩
+            callbacks.onAudioChunk ⟨chunk.1, ⟨codecDTypes.compute.val, chunk.2⟩⟩
       | _, _ =>
           pure ()
 
@@ -112,7 +112,7 @@ def streamFromTalkerInputs {seq : UInt64}
       let st ← stRef.get
       let (_stFinal, chunks) := dec.flushDecodeStream st
       for chunk in chunks do
-        callbacks.onAudioChunk ⟨chunk.1, ⟨codecDTypes.compute.toExactDType, chunk.2⟩⟩
+        callbacks.onAudioChunk ⟨chunk.1, ⟨codecDTypes.compute.val, chunk.2⟩⟩
   | _, _ =>
       pure ()
 

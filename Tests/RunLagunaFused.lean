@@ -43,7 +43,7 @@ private def pack {σ : StaticSpec} (x : Tensor σ) : IO (SomeDTypeTensor σ.shap
 
 private def requireBF16 {shape : Shape} (x : SomeDTypeTensor shape device) :
     IO (Tensor ⟨shape, .BFloat16, device⟩) :=
-  IO.ofExcept (x.atDType? ⟨.BFloat16, by decide⟩)
+  IO.ofExcept (x.atDType? .BFloat16)
 
 private def moveStored {shape : Shape} {source : Device} (x : SomeDTypeTensor shape source)
     (target : Device) : SomeDTypeTensor shape target := ⟨x.1, x.2.to target⟩
@@ -144,7 +144,7 @@ private def tileToShape {s : Shape} {source : Device} (src : SomeDTypeTensor s s
   let srcD := src.2.to device
   let n0 := srcD.shape.foldl (· * ·) 1
   if n0 == 0 then throw <| IO.userError "tileToShape: empty source tensor"
-  let mut cur : ShapePackedTensor src.1.val device := (srcD.reshapeChecked #[n0]).packShape
+  let mut cur : ShapePackedTensor src.1 device := (srcD.reshapeChecked #[n0]).packShape
   let mut n := n0
   while n < numel do
     cur := (Tensor.catManyChecked #[cur, cur] 0 #[n * 2]).packShape

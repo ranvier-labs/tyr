@@ -14,8 +14,7 @@
 namespace tyr::metadata {
 
 // Indexed by Lean DType constructor tag (generated `lean::DType`), not native
-// enum order. Unknown, the last constructor, carries a payload and has no
-// native ScalarType mapping.
+// enum order.
 struct DTypeInfo {
   lean::DType tag;
   c10::ScalarType scalar_type;
@@ -24,7 +23,7 @@ struct DTypeInfo {
   const char* torch_name;
 };
 
-inline constexpr std::array<DTypeInfo, static_cast<size_t>(lean::DType::Unknown)> dtypeInfos{{
+inline constexpr std::array<DTypeInfo, lean::DTypeCount> dtypeInfos{{
     {lean::DType::UInt8, c10::ScalarType::Byte, "UInt8", "Byte", "uint8"},
     {lean::DType::Int8, c10::ScalarType::Char, "Int8", "Char", "int8"},
     {lean::DType::Int16, c10::ScalarType::Short, "Int16", "Short", "int16"},
@@ -80,7 +79,20 @@ constexpr bool dtypeInfosFollowLeanTags() {
   return true;
 }
 static_assert(dtypeInfosFollowLeanTags(),
-              "dtypeInfos must have one entry per concrete Lean DType constructor, in order");
+              "dtypeInfos must have one entry per Lean DType constructor, in order");
+
+constexpr bool dtypeInfosHaveDistinctScalarTypes() {
+  for (unsigned i = 0; i < dtypeInfos.size(); ++i) {
+    for (unsigned j = i + 1; j < dtypeInfos.size(); ++j) {
+      if (dtypeInfos[i].scalar_type == dtypeInfos[j].scalar_type) return false;
+    }
+  }
+  return true;
+}
+// leanDTypeTag returns the first match, so a repeated ScalarType would map
+// two Lean dtypes to one.
+static_assert(dtypeInfosHaveDistinctScalarTypes(),
+              "dtypeInfos must map each Lean DType to a distinct ScalarType");
 
 inline std::optional<c10::ScalarType> scalarTypeFromLeanDTypeTag(unsigned tag) {
   if (tag >= dtypeInfos.size()) return std::nullopt;

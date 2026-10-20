@@ -41,13 +41,16 @@ def prototypes (env : Environment) (modules : NameSet) : Except String (Array St
     byName := byName.insert cName proto
   return byName.toArray.qsort (·.1 < ·.1) |>.map (·.2)
 
-/-- `tyr::lean::<Name>`: the constructor tags of `name` in declaration order. -/
+/-- `tyr::lean::<Name>`: the constructor tags of `name` in declaration order,
+and `tyr::lean::<Name>Count`, the number of constructors. -/
 def tagEnum (env : Environment) (name : Name) : Except String String := do
   let some (.inductInfo info) := env.find? name
     | throw s!"{name}: not an inductive type"
   let tags := info.ctors.mapIdx fun tag ctor => s!"  {ctor.getString!} = {tag},"
-  return s!"// Constructor tags of `{name}`.\nenum class {name.getString!} : unsigned \{\n" ++
-    "\n".intercalate tags ++ "\n};"
+  let typeName := name.getString!
+  return s!"// Constructor tags of `{name}`.\nenum class {typeName} : unsigned \{\n" ++
+    "\n".intercalate tags ++ "\n};\n" ++
+    s!"inline constexpr unsigned {typeName}Count = {info.ctors.length};"
 
 def main (args : List String) : IO UInt32 := do
   let out :: modules@(_ :: _) := args

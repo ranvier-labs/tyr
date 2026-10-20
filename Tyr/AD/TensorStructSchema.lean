@@ -236,13 +236,9 @@ private def expectLeaf
   | .ok tensor => pure tensor
   | .error message => throw s!"Tensor leaf mismatch at {renderPath path}: {message}"
 
-private def knownDType : DType → Option String
-  | .Unknown _ => none
-  | dtype => some dtype.canonicalName
-
 instance {σ : StaticSpec} : ToTensorStructSchema (Tensor σ) where
   describeLeaves _ path := #[{
-    path, role := .diff, shape := some (shapeToNatArray σ.shape), dtype := knownDType σ.dtype
+    path, role := .diff, shape := some (shapeToNatArray σ.shape), dtype := some σ.dtype.canonicalName
   }]
 
 instance {σ : StaticSpec} : TensorStructFlatten (Tensor σ) where
@@ -284,7 +280,7 @@ instance {σ : StaticSpec} : ToTensorStructSchema (Frozen σ) where
     path := path
     role := .frozen
     shape := some (shapeToNatArray σ.shape)
-    dtype := knownDType σ.dtype
+    dtype := some σ.dtype.canonicalName
   }]
 
 instance {σ : StaticSpec} : TensorStructFlatten (Frozen σ) where

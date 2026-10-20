@@ -45,12 +45,7 @@ private def castTensorAt {σ τ : StaticSpec} (path : String)
     checked (TensorSpec.checkShape τ.shape σ.shape)
     let sourceDType := tensor.raw.dtype
     let targetDType := τ.dtype
-    -- Unknown native dtype tokens can be retained exactly, but are never used
-    -- to request an unsupported conversion or treated as a wildcard.
-    let dtypeTag ← if targetDType == sourceDType then pure none else
-      match targetDType with
-      | .Unknown _ => throw (IO.userError s!"Unsupported target dtype {targetDType}")
-      | _ => pure (some targetDType.canonicalName)
+    let dtypeTag := if targetDType == sourceDType then none else some targetDType.canonicalName
     let targetDevice := τ.device
     -- Request dtype and placement together: an intermediate dtype may be
     -- unsupported on the source device (e.g. MPS Float32 -> CPU Float64).
@@ -72,7 +67,7 @@ placement. An existential destination does not request a dtype conversion. -/
 instance {shape targetShape : Shape} {device targetDevice : Device} :
     TensorTreeCast (SomeDTypeTensor shape device) (SomeDTypeTensor targetShape targetDevice) where
   castAt path source := do
-    let tensor : Tensor ⟨targetShape, source.1.val, targetDevice⟩ ←
+    let tensor : Tensor ⟨targetShape, source.1, targetDevice⟩ ←
       castTensorAt path source.2
     pure ⟨source.1, tensor⟩
 
@@ -84,7 +79,7 @@ instance {σ : StaticSpec} {shape : Shape} {device : Device} :
     TensorTreeCast (Tensor σ) (SomeDTypeTensor shape device) where
   castAt path source := do
     let packed ← checked source.reifyDType
-    let tensor : Tensor ⟨shape, packed.1.val, device⟩ ← castTensorAt path packed.2
+    let tensor : Tensor ⟨shape, packed.1, device⟩ ← castTensorAt path packed.2
     pure ⟨packed.1, tensor⟩
 
 instance {σ τ : StaticSpec} : TensorTreeCast (Frozen σ) (Frozen τ) where

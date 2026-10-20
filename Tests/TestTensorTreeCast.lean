@@ -126,7 +126,7 @@ structure WrongShapeModel where
 
 derive_tensor_tree_cast SourceModel => WrongShapeModel
 
-@[test] def testTreeCastRejectsShapeAndUnknownDType : IO Unit := do
+@[test] def testTreeCastRejectsShapeAndUnsupportedDType : IO Unit := do
   let shapeRejected ← try
     let _ ← TensorStruct.castTo WrongShapeModel source
     pure false
@@ -136,11 +136,11 @@ derive_tensor_tree_cast SourceModel => WrongShapeModel
     pure true
   LeanTest.assertTrue shapeRejected "A type-tree cast must not implicitly reshape equal-size tensors"
   let dtypeRejected ← try
-    let _ ← TensorStruct.castTo (Array (Tensor { shape := #[2], dtype := .Unknown "typo", device := .CPU }))
+    let _ ← TensorStruct.castTo (Array (Tensor { shape := #[2], dtype := .QInt8, device := .CPU }))
       #[Tensor.ones #[2]]
     pure false
   catch error =>
-    LeanTest.assertTrue (error.toString.containsSubstr "[0]" && error.toString.containsSubstr "dtype")
+    LeanTest.assertTrue (error.toString.containsSubstr "[0]")
       "An unsupported dtype must identify its array index"
     pure true
   LeanTest.assertTrue dtypeRejected "Unsupported target dtype must fail"
@@ -148,7 +148,7 @@ derive_tensor_tree_cast SourceModel => WrongShapeModel
 @[test] def testExistentialTargetRetainsActualDType : IO Unit := do
   let input := (Tensor.ones #[2]).toBFloat16
   let output ← TensorStruct.castTo (SomeDTypeTensor #[2] .CPU) input
-  LeanTest.assertEqual output.1.val .BFloat16
+  LeanTest.assertEqual output.1 .BFloat16
   LeanTest.assertEqual output.2.raw.dtype .BFloat16
   LeanTest.assertEqual output.2.runtimeShape #[2]
   LeanTest.assertTrue (output.2.device == .CPU)

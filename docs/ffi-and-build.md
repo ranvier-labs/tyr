@@ -44,8 +44,7 @@ be used where an acquired device is required.
 public constructor or structural recursor, and different indices are not
 definitionally interchangeable. `Tensor.raw` exposes the unindexed handle;
 `Tensor.ofRaw` admits it only after checking native shape, dtype, and concrete
-device. Every index is required and exact; an unknown dtype token does not
-bypass the check. Runtime-selected dtypes and devices remain in dependent
+device. Every index is required and exact. Runtime-selected dtypes and devices remain in dependent
 packages rather than weakening the tensor contract. `zerosFor` accepts a
 specification with `DType.ConstantSupported` evidence and supplies the native
 zero factory used by the equally constrained `Inhabited` instance.
@@ -125,10 +124,13 @@ FloatBuffer and Apple I/O). It is not precompiled, so it builds before
 differs from its Lean declaration is a compile error.
 
 The header also defines `tyr::lean::DType` and `tyr::lean::DeviceKind`, the
-constructor tags of those Lean inductives. `cc/include/tyr_tensor_metadata.h`
-maps them to LibTorch types; a `static_assert` requires one dtype entry per
-concrete constructor in Lean's order, so reordering, inserting, or renaming a
-constructor fails to compile instead of silently mapping the wrong dtype.
+constructor tags of those Lean inductives, and their constructor counts.
+`cc/include/tyr_tensor_metadata.h` maps them to LibTorch types; `static_assert`s
+require one dtype entry per constructor in Lean's order and a distinct
+ScalarType per entry, so reordering, inserting, or renaming a constructor fails
+to compile instead of silently mapping the wrong dtype. `DType` has only
+nullary constructors, so it crosses the ABI as its `uint8_t` tag:
+`RawTensor.dtype` reads that tag, not a dtype name.
 
 ### Consuming tensor updates
 

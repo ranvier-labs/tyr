@@ -60,7 +60,6 @@ inductive DType where
 | Int7
 | Float8E8M0FNU
 | Float4E2M1FNX2
-| Unknown (raw : String)
 deriving Repr, Inhabited, BEq, DecidableEq
 
 /-- Every concrete ScalarType in the pinned PyTorch 2.10 runtime, excluding
@@ -133,10 +132,6 @@ def DType.ofString? (raw : String) : Option DType :=
   | "float4e2m1fnx2" | "float4_e2m1fn_x2" => some .Float4E2M1FNX2
   | _ => none
 
-/-- Parse a dtype token, preserving unknown tokens in `DType.Unknown`. -/
-def DType.parse (raw : String) : DType :=
-  (DType.ofString? raw).getD (.Unknown raw)
-
 /-- Canonical name for a dtype in Tyr metadata. Complex widths count both components. -/
 def DType.canonicalName : DType → String
   | .UInt8 => "UInt8"
@@ -185,8 +180,6 @@ def DType.canonicalName : DType → String
   | .Int7 => "Int7"
   | .Float8E8M0FNU => "Float8E8M0FNU"
   | .Float4E2M1FNX2 => "Float4E2M1FNX2"
-  | .Unknown raw =>
-      if raw.isEmpty then "Unknown" else s!"Unknown({raw})"
 
 /-- A dtype tag supported by Tyr's current native SafeTensors reader/writer.
 This is deliberately narrower than the full PyTorch dtype inventory. -/

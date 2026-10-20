@@ -140,7 +140,7 @@ end SpeechTokenizer25HzEncoderConfig
 private def loadFrozen (path : String) (name : String) (s : Shape)
     : IO (Tensor { shape := s, dtype := dtype.val, device := device }) := do
   let packed ← safetensors.loadTensorExact path name s device
-  match packed.atDType? dtype.toExactDType with
+  match packed.atDType? dtype.val with
   | .ok t => pure (Tensor.detach t)
   | .error message => throw <| IO.userError s!"Speech tokenizer tensor '{name}': {message}"
 
@@ -152,7 +152,7 @@ private def loadFrozenOrZeros (path : String) (name : String) (s : Shape)
     let _ := support.down
     pure (Tensor.zerosFor (σ := ⟨s, dtype.val, device⟩))
   | some packed =>
-    match packed.atDType? dtype.toExactDType with
+    match packed.atDType? dtype.val with
     | .ok t => pure (Tensor.detach t)
     | .error message => throw <| IO.userError s!"Speech tokenizer tensor '{name}': {message}"
 
@@ -278,9 +278,9 @@ def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : 
 
   let weightsPath := s!"{speechTokenizerDir}/model.safetensors"
   let anchor ← safetensors.loadTensorExact weightsPath "encoder.tokenizer.conv1.weight" #[1280, 128, 3] device
-  let floating ← IO.ofExcept (DType.realFloating? anchor.1.val)
+  let floating ← IO.ofExcept (DType.realFloating? anchor.1)
   let _ := floating.down
-  let dtype := RealFloatingDType.ofDType anchor.1.val
+  let dtype := RealFloatingDType.ofDType anchor.1
   let conv1Weight ← loadFrozen weightsPath "encoder.tokenizer.conv1.weight" #[1280, 128, 3]
   let conv1Bias ← loadFrozen weightsPath "encoder.tokenizer.conv1.bias" #[1280]
   let conv2Weight ← loadFrozen weightsPath "encoder.tokenizer.conv2.weight" #[1280, 1280, 3]

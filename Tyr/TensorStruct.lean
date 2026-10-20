@@ -351,7 +351,7 @@ instance {shape : Shape} {device : Device} : TensorStruct (SomeDTypeTensor shape
   zipWith f x y :=
     letI : Inhabited (SomeDTypeTensor shape device) := ⟨x⟩
     if h : y.1 = x.1 then ⟨x.1, f x.2 (h ▸ y.2)⟩
-    else panic! s!"TensorStruct dtype mismatch: {x.1.val} vs {y.1.val}"
+    else panic! s!"TensorStruct dtype mismatch: {x.1} vs {y.1}"
   fold f initial x := f x.2 initial
 
 /-!
@@ -518,14 +518,14 @@ instance {P : StaticSpec → Prop} {dtype : DType} {device : Device}
   fold f initial tensor := f (proof tensor.1).out tensor.2 initial
 
 instance {P : StaticSpec → Prop} {shape : Shape} {device : Device}
-    [proof : ∀ dtype : ExactDType, TensorStructFor.Fact (P ⟨shape, dtype.val, device⟩)] :
+    [proof : ∀ dtype : DType, TensorStructFor.Fact (P ⟨shape, dtype, device⟩)] :
     TensorStructFor P (SomeDTypeTensor shape device) where
   map f tensor := ⟨tensor.1, f (proof tensor.1).out tensor.2⟩
   mapM f tensor := do pure ⟨tensor.1, ← f (proof tensor.1).out tensor.2⟩
   zipWith f lhs rhs :=
     letI : Inhabited (SomeDTypeTensor shape device) := ⟨lhs⟩
     if h : rhs.1 = lhs.1 then ⟨lhs.1, f (proof lhs.1).out lhs.2 (h ▸ rhs.2)⟩
-    else panic! s!"TensorStructFor dtype mismatch: {lhs.1.val} vs {rhs.1.val}"
+    else panic! s!"TensorStructFor dtype mismatch: {lhs.1} vs {rhs.1}"
   fold f initial tensor := f (proof tensor.1).out tensor.2 initial
 
 instance {P : StaticSpec → Prop} [TensorStructFor P α] [TensorStructFor P β] :

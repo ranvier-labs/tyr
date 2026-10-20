@@ -56,10 +56,6 @@ example : True := by
   fail_if_success
     have _ : DType.Promotes .Float8E4M3FN .Float32 .Float32 := inferInstance
   fail_if_success
-    have _ := DType.promote (.Unknown "dynamic") .Float32
-  fail_if_success
-    have _ := DType.promote (.Unknown "typo") (.Unknown "typo")
-  fail_if_success
     have _ : DType.ScalarPromotes .Float32 .Float64 .Float64 := inferInstance
   fail_if_success
     have _ : TensorSpec.Promotes ⟨#[], .Float64⟩ ⟨#[2], .Float32⟩ .Float64 := inferInstance
@@ -72,11 +68,9 @@ example (_dtype : DType) : True := by
 
 -- Shape compatibility cannot rescue undefined promotion. Matrix multiplication
 -- additionally rejects unequal dtypes even when ordinary promotion is defined.
-example : TensorSpec.pointwise? ⟨#[2], .Unknown "dynamic"⟩ ⟨#[2], .Float32⟩ = none := by decide
+example : TensorSpec.pointwise? ⟨#[2], .QInt8⟩ ⟨#[2], .Float32⟩ = none := by decide
 example : TensorSpec.division? ⟨#[2], .Float8E4M3FN⟩ ⟨#[2], .Float32⟩ = none := by decide
 example : TensorSpec.matmul? ⟨#[2, 3], .Float32⟩ ⟨#[3, 4], .Float64⟩ = none := by decide
-example : TensorSpec.matmul? ⟨#[2, 3], .Unknown "dynamic"⟩
-    ⟨#[3, 4], .Unknown "dynamic"⟩ = none := by decide
 example : TensorSpec.matmul? ⟨#[2, 3], .Float32⟩ ⟨#[3, 4], .Float32⟩ =
     some ⟨#[2, 4], .Float32⟩ := by decide
 

@@ -233,7 +233,7 @@ def testQwen35AttentionUsesPerHeadQGateLayout : IO Unit := do
 @[test]
 def testQwen35RMSNormCheckpointWeightIsZeroCentered : IO Unit := do
   let raw : Tensor { shape := #[2], device := .CPU, dtype := .Float32 } := floatArrayDynamic #[0.25, -0.5]
-  let norm := Qwen35RMSNorm.fromCheckpointWeight ⟨⟨.Float32, by decide⟩, raw⟩
+  let norm := Qwen35RMSNorm.fromCheckpointWeight ⟨.Float32, raw⟩
   let x : Tensor { shape := #[1, 2], device := .CPU, dtype := .Float32 } := Tensor.reshapeChecked (floatArrayDynamic #[1.0, 1.0]) #[1, 2]
   let out := norm.forward2d x
   let vals ← Tensor.toFloatArray (id out)
@@ -549,7 +549,7 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
       let support ← dtype.val.acquireConstantSupport .CPU
       let _ := support.down
       LeanTest.assertEqual dtype.val DType.BFloat16
-      LeanTest.assertEqual model.model.norm.weight.1.val DType.Float32
+      LeanTest.assertEqual model.model.norm.weight.1 DType.Float32
       LeanTest.assertEqual (← model.model.norm.weight.2.toFloatArray)
         (Array.replicate tinyDenseCfg.hidden_size.toNat 0.125)
       let ids := (Tensor.fromInt64Array #[1, 2]).reshapeChecked #[1, 2]

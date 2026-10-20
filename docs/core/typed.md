@@ -52,19 +52,19 @@ fields and forward inputs. An unknown placement is packaged existentially,
 for example `Sigma fun device => PlacedWeights device`; unpacking it exposes
 the same device index for subsequent operations without copying storage.
 
-Every dtype index is an exact claim. Omitting it is a compile error, and no
-unknown token bypasses admission checks. Checked adapters validate actual dtypes against their computed result indices. Copying rejects a dtype mismatch before
+Every dtype index is an exact claim: `DType` has one constructor per native
+scalar type and no wildcard. Omitting it is a compile error. Checked adapters validate actual dtypes against their computed result indices. Copying rejects a dtype mismatch before
 mutation.
 
 For runtime-selected dtypes, use `SomeDTypeTensor shape device` to retain an
-exact existential index. Its `ExactDType` witness excludes the reserved wildcard:
+exact existential index:
 
 ```lean
 def packageWeights (tensor : FloatWeights) : SomeDTypeTensor #[2, 3] .CPU :=
-  tensor.packDType (by decide)
+  tensor.packDType
 ```
 
-`packDType` packages a statically exact index using an explicit exclusion proof.
+`packDType` packages a statically known index.
 `tensor.reifyDType` reads the native dtype and returns a checked exact package;
 `SomeDTypeTensor.ofRaw` validates the
 requested shape and device at a native boundary. These operations retain values
@@ -206,8 +206,7 @@ example : DType.ScalarPromotes .Float32 .Float64 .Float32 := inferInstance
 example : DType.NonBool .Float32 := inferInstance
 ```
 
-Unknown dtypes, including `.Unknown "dynamic"`, have no static promotion
-witness. Unsupported mixed shell-type pairs, such as Float8E4M3FN with Float32,
+Unsupported mixed shell-type pairs, such as Float8E4M3FN with Float32,
 also have no witness; callers must choose an explicit conversion. A promotion
 witness proves that Tyr's promotion function returns that dtype; it is not a
 proof of the native implementation or kernel availability. Operator conditions

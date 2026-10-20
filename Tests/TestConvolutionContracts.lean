@@ -64,7 +64,7 @@ def testConvolutionMetadataFailureIsRecoverable : IO Unit := do
   let bias := Tensor.zeros #[1]
   -- A runtime-loaded dtype must match before it can enter the shared-dtype API.
   let loaded ← checked ((weight.castDType .Float64).reifyDType)
-  expectError (loaded.atDType? ⟨.Float32, by decide⟩) "dtype"
+  expectError (loaded.atDType? .Float32) "dtype"
   let output ← checked (Tensor.conv2dBias? (input.castDType .Float64)
     (weight.castDType .Float64) (bias.castDType .Float64))
   LeanTest.assertEqual output.raw.dtype .Float64

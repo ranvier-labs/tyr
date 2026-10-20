@@ -127,7 +127,7 @@ private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String)
   let x := (weight #[2, 8] 0.7).toBFloat16
   let (probs, weights, indices) := router.forward c x
   LeanTest.assertEqual probs.actualSpec.dtype .Float32
-  LeanTest.assertEqual weights.1.val .Float32
+  LeanTest.assertEqual weights.1 .Float32
   LeanTest.assertEqual indices.actualSpec.dtype .Int64
   for v in (← weights.2.toFloatArray) do LeanTest.assertTrue v.isFinite
   let rows ← probs.toFloatArray
@@ -250,7 +250,7 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
     per_expert_scale := packExactTensor ((Tensor.ones #[3]).castDType .Float64) }
   let (probs, selected, _) := router.forward c (weight #[2, 8] 0.7 .BFloat16)
   LeanTest.assertEqual probs.actualSpec.dtype .Float32
-  LeanTest.assertEqual selected.1.val .Float64
+  LeanTest.assertEqual selected.1 .Float64
   LeanTest.assertTrue ((← selected.2.toFloatArray).all Float.isFinite)
 
 @[test] def testGemma4VisionRetainsPromotedResidualDType : IO Unit := do
@@ -261,7 +261,7 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
     std_bias := some (packExactTensor (weight #[8] 1.2 .Float32))
     std_scale := some (packExactTensor (Tensor.ones #[8])) }
   let features := vision.forward vlCfg (weight #[4, 4, 12] 0.1)
-  LeanTest.assertEqual features.1.val .Float32
+  LeanTest.assertEqual features.1 .Float32
   LeanTest.assertEqual vision.patch_embedder.input_proj.weight.actualSpec.dtype .BFloat16
   LeanTest.assertTrue ((← features.2.toFloatArray).all Float.isFinite)
 
@@ -306,7 +306,7 @@ private def writeDTypeFixture (directory : System.FilePath) (c : Config)
       let support ← selected.val.acquireConstantSupport .CPU
       let _ := support.down
       LeanTest.assertEqual selected.val .BFloat16
-      LeanTest.assertEqual model.model.norm.weight.1.val .Float32
+      LeanTest.assertEqual model.model.norm.weight.1 .Float32
       LeanTest.assertEqual (← model.model.norm.weight.2.toFloatArray)
         (Array.replicate c.hidden_size.toNat 0.125)
       let prediction := model.forward c ids

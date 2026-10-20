@@ -394,9 +394,9 @@ def testBroadcastOpsParity : IO Unit := do
   for v in opVals do
     LeanTest.assertTrue (v == 3.0) s!"operator broadcast value, got {v}"
   assertValid (x *ᵇ bias) "operator *ᵇ broadcasts"
-  -- Runtime dtype packaging retains the exact witness rather than a wildcard.
+  -- Runtime dtype packaging retains the native dtype.
   let packed ← IO.ofExcept ((Tensor.ones #[2, 3]).reifyDType)
-  LeanTest.assertEqual packed.1.val .Float32
+  LeanTest.assertEqual packed.1 .Float32
   assertValid packed.2 "existential dtype keeps exact metadata"
 
 /-- Fully typed model layers: shape and dtype agree end to end, runtime

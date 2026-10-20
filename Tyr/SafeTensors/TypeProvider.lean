@@ -100,9 +100,8 @@ private def renderShapeLit (shape : Shape) : String :=
   let dims := shape.toList.map (fun d => toString d)
   "#[" ++ String.intercalate ", " dims ++ "]"
 
-private def renderDTypeExpr : DType → String
-  | .Unknown raw => s!"(_root_.torch.DType.Unknown {leanStringLit raw})"
-  | dtype => s!"_root_.torch.DType.{dtype.canonicalName}"
+private def renderDTypeExpr (dtype : DType) : String :=
+  s!"_root_.torch.DType.{dtype.canonicalName}"
 
 private def parseGeneratedCommand (source : String) : CommandElabM Syntax := do
   let env ← getEnv

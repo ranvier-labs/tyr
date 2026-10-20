@@ -7,8 +7,13 @@ open torch
 inventory. Run through `scripts/test_dtype_promotion.sh` after building the dtype
 module. Native errors and Undefined both mean no supported promotion result. -/
 
-private def nativeResult (status name : String) : Option DType :=
-  if status == "ok" then some (DType.parse name) else none
+private def parseDType (name : String) : IO DType :=
+  match DType.ofString? name with
+  | some dtype => pure dtype
+  | none => throw (IO.userError s!"native dtype {name} is missing from Lean's parser")
+
+private def nativeResult (status name : String) : IO (Option DType) :=
+  if status == "ok" then some <$> parseDType name else pure none
 
 private def rankedPromotion (ranks : String) (left right : DType) : Option DType :=
   if ranks == "vs" then DType.promoteScalar? left right
@@ -36,14 +41,12 @@ def main (args : List String) : IO UInt32 := do
     match line.splitOn "\t" with
     | ["dtype", ordinal, name] =>
       let some index := ordinal.toNat? | throw (IO.userError s!"Invalid native dtype ordinal: {ordinal}")
-      let dtype := DType.parse name
+      let dtype ← parseDType name
       if ordinals.contains index || inventory.contains dtype then
         throw (IO.userError s!"Duplicate native dtype or parser collision: {ordinal}/{name}")
       ordinals := ordinals.push index
       inventory := inventory.push dtype
-      if (DType.ofString? name).isNone then
-        failure := some s!"native dtype {ordinal}/{name} is missing from Lean's parser"
-      else if !(DType.all.contains dtype) then
+      if !(DType.all.contains dtype) then
         failure := some s!"native dtype {ordinal}/{name} is missing from DType.all"
       else if DType.ofString? dtype.canonicalName != some dtype then
         failure := some s!"canonical dtype spelling does not roundtrip: {name}/{dtype.canonicalName}"
@@ -54,8 +57,8 @@ def main (args : List String) : IO UInt32 := do
       if !(#["ok", "error", "undefined"].contains status) then
         throw (IO.userError s!"Invalid native status: {line}")
       promotionCases := promotionCases + 1
-      let actual := DType.promote? (DType.parse left) (DType.parse right)
-      let expected := nativeResult status result
+      let actual := DType.promote? (← parseDType left) (← parseDType right)
+      let expected ← nativeResult status result
       if actual != expected then
         failure := some s!"promote {left}/{right}: Lean={repr actual}, native={status}/{result}"
     | ["result", ranks, left, right, status, result] =>
@@ -66,10 +69,10 @@ def main (args : List String) : IO UInt32 := do
           !(#["ok", "error", "undefined"].contains status) then
         throw (IO.userError s!"Invalid native result_type case: {line}")
       resultCases := resultCases + 1
-      let lhs := DType.parse left
-      let rhs := DType.parse right
+      let lhs ← parseDType left
+      let rhs ← parseDType right
       let actual := rankedPromotion ranks lhs rhs
-      let expected := nativeResult status result
+      let expected ← nativeResult status result
       if actual != expected then
         failure := some s!"result_type {ranks} {left}/{right}: Lean={repr actual}, native={status}/{result}"
     | ["operation", operation, ranks, left, right, status, result] =>
@@ -80,8 +83,8 @@ def main (args : List String) : IO UInt32 := do
           !(#["vv", "vs", "sv", "ss"].contains ranks) then
         throw (IO.userError s!"Invalid native arithmetic case: {line}")
       operationCases := operationCases + 1
-      let lhs := DType.parse left
-      let rhs := DType.parse right
+      let lhs ← parseDType left
+      let rhs ← parseDType right
       let boolSubtraction := operation == "sub" && (lhs == .Bool || rhs == .Bool)
       let expectedBoolError :=
         if lhs == .Bool && rhs == .Bool then
@@ -92,7 +95,7 @@ def main (args : List String) : IO UInt32 := do
         if operation == "div" then dtype.atLeastFloat else dtype
       if status == "ok" then
         operationSuccesses := operationSuccesses + 1
-        if boolSubtraction || predicted != some (DType.parse result) then
+        if boolSubtraction || predicted != some (← parseDType result) then
           failure := some s!"{key}: Lean={repr predicted}, native={result}"
       else if status == "rejected" && boolSubtraction && result == expectedBoolError then
         operationRejections := operationRejections + 1

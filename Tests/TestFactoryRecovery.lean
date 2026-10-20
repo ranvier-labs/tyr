@@ -32,7 +32,6 @@ example : True := by
 
 example : True := by
   fail_if_success have _ := Tensor.onesFor ⟨#[2], .QInt8, .CPU⟩
-  fail_if_success have _ := Tensor.zerosFor ⟨#[2], .Unknown "invalid", .CPU⟩
   fail_if_success have _ := Tensor.eyeFor (n := 2) .Float8E8M0FNU .CPU
   fail_if_success have _ : Tensor ⟨#[2], .QInt8, .CPU⟩ := default
   trivial
@@ -92,7 +91,6 @@ def testPureConstantFactoriesPreserveSpecification : IO Unit := do
   LeanTest.assertTrue (!zeros.requiresGrad && !ones.requiresGrad)
   let single := Tensor.ones #[2]
   LeanTest.assertEqual single.raw.dtype .Float32
-  Tests.assertThrows ((DType.Unknown "invalid").acquireConstantSupport .CPU)
   Tests.assertThrows (DType.QInt8.acquireConstantSupport .CPU)
   let norm ← RMSNorm.init 2 (dtype := .Float64)
   LeanTest.assertEqual norm.weight.raw.dtype .Float64

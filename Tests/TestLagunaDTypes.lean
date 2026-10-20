@@ -51,7 +51,7 @@ private def writeFixture (directory : System.FilePath) (mode : Nat)
         let ⟨selected, model⟩ ← if sharded then LagunaForCausalLM.loadSharded directory.toString cfg
           else LagunaForCausalLM.load (directory / "model.safetensors").toString cfg
         LeanTest.assertEqual selected.val .BFloat16
-        LeanTest.assertEqual model.model.norm.1.val .Float32
+        LeanTest.assertEqual model.model.norm.1 .Float32
         LeanTest.assertEqual (← model.model.norm.2.toFloatArray) #[0.125, 0.125, 0.125, 0.125]
         LeanTest.assertEqual model.tieWordEmbeddings (mode == 3)
         let ids := (Tensor.fromInt64Array #[0, 1]).reshapeChecked #[1, 2]

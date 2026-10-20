@@ -28,11 +28,9 @@ example (cfg : TalkerConfig)
   trivial
 
 example (_cache : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 .Float32)
-    (_dtype : ExactDType) : True := by
+    (_dtype : DType) : True := by
   fail_if_success
     have _ : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 .BFloat16 := _cache
-  fail_if_success
-    have _ : ExactDType := ⟨.Unknown "dynamic", by decide⟩
   trivial
 
 private def tinyConfig : Qwen3TTSConfig := {

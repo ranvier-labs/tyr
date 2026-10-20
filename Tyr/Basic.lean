@@ -55,6 +55,8 @@ instance : Repr RawTensor where
     (shape : Shape) (t : @& RawTensor) : Shape
 @[extern "lean_torch_get_dtype"] private opaque dtypeStrImpl
     (shape : Shape) (t : @& RawTensor) : String
+@[extern "lean_torch_get_dtype_enum"] private opaque dtypeImpl
+    (shape : Shape) (t : @& RawTensor) : DType
 @[extern "lean_torch_get_device_enum"] private opaque deviceImpl
     (shape : Shape) (t : @& RawTensor) : Device
 @[extern "lean_torch_get_device"] private opaque deviceStrImpl
@@ -67,7 +69,7 @@ instance : Repr RawTensor where
 /-- Native metadata, independent of any static tensor specification. -/
 def runtimeShape (t : RawTensor) : Shape := runtimeShapeImpl #[] t
 def dtypeStr (t : RawTensor) : String := dtypeStrImpl #[] t
-def dtype (t : RawTensor) : DType := DType.parse t.dtypeStr
+def dtype (t : RawTensor) : DType := dtypeImpl #[] t
 def device (t : RawTensor) : Device := deviceImpl #[] t
 def deviceStr (t : RawTensor) : String := deviceStrImpl #[] t
 def getValues (t : RawTensor) (maxElements : UInt64 := 1000) : FloatArray :=
@@ -123,8 +125,7 @@ private def checkSpec (σ : StaticSpec) (raw : RawTensor) : Except String Unit :
   if raw.device != σ.device then
     throw s!"Expected device {renderDevice σ.device}, got {renderDevice raw.device}"
 
-/-- Check exact shape, dtype and actual placement against the native handle.
-Unknown dtype tokens are exact metadata, never wildcard specifications. -/
+/-- Check exact shape, dtype and actual placement against the native handle. -/
 def validate {σ : StaticSpec} (tensor : Tensor σ) : Except String Unit :=
   checkSpec σ tensor.raw
 
