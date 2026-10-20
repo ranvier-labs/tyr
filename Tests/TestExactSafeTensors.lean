@@ -63,7 +63,7 @@ example (_packed : SomeDTypeTensor #[2] .CPU) : True := by
   LeanTest.assertEqual (← packed.2.toFloatArray) #[2, 3]
   Tests.assertThrows
     (safetensors.loadOptionalTensorExact (dir / "absent.safetensors").toString "absent" #[2])
-    (some "Failed to open")
+    (some "no such file or directory")
   Tests.assertThrows
     (safetensors.loadOptionalTensorShardedExact (dir / "absent").toString "absent" #[2])
 

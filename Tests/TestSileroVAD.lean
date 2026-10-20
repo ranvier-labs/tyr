@@ -71,7 +71,7 @@ private def expectSileroLoadError (path detail : String) : IO Unit := do
 @[test]
 def testSileroVADLoadingPreservesFileErrors : IO Unit :=
     IO.FS.withTempDir fun dir => do
-  expectSileroLoadError (dir / "missing.safetensors").toString "Failed to open"
+  expectSileroLoadError (dir / "missing.safetensors").toString "no such file or directory"
   let path := (dir / "missing-weight.safetensors").toString
   (Tensor.zeros #[1]).saveSafeTensor path "other.weight"
   expectSileroLoadError path "Tensor not found"
