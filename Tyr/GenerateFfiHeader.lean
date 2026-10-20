@@ -1,12 +1,15 @@
 import Lean
+import Tyr.Basic.Types
 
 /-!
 Write the C prototypes of every `@[extern]` declared in the given modules, as
 Lean's compiler sees them. `libTyrC` includes the result, so a native
 definition whose signature disagrees with its Lean declaration fails to compile.
 
-It also writes `tyr::lean::DType` and `tyr::lean::DeviceKind`, C++ enums of
-those inductives' constructor tags, so native code never hard-codes them.
+It also writes `tyr::lean::DType`, `tyr::lean::DeviceKind` and
+`tyr::lean::ReduceOp`, C++ enums of those inductives' constructor tags, and
+`tyr::lean::DTypeSafeTensorTags`, the SafeTensors name of each `DType` tag, so
+native code never hard-codes them.
 
 With `--check-exports`, it instead fails if the library exports a `lean_*`
 symbol that no `@[extern]` in the given modules declares: the header only
@@ -85,6 +88,19 @@ def checkExports (env : Environment) (modules : NameSet) (lib : String) : IO UIn
   for symbol in orphans.qsort (· < ·) do IO.eprintln s!"  {symbol}"
   return 1
 
+/-- `tyr::lean::DTypeSafeTensorTags`: `DType.safeTensorTag?` indexed by
+constructor tag, `nullptr` where SafeTensors has no name. -/
+def safeTensorTags (env : Environment) : Except String String := do
+  let some (.inductInfo info) := env.find? ``torch.DType
+    | throw "torch.DType: not an inductive type"
+  let entries := (List.range info.ctors.length).map fun tag =>
+    match (torch.DType.ofNat tag).safeTensorTag? with
+    | some name => s!"    \"{name}\","
+    | none => "    nullptr,"
+  return "// SafeTensors names of `torch.DType`, by constructor tag.\n" ++
+    "inline constexpr const char* DTypeSafeTensorTags[DTypeCount] = {\n" ++
+    "\n".intercalate entries ++ "\n};"
+
 def main (args : List String) : IO UInt32 := do
   let (check?, out, modules) ← match args with
     | "--check-exports" :: lib :: modules@(_ :: _) => pure (true, lib, modules)
@@ -98,8 +114,8 @@ def main (args : List String) : IO UInt32 := do
   if check? then return ← checkExports env (modules.foldl NameSet.insert {}) out
   let generated := do
     let protos ← prototypes env (modules.foldl NameSet.insert {})
-    let enums ← #[`torch.DType, `torch.DeviceKind].mapM (tagEnum env)
-    return (protos, enums)
+    let enums ← #[`torch.DType, `torch.DeviceKind, `torch.dist.ReduceOp].mapM (tagEnum env)
+    return (protos, enums.push (← safeTensorTags env))
   match generated with
   | .error message => IO.eprintln s!"GenerateFfiHeader: {message}"; return 1
   | .ok (protos, enums) =>

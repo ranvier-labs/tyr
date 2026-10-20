@@ -5,6 +5,15 @@ import Tyr.Basic
 
 namespace torch.dist
 
+/-- Reduce operation for collective communications -/
+inductive ReduceOp where
+  | sum     : ReduceOp
+  | avg     : ReduceOp
+  | product : ReduceOp
+  | min     : ReduceOp
+  | max     : ReduceOp
+  deriving Repr, BEq, Inhabited
+
 /-- Initialize the distributed process group.
 
     Args:
@@ -64,7 +73,7 @@ opaque waitImpl (workId : UInt64) : IO Unit
     Returns work ID if async, 0 otherwise.
 -/
 @[extern "lean_torch_dist_all_reduce"]
-opaque allReduceImpl (tensor : @& RawTensor) (op : UInt8) (asyncOp : UInt8) : IO UInt64
+opaque allReduceImpl (tensor : @& RawTensor) (op : ReduceOp) (asyncOp : UInt8) : IO UInt64
 
 /-- Broadcast tensor from source rank to all processes (in-place).
 
@@ -85,7 +94,7 @@ opaque broadcastImpl (tensor : @& RawTensor) (srcRank : UInt64) : IO Unit
 -/
 @[extern "lean_torch_dist_reduce_scatter_tensor"]
 opaque reduceScatterImpl (output : @& RawTensor) (input : @& RawTensor)
-    (op : UInt8) (asyncOp : UInt8) : IO UInt64
+    (op : ReduceOp) (asyncOp : UInt8) : IO UInt64
 
 /-- Reduce-scatter from an explicit list of per-rank inputs.
 
@@ -95,7 +104,7 @@ opaque reduceScatterImpl (output : @& RawTensor) (input : @& RawTensor)
 -/
 @[extern "lean_torch_dist_reduce_scatter_list"]
 opaque reduceScatterListImpl (output : @& RawTensor) (inputs : @& Array RawTensor)
-    (op : UInt8) : IO Unit
+    (op : ReduceOp) : IO Unit
 
 /-- All-gather: gather tensors from all processes to all processes.
     The output buffer (leading axis = worldSize × input's) is written in place.

@@ -97,16 +97,17 @@ BackendKind validateInit(const std::string& backend, uint64_t port,
     throw std::invalid_argument("Unsupported backend: " + backend);
 }
 
-// Reduce operations mapping
-c10d::ReduceOp::RedOpType reduceOpFromInt(uint8_t op) {
-    switch (op) {
-        case 0: return c10d::ReduceOp::SUM;
-        case 1: return c10d::ReduceOp::AVG;
-        case 2: return c10d::ReduceOp::PRODUCT;
-        case 3: return c10d::ReduceOp::MIN;
-        case 4: return c10d::ReduceOp::MAX;
-        default: return c10d::ReduceOp::SUM;
+static_assert(tyr::lean::ReduceOpCount == 5, "reduceOpFromLean must map every Lean ReduceOp");
+
+c10d::ReduceOp::RedOpType reduceOpFromLean(uint8_t op) {
+    switch (static_cast<tyr::lean::ReduceOp>(op)) {
+        case tyr::lean::ReduceOp::sum: return c10d::ReduceOp::SUM;
+        case tyr::lean::ReduceOp::avg: return c10d::ReduceOp::AVG;
+        case tyr::lean::ReduceOp::product: return c10d::ReduceOp::PRODUCT;
+        case tyr::lean::ReduceOp::min: return c10d::ReduceOp::MIN;
+        case tyr::lean::ReduceOp::max: return c10d::ReduceOp::MAX;
     }
+    throw std::invalid_argument("Invalid Lean ReduceOp tag: " + std::to_string(op));
 }
 
 void maybeSetCurrentCudaDeviceFromTensor(const torch::Tensor& t) {
@@ -338,7 +339,7 @@ lean_object* lean_torch_dist_all_reduce(
           std::vector<torch::Tensor> tensors = {t};
 
           c10d::AllreduceOptions opts;
-          opts.reduceOp = c10d::ReduceOp(reduceOpFromInt(op));
+          opts.reduceOp = c10d::ReduceOp(reduceOpFromLean(op));
 
           auto work = g_process_group->allreduce(tensors, opts);
 
@@ -423,7 +424,7 @@ lean_object* lean_torch_dist_reduce_scatter_tensor(
           maybeSetCurrentCudaDeviceFromTensor(out_tensor);
 
           c10d::ReduceScatterOptions opts;
-          opts.reduceOp = c10d::ReduceOp(reduceOpFromInt(op));
+          opts.reduceOp = c10d::ReduceOp(reduceOpFromLean(op));
 
           // reduce_scatter_tensor expects output and a list of inputs (one per rank)
           std::vector<torch::Tensor> input_tensors;
@@ -495,7 +496,7 @@ lean_object* lean_torch_dist_reduce_scatter_list(
           }
 
           c10d::ReduceScatterOptions opts;
-          opts.reduceOp = c10d::ReduceOp(reduceOpFromInt(op));
+          opts.reduceOp = c10d::ReduceOp(reduceOpFromLean(op));
 
           std::vector<torch::Tensor> output_tensors = {out_tensor};
           std::vector<std::vector<torch::Tensor>> input_tensor_lists = {input_tensors};

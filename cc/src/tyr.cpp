@@ -2965,21 +2965,11 @@ static std::string jsonEscape(const std::string& s) {
   return out.str();
 }
 
-// Supported storage types have matching dtypeSize and writer tags below.
 static std::optional<torch::ScalarType> parseSafeTensorDtype(const std::string& dtype) {
-  if (dtype == "F32" || dtype == "float32") return torch::kFloat32;
-  if (dtype == "F64" || dtype == "float64") return torch::kFloat64;
-  if (dtype == "F16" || dtype == "float16") return torch::kFloat16;
-  if (dtype == "BF16" || dtype == "bfloat16") return torch::kBFloat16;
-  if (dtype == "I64" || dtype == "int64") return torch::kInt64;
-  if (dtype == "I32" || dtype == "int32") return torch::kInt32;
-  if (dtype == "I16" || dtype == "int16") return torch::kInt16;
-  if (dtype == "I8" || dtype == "int8") return torch::kInt8;
-  if (dtype == "U8" || dtype == "uint8") return torch::kUInt8;
-  if (dtype == "BOOL" || dtype == "bool") return torch::kBool;
-  // FP8 types (PyTorch 2.1+)
-  if (dtype == "F8_E4M3" || dtype == "float8_e4m3fn") return torch::kFloat8_e4m3fn;
-  if (dtype == "F8_E5M2" || dtype == "float8_e5m2") return torch::kFloat8_e5m2;
+  for (unsigned tag = 0; tag < tyr::lean::DTypeCount; ++tag) {
+    const char* name = tyr::lean::DTypeSafeTensorTags[tag];
+    if (name && dtype == name) return tyr::metadata::scalarTypeFromLeanDTypeTag(tag);
+  }
   return std::nullopt;
 }
 
@@ -3108,40 +3098,9 @@ static std::optional<uint64_t> checkedNumel(const std::vector<int64_t>& shape) {
   return numel;
 }
 
-static size_t dtypeSize(torch::ScalarType dtype) {
-  switch (dtype) {
-    case torch::kFloat32: return 4;
-    case torch::kFloat64: return 8;
-    case torch::kFloat16: return 2;
-    case torch::kBFloat16: return 2;
-    case torch::kFloat8_e4m3fn: return 1;
-    case torch::kFloat8_e5m2: return 1;
-    case torch::kInt64: return 8;
-    case torch::kInt32: return 4;
-    case torch::kInt16: return 2;
-    case torch::kInt8: return 1;
-    case torch::kUInt8: return 1;
-    case torch::kBool: return 1;
-    default: return 4;
-  }
-}
-
 static std::string dtypeToSafeTensorTag(torch::ScalarType dtype) {
-  switch (dtype) {
-    case torch::kFloat64: return "F64";
-    case torch::kFloat32: return "F32";
-    case torch::kFloat16: return "F16";
-    case torch::kBFloat16: return "BF16";
-    case torch::kFloat8_e4m3fn: return "F8_E4M3";
-    case torch::kFloat8_e5m2: return "F8_E5M2";
-    case torch::kInt64: return "I64";
-    case torch::kInt32: return "I32";
-    case torch::kInt16: return "I16";
-    case torch::kInt8: return "I8";
-    case torch::kUInt8: return "U8";
-    case torch::kBool: return "BOOL";
-    default: return "";
-  }
+  const char* name = tyr::lean::DTypeSafeTensorTags[tyr::metadata::leanDTypeTag(dtype)];
+  return name ? name : "";
 }
 
 static std::optional<std::string> prepareSaveTensorEntry(
@@ -3165,7 +3124,7 @@ static std::optional<std::string> prepareSaveTensorEntry(
   for (int64_t i = 0; i < t.dim(); i++) {
     out.shape.push_back(t.size(i));
   }
-  out.data_size = static_cast<int64_t>(t.numel()) * static_cast<int64_t>(dtypeSize(t.scalar_type()));
+  out.data_size = static_cast<int64_t>(t.numel()) * static_cast<int64_t>(c10::elementSize(t.scalar_type()));
   out.data_start = 0;
   out.data_end = 0;
   return std::nullopt;
@@ -3426,7 +3385,7 @@ public:
     if (!numel_opt.has_value()) {
       throw std::runtime_error("SafeTensors load error: invalid or overflowing shape.");
     }
-    const size_t elem_size = dtypeSize(e.dtype);
+    const size_t elem_size = c10::elementSize(e.dtype);
     if (*numel_opt > (std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(elem_size))) {
       throw std::runtime_error("SafeTensors load error: tensor byte size overflows.");
     }

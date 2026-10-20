@@ -28,23 +28,6 @@ namespace torch.dist
 open torch
 open torch.dist.Native
 
-/-- Reduce operation for collective communications -/
-inductive ReduceOp where
-  | sum     : ReduceOp
-  | avg     : ReduceOp
-  | product : ReduceOp
-  | min     : ReduceOp
-  | max     : ReduceOp
-  deriving Repr, BEq, Inhabited
-
-/-- Convert ReduceOp to UInt8 for FFI -/
-def ReduceOp.toUInt8 : ReduceOp → UInt8
-  | sum => 0
-  | avg => 1
-  | product => 2
-  | min => 3
-  | max => 4
-
 /-- Handle for async distributed operations -/
 structure WorkHandle where
   id : UInt64
@@ -62,7 +45,7 @@ def wait (handle : WorkHandle) : IO Unit :=
 def allReduce {σ : StaticSpec} (tensor : Tensor σ) (op : ReduceOp := .sum) : IO (Tensor σ) := do
   let requiresGrad := tensor.requiresGrad
   let result ← data.cloneInferenceIO tensor
-  let _ ← allReduceImpl result.raw op.toUInt8 0
+  let _ ← allReduceImpl result.raw op 0
   result.setRequiresGrad requiresGrad
 
 /-- Launch all-reduce on an independent buffer. Execute the returned action once
@@ -71,7 +54,7 @@ def allReduceAsync {σ : StaticSpec} (tensor : Tensor σ) (op : ReduceOp := .sum
     IO (IO (Tensor σ)) := do
   let requiresGrad := tensor.requiresGrad
   let result ← data.cloneInferenceIO tensor
-  let id ← allReduceImpl result.raw op.toUInt8 1
+  let id ← allReduceImpl result.raw op 1
   return do
     wait ⟨id⟩
     result.setRequiresGrad requiresGrad
@@ -103,7 +86,7 @@ def reduceScatter {σ : StaticSpec} (worldSize : UInt64) (input : Tensor σ)
     (op : ReduceOp := .sum)
     : IO (Tensor (σ.withShape (σ.shape.set! 0 (σ.shape.getD 0 0 / worldSize)))) := do
   let output ← collectiveOutput (σ.shape.set! 0 (σ.shape.getD 0 0 / worldSize)) input
-  let _ ← reduceScatterImpl output.raw input.raw op.toUInt8 0
+  let _ ← reduceScatterImpl output.raw input.raw op 0
   return output
 
 /-- Reduce-scatter from per-rank inputs into an independent copy of `output`.
@@ -112,7 +95,7 @@ def reduceScatterList {σ : StaticSpec} (output : Tensor σ) (inputs : Array (Te
     (op : ReduceOp := .sum) : IO (Tensor σ) := do
   let requiresGrad := output.requiresGrad
   let result ← data.cloneInferenceIO output
-  reduceScatterListImpl result.raw (inputs.map Tensor.toTensor) op.toUInt8
+  reduceScatterListImpl result.raw (inputs.map Tensor.toTensor) op
   result.setRequiresGrad requiresGrad
 
 /-- All-gather (synchronous), return-allocated: the result concatenates the
@@ -250,7 +233,7 @@ def allReduceGradsAsync {α : Type} [TensorStruct α] (grads : α) (op : ReduceO
     let result ← TensorStruct.mapM (fun t => do
       flagsRef.modify (·.push t.requiresGrad)
       let output ← data.cloneInferenceIO t
-      let id ← allReduceImpl output.raw op.toUInt8 1
+      let id ← allReduceImpl output.raw op 1
       handlesRef.modify (·.push (WorkHandle.mk id))
       pure output
     ) grads

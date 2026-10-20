@@ -130,16 +130,20 @@ extern nor a `TyrKernels` launcher. A native helper that Lean does not call
 must be `static` or carry a name outside the `lean_` prefixes that
 `cc/map/libTyrC.map` exports.
 
-The header also defines `tyr::lean::DType` and `tyr::lean::DeviceKind`, the
-constructor tags of those Lean inductives, and their constructor counts.
+The header also defines `tyr::lean::DType`, `tyr::lean::DeviceKind` and
+`tyr::lean::ReduceOp`, the constructor tags of those Lean inductives, and their
+constructor counts.
 `cc/include/tyr_tensor_metadata.h` maps them to LibTorch types; `static_assert`s
 require one dtype entry per constructor in Lean's order and a distinct
 ScalarType per entry, so reordering, inserting, or renaming a constructor fails
 to compile instead of silently mapping the wrong dtype. `DType` has only
 nullary constructors, so it crosses the ABI as its `uint8_t` tag in both
 directions: `RawTensor.dtype` reads a tag, and casts and conversions send one.
-Dtype names are parsed only in Lean (`DType.ofString?`), for external text such
-as SafeTensors headers.
+Dtype names are parsed in Lean (`DType.ofString?`). The one exception is the
+native SafeTensors reader and writer, which use
+`tyr::lean::DTypeSafeTensorTags`: `DType.safeTensorTag?` evaluated by the
+generator for each constructor tag, so native code reads and writes exactly
+the names that function defines.
 
 ### Consuming tensor updates
 
@@ -421,8 +425,9 @@ change. `tyr_ops.cpp` calls launchers only after a runtime Hopper check (`device
    Makefile ignores generated `.cu` files and links the weak launcher stubs.
 3. Writes `cc/src/generated/tyr_ffi.h` (all builds; see "Generated FFI header"
    above) by running the `GenerateFfiHeader` executable over every `TyrFFI`
-   module. Like the GPU generator, it imports only `Lean` and links no
-   `libTyrC`, and `TyrFFI` is not precompiled. Lake reruns it when it or a
+   module. Like the GPU generator, it imports only `Lean` and `TyrCodegen`
+   (`Tyr.Basic.Types`) and links no `libTyrC`, and `TyrFFI` is not
+   precompiled. Lake reruns it when it or a
    `TyrFFI` module's `.olean` changes.
 4. Runs `make -jN -C cc dylib` on every build (`N` = `TYR_MAKE_JOBS`, or the
    CPU count); a no-op run takes well under a second. Make alone decides what

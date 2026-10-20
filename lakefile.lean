@@ -280,7 +280,7 @@ lean_exe GenerateGpuKernels where
   supportInterpreter := true
 
 /-- Write the C prototypes of `TyrFFI`'s extern declarations. Imports only
-    `Lean`, so it does not link `libTyrC`. -/
+    `Lean` and `Tyr.Basic.Types` (`TyrCodegen`), so it does not link `libTyrC`. -/
 lean_exe GenerateFfiHeader where
   root := `Tyr.GenerateFfiHeader
 
