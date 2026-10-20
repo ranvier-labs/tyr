@@ -368,7 +368,7 @@ private def loadSpeakerEmbedding? (cfg : Qwen3TTSConfig) (dtype : RealFloatingDT
       let stored ← IO.ofExcept <| SomeDTypeTensor.ofRaw
         (shape := #[cfg.speakerEncoderConfig.encDim]) (device := .CPU) raw
       let converted ← RawTensor.convertIO #[cfg.speakerEncoderConfig.encDim] stored.2.raw
-        device (some dtype.val.canonicalName)
+        device (some dtype.val)
       let emb ← IO.ofExcept <| Tensor.ofRaw
         (σ := ⟨#[cfg.speakerEncoderConfig.encDim], dtype.val, device⟩) converted
       pure (some (Tensor.reshapeChecked emb #[1, 1, cfg.talkerConfig.hiddenSize]))

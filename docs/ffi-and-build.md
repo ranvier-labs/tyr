@@ -129,8 +129,10 @@ constructor tags of those Lean inductives, and their constructor counts.
 require one dtype entry per constructor in Lean's order and a distinct
 ScalarType per entry, so reordering, inserting, or renaming a constructor fails
 to compile instead of silently mapping the wrong dtype. `DType` has only
-nullary constructors, so it crosses the ABI as its `uint8_t` tag:
-`RawTensor.dtype` reads that tag, not a dtype name.
+nullary constructors, so it crosses the ABI as its `uint8_t` tag in both
+directions: `RawTensor.dtype` reads a tag, and casts and conversions send one.
+Dtype names are parsed only in Lean (`DType.ofString?`), for external text such
+as SafeTensors headers.
 
 ### Consuming tensor updates
 

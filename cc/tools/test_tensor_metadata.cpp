@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,10 +15,6 @@
 extern "C" {
 void lean_initialize_runtime_module();
 lean_object* initialize_Init(uint8_t);
-lean_object* lean_torch_get_dtype(lean_object*, lean_object*);
-lean_object* lean_torch_get_device_enum(lean_object*, lean_object*);
-lean_object* lean_torch_convert_tensor(lean_object*, lean_object*, lean_object*, lean_object*);
-lean_object* lean_torch_cast_dtype_checked(lean_object*, lean_object*, lean_object*);
 }
 
 namespace {
@@ -98,33 +95,15 @@ void testDtypeRegistry() {
     seen[ordinal] = true;
     require(scalarTypeFromLeanDTypeTag(tag) == info.scalar_type, "Lean dtype tag decode mismatch");
     require(leanDTypeTag(info.scalar_type) == tag, "Lean dtype tag encode mismatch");
-    require(std::string(c10::toString(info.scalar_type)) == info.native_name,
-            "Native dtype alias mismatch");
-    for (const auto& name : {std::string(info.canonical_name), std::string(info.native_name),
-                             std::string(info.torch_name), "torch." + std::string(info.torch_name)}) {
-      require(parseDtype(name) == info.scalar_type, "Dtype parse mismatch: " + name);
-    }
-    const auto native_names = c10::getDtypeNames(info.scalar_type);
-    for (const auto& name : {native_names.first, native_names.second}) {
-      if (name.empty()) continue;
-      require(parseDtype(name) == info.scalar_type &&
-              parseDtype("torch." + name) == info.scalar_type,
-              "Runtime-reported dtype alias mismatch: " + name);
-    }
-    require(parseDtype(dtypeName(info.scalar_type)) == info.scalar_type,
-            "Canonical native dtype metadata must roundtrip");
   }
   for (bool present : seen) require(present, "Missing native ScalarType entry");
   require(!scalarTypeFromLeanDTypeTag(tyr::lean::DTypeCount), "Tags past the last constructor are not dtypes");
-  require(!parseDtype("Undefined") && !parseDtype("NumOptions") && !parseDtype("dynamic"),
-          "Sentinels and wildcard tokens must not request a native dtype");
-  require(parseDtype("chalf") == c10::ScalarType::ComplexHalf &&
-          parseDtype("cfloat") == c10::ScalarType::ComplexFloat &&
-          parseDtype("cdouble") == c10::ScalarType::ComplexDouble,
-          "Python complex aliases must retain their component widths");
-  require(c10::elementSize(*parseDtype("Complex32")) == 4 &&
-          c10::elementSize(*parseDtype("Complex64")) == 8 &&
-          c10::elementSize(*parseDtype("Complex128")) == 16,
+  const auto complexSize = [](tyr::lean::DType tag) {
+    return c10::elementSize(*scalarTypeFromLeanDTypeTag(static_cast<unsigned>(tag)));
+  };
+  require(complexSize(tyr::lean::DType::Complex32) == 4 &&
+          complexSize(tyr::lean::DType::Complex64) == 8 &&
+          complexSize(tyr::lean::DType::Complex128) == 16,
           "Complex names count the total bits of both components");
 }
 
@@ -150,29 +129,29 @@ LeanObject loadThroughRawABI(const std::filesystem::path& directory,
   return LeanObject(raw, lean_dec);
 }
 
-std::string dtypeThroughRawABI(const std::filesystem::path& directory,
-                              c10::ScalarType dtype, const std::string& name) {
+unsigned dtypeThroughRawABI(const std::filesystem::path& directory,
+                            c10::ScalarType dtype, const std::string& name) {
   auto tensor = loadThroughRawABI(directory, dtype, name);
   auto* raw = tensor.get();
-  LeanObject dtype_name(lean_torch_get_dtype(lean_alloc_array(0, 0), raw), lean_dec);
   LeanObject device(lean_torch_get_device_enum(lean_alloc_array(0, 0), raw), lean_dec);
   require(lean_is_scalar(device.get()) &&
               lean_unbox(device.get()) == static_cast<unsigned>(tyr::lean::DeviceKind::CPU),
           "RawTensor CPU metadata must report CPU");
-  require(lean_torch_get_dtype_enum(lean_alloc_array(0, 0), raw) == tyr::metadata::leanDTypeTag(dtype),
-          "RawTensor dtype tag must match " + name);
-  return lean_string_cstr(dtype_name.get());
+  return lean_torch_get_dtype_enum(lean_alloc_array(0, 0), raw);
 }
 
-LeanObject dtypeOption(const char* tag) {
-  if (tag == nullptr) return LeanObject(lean_box(0), lean_dec);
+// `Option DType`: `some` holds the boxed constructor tag.
+LeanObject dtypeOption(std::optional<unsigned> tag) {
+  if (!tag) return LeanObject(lean_box(0), lean_dec);
   auto* option = lean_alloc_ctor(1, 1, 0);
-  lean_ctor_set(option, 0, lean_mk_string(tag));
+  lean_ctor_set(option, 0, lean_box(*tag));
   return LeanObject(option, lean_dec);
 }
 
+unsigned tagOf(tyr::lean::DType dtype) { return static_cast<unsigned>(dtype); }
+
 LeanObject convertThroughRawABI(lean_object* source, lean_object* device,
-                               const char* dtype, const std::string& context) {
+                               std::optional<unsigned> dtype, const std::string& context) {
   phase("conversion: " + context);
   auto option = dtypeOption(dtype);
   LeanObject result(lean_torch_convert_tensor(lean_alloc_array(0, 0), source,
@@ -191,9 +170,7 @@ void requireConverted(const std::filesystem::path& directory, lean_object* raw, 
   const auto expected_device = tyr::metadata::leanDeviceTag(c10::Device(device));
   require(lean_is_scalar(native_device.get()) && lean_unbox(native_device.get()) == expected_device,
           context + " returned the wrong device");
-  LeanObject native_dtype(lean_torch_get_dtype(lean_alloc_array(0, 0), raw), lean_dec);
-  const std::string expected_dtype = tyr::metadata::dtypeName(dtype);
-  require(std::string(lean_string_cstr(native_dtype.get())) == expected_dtype,
+  require(lean_torch_get_dtype_enum(lean_alloc_array(0, 0), raw) == tyr::metadata::leanDTypeTag(dtype),
           context + " reported the wrong dtype");
 
   const auto path = directory / "converted_scalar.pt";
@@ -211,25 +188,25 @@ void requireConverted(const std::filesystem::path& directory, lean_object* raw, 
 
 void testCombinedConversion(const std::filesystem::path& directory) {
   auto input = loadThroughRawABI(directory, c10::ScalarType::Float, "convert_float32");
-  auto converted = convertThroughRawABI(input.get(), lean_box(1), "F64", "CPU F32 to F64");
+  auto converted = convertThroughRawABI(input.get(), lean_box(1), tagOf(tyr::lean::DType::Float64), "CPU F32 to F64");
   requireConverted(directory, converted.get(), c10::ScalarType::Double, c10::DeviceType::CPU,
                    "CPU F32 to F64");
   requireConverted(directory, input.get(), c10::ScalarType::Float, c10::DeviceType::CPU,
                    "CPU conversion source");
 
-  for (const char* tag : {"QInt8", "Bits1x8", "not-a-dtype"}) {
-    LeanObject target(lean_mk_string(tag), lean_dec);
+  // Conversions LibTorch rejects, and a tag past the last constructor.
+  for (const unsigned tag : {tagOf(tyr::lean::DType::QInt8), tagOf(tyr::lean::DType::Bits1x8), tyr::lean::DTypeCount}) {
     LeanObject result(lean_torch_cast_dtype_checked(lean_alloc_array(0, 0), input.get(),
-                                                   target.get()), lean_dec);
+                                                   static_cast<uint8_t>(tag)), lean_dec);
     require(lean_obj_tag(result.get()) == 0,
-            std::string("Unsupported checked cast must return Except.error: ") + tag);
+            "Unsupported checked cast must return Except.error: " + std::to_string(tag));
     require(std::string(lean_string_cstr(lean_ctor_get(result.get(), 0))).find("castDType:") == 0,
             "Checked cast errors must retain operation context");
     auto option = dtypeOption(tag);
     LeanObject moved(lean_torch_convert_tensor(lean_alloc_array(0, 0), input.get(),
                                              lean_box(1), option.get()), lean_dec);
     require(lean_io_result_is_error(moved.get()),
-            std::string("Unsupported combined cast must return IO.error: ") + tag);
+            "Unsupported combined cast must return IO.error: " + std::to_string(tag));
   }
 
   // None retains the actual native dtype, including both complex widths.
@@ -237,18 +214,18 @@ void testCombinedConversion(const std::filesystem::path& directory) {
                            c10::ScalarType::ComplexFloat, c10::ScalarType::ComplexDouble}) {
     const auto name = std::string("retain_") + c10::toString(dtype);
     auto original = loadThroughRawABI(directory, dtype, name);
-    auto retained = convertThroughRawABI(original.get(), lean_box(1), nullptr, name);
+    auto retained = convertThroughRawABI(original.get(), lean_box(1), std::nullopt, name);
     requireConverted(directory, retained.get(), dtype, c10::DeviceType::CPU, name);
   }
 
   auto complex_input = loadThroughRawABI(directory, c10::ScalarType::ComplexFloat, "cast_complex64");
   auto complex_output = convertThroughRawABI(complex_input.get(), lean_box(1),
-                                            "torch.complex128", "Complex64 to Complex128");
+                                            tagOf(tyr::lean::DType::Complex128), "Complex64 to Complex128");
   requireConverted(directory, complex_output.get(), c10::ScalarType::ComplexDouble,
                    c10::DeviceType::CPU, "Complex64 to Complex128");
-  LeanObject complex_tag(lean_mk_string("Complex128"), lean_dec);
+  const auto complex_tag = static_cast<uint8_t>(tyr::lean::DType::Complex128);
   LeanObject checked_complex(lean_torch_cast_dtype_checked(lean_alloc_array(0, 0),
-                              complex_input.get(), complex_tag.get()), lean_dec);
+                              complex_input.get(), complex_tag), lean_dec);
   require(lean_obj_tag(checked_complex.get()) == 1, "Complex checked cast must return Except.ok");
   requireConverted(directory, lean_ctor_get(checked_complex.get(), 0),
                    c10::ScalarType::ComplexDouble, c10::DeviceType::CPU,
@@ -257,18 +234,18 @@ void testCombinedConversion(const std::filesystem::path& directory) {
   auto* wrong_shape = lean_alloc_array(1, 1);
   lean_array_set_core(wrong_shape, 0, lean_box_uint64(2));
   LeanObject shape_error(lean_torch_cast_dtype_checked(wrong_shape, complex_input.get(),
-                          complex_tag.get()), lean_dec);
+                          complex_tag), lean_dec);
   require(lean_obj_tag(shape_error.get()) == 0 &&
           std::string(lean_string_cstr(lean_ctor_get(shape_error.get(), 0)))
               .find("source tensor shape mismatch") != std::string::npos,
           "Checked dtype conversion must validate the supplied source shape");
 
-  for (const char* tag : {"not-a-dtype", "ComplexFloat_typo"}) {
+  for (const unsigned tag : {tyr::lean::DTypeCount, 255u}) {
     auto option = dtypeOption(tag);
     LeanObject result(lean_torch_convert_tensor(lean_alloc_array(0, 0), input.get(),
                                               lean_box(1), option.get()), lean_dec);
     require(lean_io_result_is_error(result.get()),
-            std::string("Unsupported dtype tag must return IO.error: ") + tag);
+            "Invalid dtype tag must return IO.error: " + std::to_string(tag));
   }
   for (const uint64_t index : {uint64_t{128}, uint64_t{255}, uint64_t{256},
                                std::numeric_limits<uint64_t>::max()}) {
@@ -287,13 +264,13 @@ void testCombinedConversion(const std::filesystem::path& directory) {
     return;
   }
   require(at::hasMPS(), "Native availability and ATen MPS capability disagree");
-  auto mps_input = convertThroughRawABI(input.get(), lean_box(2), nullptr, "CPU F32 to MPS");
+  auto mps_input = convertThroughRawABI(input.get(), lean_box(2), std::nullopt, "CPU F32 to MPS");
   requireConverted(directory, mps_input.get(), c10::ScalarType::Float, c10::DeviceType::MPS,
                    "CPU F32 to MPS");
-  auto cpu_double = convertThroughRawABI(mps_input.get(), lean_box(1), "F64", "MPS F32 to CPU F64");
+  auto cpu_double = convertThroughRawABI(mps_input.get(), lean_box(1), tagOf(tyr::lean::DType::Float64), "MPS F32 to CPU F64");
   requireConverted(directory, cpu_double.get(), c10::ScalarType::Double, c10::DeviceType::CPU,
                    "MPS F32 to CPU F64");
-  auto mps_float = convertThroughRawABI(cpu_double.get(), lean_box(2), "F32", "CPU F64 to MPS F32");
+  auto mps_float = convertThroughRawABI(cpu_double.get(), lean_box(2), tagOf(tyr::lean::DType::Float32), "CPU F64 to MPS F32");
   requireConverted(directory, mps_float.get(), c10::ScalarType::Float, c10::DeviceType::MPS,
                    "CPU F64 to MPS F32");
   std::cout << "Combined MPS F32/CPU F64 conversion checks passed in both directions.\n";
@@ -320,9 +297,9 @@ int main(int argc, char** argv) {
     const auto f32 = dtypeThroughRawABI(argv[1], c10::ScalarType::Float, "float32");
     const auto c64 = dtypeThroughRawABI(argv[1], c10::ScalarType::ComplexFloat, "complex64");
     const auto c128 = dtypeThroughRawABI(argv[1], c10::ScalarType::ComplexDouble, "complex128");
-    require(f32 == "Float32", "Known dtype canonical spelling changed: " + f32);
-    require(c64 == "Complex64", "ComplexFloat metadata must report Complex64: " + c64);
-    require(c128 == "Complex128", "ComplexDouble metadata must report Complex128: " + c128);
+    require(f32 == static_cast<unsigned>(tyr::lean::DType::Float32), "Float metadata must report Float32");
+    require(c64 == static_cast<unsigned>(tyr::lean::DType::Complex64), "ComplexFloat metadata must report Complex64");
+    require(c128 == static_cast<unsigned>(tyr::lean::DType::Complex128), "ComplexDouble metadata must report Complex128");
     require(c64 != c128, "Different complex widths must remain distinguishable");
     phase("checked dtype and device conversions");
     testCombinedConversion(argv[1]);

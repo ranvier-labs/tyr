@@ -449,13 +449,6 @@ lean_object* lean_torch_get_shape(lean_obj_arg s, b_lean_obj_arg t) {
     return arr;
 }
 
-// Get dtype as string
-lean_object* lean_torch_get_dtype(lean_obj_arg s, b_lean_obj_arg t) {
-  lean_dec(s);
-    auto tensor = borrowTensor(t);
-    return lean_mk_string(tyr::metadata::dtypeName(tensor.scalar_type()));
-}
-
 // DType has only nullary constructors, so Lean passes it as its tag.
 uint8_t lean_torch_get_dtype_enum(lean_obj_arg s, b_lean_obj_arg t) {
   lean_dec(s);
@@ -3806,10 +3799,6 @@ static std::string jsonEscape(const std::string& s) {
   return out.str();
 }
 
-static std::optional<torch::ScalarType> parseDtype(const std::string& dtype) {
-  return tyr::metadata::parseDtype(dtype);
-}
-
 // Supported storage types have matching dtypeSize and writer tags below.
 static std::optional<torch::ScalarType> parseSafeTensorDtype(const std::string& dtype) {
   if (dtype == "F32" || dtype == "float32") return torch::kFloat32;
@@ -3828,25 +3817,25 @@ static std::optional<torch::ScalarType> parseSafeTensorDtype(const std::string& 
   return std::nullopt;
 }
 
+static c10::ScalarType scalarTypeOfLeanDType(unsigned tag) {
+  const auto dtype = tyr::metadata::scalarTypeFromLeanDTypeTag(tag);
+  TORCH_CHECK(dtype.has_value(), "Invalid Lean DType tag: ", tag);
+  return *dtype;
+}
+
 extern "C" LEAN_EXPORT lean_object* lean_torch_cast_dtype(
-    lean_obj_arg shape, b_lean_obj_arg tensor, b_lean_obj_arg tag) {
+    lean_obj_arg shape, b_lean_obj_arg tensor, uint8_t dtype) {
   lean_dec(shape);
-  const auto dtype = parseDtype(lean_string_cstr(tag));
-  if (!dtype) {
-    throw std::invalid_argument("Unsupported tensor dtype tag");
-  }
-  return fromTorchTensor(borrowTensor(tensor).to(*dtype));
+  return fromTorchTensor(borrowTensor(tensor).to(scalarTypeOfLeanDType(dtype)));
 }
 
 extern "C" LEAN_EXPORT lean_object* lean_torch_cast_dtype_checked(
-    lean_obj_arg shape, b_lean_obj_arg tensor, b_lean_obj_arg tag) {
+    lean_obj_arg shape, b_lean_obj_arg tensor, uint8_t dtype) {
   return tyr::checkedCall("castDType", [&] {
     OwnedLeanObject shape_owner(shape, lean_dec);
     auto source = borrowTensor(tensor);
     TORCH_CHECK(source.sizes().vec() == getShape(shape), "source tensor shape mismatch");
-    const auto dtype = parseDtype(lean_string_cstr(tag));
-    TORCH_CHECK(dtype.has_value(), "Unsupported target dtype tag: ", lean_string_cstr(tag));
-    return fromTorchTensor(source.to(*dtype));
+    return fromTorchTensor(source.to(scalarTypeOfLeanDType(dtype)));
   });
 }
 
@@ -3863,10 +3852,8 @@ extern "C" LEAN_EXPORT lean_object* lean_torch_convert_tensor(
 
     auto target_dtype = source.scalar_type();
     if (!lean_is_scalar(dtype_option)) {
-      const auto* tag = lean_string_cstr(lean_ctor_get(dtype_option, 0));
-      const auto parsed_dtype = parseDtype(tag);
-      TORCH_CHECK(parsed_dtype.has_value(), "Unsupported target dtype tag: ", tag);
-      target_dtype = *parsed_dtype;
+      // `some dtype` holds the boxed constructor tag.
+      target_dtype = scalarTypeOfLeanDType(lean_unbox(lean_ctor_get(dtype_option, 0)));
     }
     const auto target_device = getDevice(device);
 
@@ -5483,7 +5470,7 @@ lean_object* lean_torch_acquire_constant_support(
         "Constant conversion returned incorrect dtype or placement");
       TORCH_CHECK(torch::equal(expected, actual.to(torch::kCPU).to(torch::kFloat32)),
         "Dtype cannot represent exact zero and one constants: ",
-        tyr::metadata::dtypeName(*scalar_type));
+        c10::toString(*scalar_type));
     };
     // Match the factory paths, rather than treating dtype recognition or an
     // existing tensor as proof that allocation/conversion kernels are present.

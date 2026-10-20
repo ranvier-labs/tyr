@@ -25,10 +25,10 @@ namespace torch.RawTensor
 @[extern "lean_torch_to"] opaque toDevice (shape : Shape) (t : @& RawTensor) (device : Device) : RawTensor
 
 /-- Convert dtype and device together, with native failures returned through IO.
-`none` retains the source dtype; a supplied tag must name a supported dtype.
+`none` retains the source dtype; a supplied dtype must have a native conversion.
 The source shape is checked before conversion and never reshaped. -/
 @[extern "lean_torch_convert_tensor"] opaque convertIO (shape : Shape)
-    (t : @& RawTensor) (device : @& Device) (dtype : @& Option String) : IO RawTensor
+    (t : @& RawTensor) (device : @& Device) (dtype : @& Option DType) : IO RawTensor
 
 @[extern "lean_torch_requires_grad"] opaque requiresGrad (shape : Shape) (t : @& RawTensor) : Bool
 

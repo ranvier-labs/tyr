@@ -70,8 +70,8 @@ void checkShape(const std::string& label, Action action) {
 
 void checkBorrowedTensor(lean_object* tensor) {
   require(tensor->m_rc == 1, "Borrowed tensor reference count changed");
-  LeanObject dtype(lean_torch_get_dtype(shape({}), tensor), lean_dec);
-  require(std::string(lean_string_cstr(dtype.get())) == "Float32", "Borrowed tensor is invalid");
+  require(lean_torch_get_dtype_enum(shape({}), tensor) == static_cast<uint8_t>(tyr::lean::DType::Float32),
+          "Borrowed tensor is invalid");
   LeanObject values(lean_torch_get_values(shape({}), tensor, 4), lean_dec);
   require(lean_sarray_size(values.get()) == 4, "Borrowed tensor shape changed");
   auto* data = reinterpret_cast<const double*>(lean_sarray_cptr(values.get()));
@@ -82,7 +82,7 @@ void testShapesAndMetadata(lean_object* tensor) {
   using Unary = lean_object* (*)(lean_object*, lean_object*);
   const std::pair<const char*, Unary> calls[] = {
     {"toString", lean_torch_to_string}, {"runtimeShape", lean_torch_get_shape},
-    {"dtype", lean_torch_get_dtype}, {"device", lean_torch_get_device_enum},
+    {"device", lean_torch_get_device_enum},
     {"deviceString", lean_torch_get_device}, {"stats", lean_torch_get_stats},
     {"zerosLike", lean_torch_zeros_like}, {"onesLike", lean_torch_ones_like},
     {"abs", lean_torch_abs}, {"sqrt", lean_torch_sqrt}, {"rsqrt", lean_torch_rsqrt},
@@ -93,6 +93,10 @@ void testShapesAndMetadata(lean_object* tensor) {
   for (const auto& [name, call] : calls) {
     checkShape(name, [&](auto* s) { return call(s, tensor); });
   }
+  checkShape("dtype", [&](auto* s) {
+    (void)lean_torch_get_dtype_enum(s, tensor);
+    return lean_box(0);
+  });
   checkShape("values", [&](auto* s) { return lean_torch_get_values(s, tensor, 4); });
   checkShape("addScalar", [&](auto* s) { return lean_torch_add_scalar(s, tensor, 2); });
   checkShape("subScalar", [&](auto* s) { return lean_torch_sub_scalar(s, tensor, 2); });

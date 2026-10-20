@@ -34,11 +34,11 @@ namespace RawTensor
     (device : Device := .CPU) (noGrad : requiresGrad = false := by decide) : RawTensor
 
 @[extern "lean_torch_cast_dtype"] opaque castDType (shape : Shape) (t : @& RawTensor)
-    (tag : @& String) : RawTensor
+    (dtype : DType) : RawTensor
 
 /-- Convert dtype with native validation/conversion failures carried explicitly. -/
 @[extern "lean_torch_cast_dtype_checked"] opaque castDTypeChecked (shape : Shape)
-    (t : @& RawTensor) (tag : @& String) : Except String RawTensor
+    (t : @& RawTensor) (dtype : DType) : Except String RawTensor
 
 -- Preserve the existing C ABI's shape argument without exposing a shape-indexed
 -- raw type. Metadata queries inspect the native tensor, never this argument.
@@ -53,8 +53,6 @@ instance : Repr RawTensor where
 
 @[extern "lean_torch_get_shape"] private opaque runtimeShapeImpl
     (shape : Shape) (t : @& RawTensor) : Shape
-@[extern "lean_torch_get_dtype"] private opaque dtypeStrImpl
-    (shape : Shape) (t : @& RawTensor) : String
 @[extern "lean_torch_get_dtype_enum"] private opaque dtypeImpl
     (shape : Shape) (t : @& RawTensor) : DType
 @[extern "lean_torch_get_device_enum"] private opaque deviceImpl
@@ -68,8 +66,8 @@ instance : Repr RawTensor where
 
 /-- Native metadata, independent of any static tensor specification. -/
 def runtimeShape (t : RawTensor) : Shape := runtimeShapeImpl #[] t
-def dtypeStr (t : RawTensor) : String := dtypeStrImpl #[] t
 def dtype (t : RawTensor) : DType := dtypeImpl #[] t
+def dtypeStr (t : RawTensor) : String := t.dtype.canonicalName
 def device (t : RawTensor) : Device := deviceImpl #[] t
 def deviceStr (t : RawTensor) : String := deviceStrImpl #[] t
 def getValues (t : RawTensor) (maxElements : UInt64 := 1000) : FloatArray :=
@@ -143,7 +141,7 @@ opaque ofRaw {σ : StaticSpec} (raw : RawTensor) : Except String (Tensor σ) :=
 private unsafe def zerosForImpl (σ : StaticSpec)
     [DType.ConstantSupported σ.dtype σ.device] : Tensor σ :=
   let raw := RawTensor.zeros σ.shape false σ.device
-  let raw := RawTensor.castDType σ.shape raw σ.dtype.canonicalName
+  let raw := RawTensor.castDType σ.shape raw σ.dtype
   unsafeCast raw
 
 /-- Trusted native allocation boundary for a supported constant specification.

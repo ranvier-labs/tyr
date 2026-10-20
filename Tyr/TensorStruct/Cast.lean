@@ -45,13 +45,13 @@ private def castTensorAt {σ τ : StaticSpec} (path : String)
     checked (TensorSpec.checkShape τ.shape σ.shape)
     let sourceDType := tensor.raw.dtype
     let targetDType := τ.dtype
-    let dtypeTag := if targetDType == sourceDType then none else some targetDType.canonicalName
+    let requestedDType := if targetDType == sourceDType then none else some targetDType
     let targetDevice := τ.device
     -- Request dtype and placement together: an intermediate dtype may be
     -- unsupported on the source device (e.g. MPS Float32 -> CPU Float64).
-    let raw ← if dtypeTag.isNone && targetDevice == tensor.raw.device then
+    let raw ← if requestedDType.isNone && targetDevice == tensor.raw.device then
         pure tensor.raw
-      else RawTensor.convertIO σ.shape tensor.raw targetDevice dtypeTag
+      else RawTensor.convertIO σ.shape tensor.raw targetDevice requestedDType
     -- Check retained metadata as well as requested conversions.
     checked (TensorSpec.checkDType targetDType raw.dtype)
     checked (Device.check targetDevice raw.device)

@@ -259,10 +259,10 @@ void transposeScalar() {
   values(exceptValue(result.get()), 1, 5);
 }
 
-Object cast(lean_object* input, const char* dtype) {
-  Object tag(lean_mk_string(dtype), lean_dec);
+Object cast(lean_object* input, tyr::lean::DType dtype) {
   Object dims(lean_torch_get_shape(shape({}), input), lean_dec);
-  Object result(lean_torch_cast_dtype_checked(retain(dims.get()), input, tag.get()), lean_dec);
+  Object result(lean_torch_cast_dtype_checked(retain(dims.get()), input,
+                                              static_cast<uint8_t>(dtype)), lean_dec);
   return Object(retain(exceptValue(result.get())), lean_dec);
 }
 
@@ -309,7 +309,7 @@ void checkedMax(bool invalid) {
 
 void checkedRelu(bool invalid) {
   auto original = full({2}, 3);
-  auto input = invalid ? cast(original.get(), "Complex64") : Object(retain(original.get()), lean_dec);
+  auto input = invalid ? cast(original.get(), tyr::lean::DType::Complex64) : Object(retain(original.get()), lean_dec);
   Object dims(shape({2}), lean_dec);
   const auto refs = input->m_rc;
   Object result(CHECKED(lean_torch_tensor_relu)(retain(dims.get()), input.get()), lean_dec);
@@ -333,7 +333,7 @@ void checkedBinary(Binary operation, const char* context, bool invalid) {
 using Scalar = lean_object* (*)(lean_object*, lean_object*, double);
 void checkedScalar(Scalar operation, const char* context, bool invalid) {
   auto original = full({2}, 6);
-  auto input = invalid ? cast(original.get(), "Float8E4M3FN") : Object(retain(original.get()), lean_dec);
+  auto input = invalid ? cast(original.get(), tyr::lean::DType::Float8E4M3FN) : Object(retain(original.get()), lean_dec);
   Object dims(shape({2}), lean_dec);
   const auto refs = input->m_rc;
   Object result(operation(retain(dims.get()), input.get(), 2), lean_dec);
@@ -346,7 +346,7 @@ void checkedScalar(Scalar operation, const char* context, bool invalid) {
 
 void checkedWhere(bool invalid) {
   auto a = full({2}, 3), b = full({2}, 8);
-  auto condition = invalid ? Object(retain(a.get()), lean_dec) : cast(a.get(), "Bool");
+  auto condition = invalid ? Object(retain(a.get()), lean_dec) : cast(a.get(), tyr::lean::DType::Bool);
   Object result(CHECKED(lean_torch_where)(shape({2}), condition.get(), a.get(), b.get()), lean_dec);
   if (invalid) exceptError(result.get(), "whereSelect");
   else values(exceptValue(result.get()), 2, 3);
@@ -354,7 +354,7 @@ void checkedWhere(bool invalid) {
 
 void checkedMatrices(bool invalid) {
   auto original = full({2, 2}, 2);
-  auto input = invalid ? cast(original.get(), "Bool") : Object(retain(original.get()), lean_dec);
+  auto input = invalid ? cast(original.get(), tyr::lean::DType::Bool) : Object(retain(original.get()), lean_dec);
   const auto refs = input->m_rc;
   auto check = [&](lean_object* raw, const char* context) {
     Object result(raw, lean_dec);
@@ -423,23 +423,23 @@ void checkedIoExceptionKinds() {
 
 void checkedComplexDivision() {
   auto real = full({2}, 3);
-  auto complex = cast(real.get(), "Complex32");
+  auto complex = cast(real.get(), tyr::lean::DType::Complex32);
   Object result(CHECKED(lean_torch_div)(shape({2}), complex.get(), complex.get()), lean_dec);
   exceptError(result.get(), "ComplexHalf");
 }
 
 void checkedMixedMatrix() {
   auto real = full({2, 2}, 3);
-  auto other = cast(real.get(), "Float64");
+  auto other = cast(real.get(), tyr::lean::DType::Float64);
   Object result(CHECKED(lean_torch_mm)(2, 2, 2, real.get(), other.get()), lean_dec);
   exceptError(result.get(), "dtype");
 }
 
 void checkedAffine(int mismatch) {
   auto input = full({1, 2, 2}, 3), originalWeight = full({2, 2}, 2), originalBias = full({2}, 1);
-  auto weight = mismatch == 1 ? cast(originalWeight.get(), "Float64") :
+  auto weight = mismatch == 1 ? cast(originalWeight.get(), tyr::lean::DType::Float64) :
     Object(retain(originalWeight.get()), lean_dec);
-  auto bias = mismatch == 2 ? cast(originalBias.get(), "Float64") :
+  auto bias = mismatch == 2 ? cast(originalBias.get(), tyr::lean::DType::Float64) :
     Object(retain(originalBias.get()), lean_dec);
   const auto weightRefs = weight->m_rc, biasRefs = bias->m_rc;
   Object result(CHECKED(lean_torch_affine3d)(1, 2, 2, 2,
@@ -511,10 +511,10 @@ void checkedUnaryParameterErrors() {
   exceptError(softmax.get(), "softmax");
   Object logSoftmax(CHECKED(lean_torch_log_softmax)(input.get(), 9), lean_dec);
   exceptError(logSoftmax.get(), "logSoftmax");
-  auto complex = cast(input.get(), "Complex64");
+  auto complex = cast(input.get(), tyr::lean::DType::Complex64);
   Object gelu(CHECKED(lean_torch_tensor_gelu)(retain(dims.get()), complex.get()), lean_dec);
   exceptError(gelu.get(), "gelu");
-  auto fp8 = cast(input.get(), "Float8E4M3FN");
+  auto fp8 = cast(input.get(), tyr::lean::DType::Float8E4M3FN);
   Object pow(CHECKED(lean_torch_pow)(retain(dims.get()), fp8.get(), 2), lean_dec);
   exceptError(pow.get(), "pow");
   require(dims->m_rc == 1 && input->m_rc == 1, "Checked parameterized unary ownership imbalance");
@@ -573,7 +573,7 @@ void checkedLinalgFailures() {
 #endif
 void checkedArgmax(int mode) {
   auto original = full({2, mode == 2 ? 0u : 3u}, 7);
-  auto input = mode == 1 ? cast(original.get(), "Complex64") :
+  auto input = mode == 1 ? cast(original.get(), tyr::lean::DType::Complex64) :
     Object(retain(original.get()), lean_dec);
   Object dims(shape({2, mode == 2 ? 0u : 3u}), lean_dec);
   const auto refs = input->m_rc;
@@ -589,7 +589,7 @@ void checkedArgmax(int mode) {
 
 void checkedSelectionPair(bool topK, int mode) {
   auto original = topK ? full({2, 3}, 7) : full({1, 2, mode == 2 ? 0u : 3u}, 7);
-  auto input = mode == 1 ? cast(original.get(), "Complex64") :
+  auto input = mode == 1 ? cast(original.get(), tyr::lean::DType::Complex64) :
     Object(retain(original.get()), lean_dec);
   const auto refs = input->m_rc;
   const uint64_t k = mode == 2 ? 4 : mode == 3 ? std::numeric_limits<uint64_t>::max() : 2;
@@ -603,8 +603,8 @@ void checkedSelectionPair(bool topK, int mode) {
     require(!lean_is_scalar(pair) && !lean_is_external(pair) && lean_obj_tag(pair) == 0,
       "Expected selection value/index pair");
     values(lean_ctor_get(pair, 0), topK ? 4 : 2, 7);
-    Object dtype(lean_torch_get_dtype(shape({}), lean_ctor_get(pair, 1)), lean_dec);
-    require(std::string(lean_string_cstr(dtype.get())) == "Int64", "Selection index dtype changed");
+    require(lean_torch_get_dtype_enum(shape({}), lean_ctor_get(pair, 1)) ==
+              static_cast<uint8_t>(tyr::lean::DType::Int64), "Selection index dtype changed");
   }
   require(input->m_rc == refs, "checked selection changed borrowed references");
 }

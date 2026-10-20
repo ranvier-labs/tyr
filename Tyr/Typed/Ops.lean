@@ -94,7 +94,7 @@ def uniformLike {σ : StaticSpec} (reference : Tensor σ) (lo : Float := 0.0)
 /-- A valid one value for a complete specification, mirroring `zerosFor`. -/
 def onesFor (σ : StaticSpec) [DType.ConstantSupported σ.dtype σ.device] : Tensor σ :=
   let raw := RawTensor.ones σ.shape false σ.device
-  let raw := RawTensor.castDType σ.shape raw σ.dtype.canonicalName
+  let raw := RawTensor.castDType σ.shape raw σ.dtype
   checkedResult "onesFor" (Tensor.ofRaw raw)
 
 /-- Transfer a tensor to the requested device, preserving its shape and dtype.
@@ -238,7 +238,7 @@ def eye (n : UInt64) : Tensor ⟨#[n, n], .Float32, .CPU⟩ :=
 def eyeFor {n : UInt64} (d : DType) (dev : Device := .CPU)
     [DType.ConstantSupported d dev] : Tensor ⟨#[n, n], d, dev⟩ :=
   let raw := RawTensor.eye n
-  let raw := RawTensor.castDType #[n, n] raw d.canonicalName
+  let raw := RawTensor.castDType #[n, n] raw d
   let raw := RawTensor.toDevice #[n, n] raw dev
   checkedResult "eyeFor" (Tensor.ofRaw raw)
 

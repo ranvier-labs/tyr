@@ -31,7 +31,7 @@ def copyInto {s : Shape} {d : DType} {dstDevice srcDevice : Device}
 recognizing a dtype does not promise that a backend implements its conversion. -/
 def castDType? {σ : StaticSpec} (t : Tensor σ) (dtype : DType) :
     Except String (Tensor (σ.withDType dtype)) := do
-  let raw ← RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
+  let raw ← RawTensor.castDTypeChecked σ.shape t.raw dtype
   Device.check t.raw.device raw.device
   Tensor.ofRaw (σ := σ.withDType dtype) raw
 
@@ -46,7 +46,7 @@ def castLike? {σ τ : StaticSpec} (reference : Tensor τ) (t : Tensor σ) :
     Except String (Tensor (σ.withDType τ.dtype)) := do
   let dtype := reference.raw.dtype
   let raw ← if t.raw.dtype == dtype then pure t.raw else
-    RawTensor.castDTypeChecked σ.shape t.raw dtype.canonicalName
+    RawTensor.castDTypeChecked σ.shape t.raw dtype
   TensorSpec.checkDType dtype raw.dtype
   Device.check t.raw.device raw.device
   Tensor.ofRaw (σ := σ.withDType τ.dtype) raw
