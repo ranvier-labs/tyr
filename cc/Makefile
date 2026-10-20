@@ -193,7 +193,6 @@ SRCS := \
 	tyr_polar.cpp\
 	tyr_media_stub.cpp\
 	tyr_parquet.cpp\
-	tyr_execution.cpp\
 	float_buffer.cpp
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
