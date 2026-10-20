@@ -1,4 +1,4 @@
-import Tyr.RawTensor.SafeTensors
+import Tyr.SafeTensors.File
 import Tyr.Typed.Tensor
 
 /-! Exact-dtype checkpoint admission. These loaders preserve the stored dtype

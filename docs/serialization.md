@@ -22,19 +22,22 @@ Everything below lives in three namespaces: `torch.safetensors`, `torch.Hub`, an
 
 ### Native boundary and indexed loaders
 
-`Tyr.RawTensor.SafeTensors` contains native single-file, open-handle, and sharded
-loading adapters. They preserve stored dimensions rather than reshaping to the
-caller's expected layout. `Tyr.SafeTensors.Schema` then checks shape, dtype, and
-placement before returning an indexed tensor.
+`Tyr.SafeTensors.File` parses and validates SafeTensors headers in Lean and
+provides the single-file, open-handle, and sharded loaders. Native code
+(`Tyr.RawTensor.SafeTensors`) only reads a tensor's byte range and writes
+tensor bytes. The loaders preserve stored dimensions rather than reshaping to
+the caller's expected layout. `Tyr.SafeTensors.Schema` then checks shape, dtype,
+and placement before returning an indexed tensor.
 
-`torch.safetensors.openHandle` returns a `SafeTensorsHandle` for repeated reads.
+`torch.safetensors.openHandle` returns a `SafeTensorsHandle`, the parsed header,
+for repeated reads; headers are parsed once per path and directory.
 Use `loadFromHandleWithSpec`, `loadTensorWithSpec`, or
 `loadTensorShardedWithSpec` with a `TensorSpec`; each returns
 `IO (Tensor { shape := spec.shape, dtype := spec.dtype, device := device })`. The result is indexed by the requested device, which defaults to CPU.
 Contract variants also carry a role and optional expected-device metadata.
 
-The generated FFI header covers all four loading entry points. `Tensor.saveSafeTensor tensor path name` writes one
-tensor under a named key. Training snapshots use the separate checkpoint APIs.
+`Tensor.saveSafeTensor tensor path name` writes one tensor under a named key;
+Lean builds the header. Training snapshots use the separate checkpoint APIs.
 
 ### Runtime schema introspection
 

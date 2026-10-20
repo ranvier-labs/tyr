@@ -1,5 +1,6 @@
 import Tyr.Typed.Ops
 import Tyr.RawTensor.Neural
+import Tyr.SafeTensors.File
 
 namespace torch.Tensor
 
@@ -580,7 +581,7 @@ def log {σ : StaticSpec} (input : Tensor σ)
 
 
 def saveSafeTensor {σ : StaticSpec} (input : Tensor σ) (path name : String) : IO Unit :=
-  RawTensor.saveSafeTensor σ.shape path name input.raw
+  RawTensor.saveSafeTensor path name input.raw
 
 /-- Clip the parameter's accumulated gradient in place, returning its pre-clip norm. -/
 def clipGradNorm {σ : StaticSpec} (input : Tensor σ) (maxNorm : Float) : IO Float :=

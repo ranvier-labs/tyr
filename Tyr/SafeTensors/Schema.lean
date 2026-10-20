@@ -6,7 +6,7 @@
   - introspect single-file or sharded-directory layouts
   - support HuggingFace `model.safetensors.index.json` when present
 -/
-import Tyr.RawTensor.SafeTensors
+import Tyr.SafeTensors.File
 import Tyr.Typed.Tensor
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson
@@ -174,11 +174,6 @@ private def getObjVal? (j : Json) (key : String) : Option Json :=
   | .obj kvs => Std.TreeMap.Raw.get? kvs key
   | _ => none
 
-private def getArr? (j : Json) : Option (Array Json) :=
-  match j with
-  | .arr xs => some xs
-  | _ => none
-
 private def getStr? (j : Json) : Option String :=
   match j with
   | .str s => some s
@@ -189,130 +184,10 @@ private def getObjPairs? (j : Json) : Option (List (String × Json)) :=
   | .obj kvs => some kvs.toList
   | _ => none
 
-private def getNat? (j : Json) : Option Nat :=
-  match (FromJson.fromJson? j : Except String Nat) with
-  | .ok n => some n
-  | .error _ => none
-
-private def readU64LE? (bytes : ByteArray) (offset : Nat) : Option UInt64 :=
-  if offset + 8 > bytes.size then
-    none
-  else
-    let b0 := bytes[offset]!
-    let b1 := bytes[offset + 1]!
-    let b2 := bytes[offset + 2]!
-    let b3 := bytes[offset + 3]!
-    let b4 := bytes[offset + 4]!
-    let b5 := bytes[offset + 5]!
-    let b6 := bytes[offset + 6]!
-    let b7 := bytes[offset + 7]!
-    some (
-      b0.toUInt64 |||
-      (b1.toUInt64 <<< 8) |||
-      (b2.toUInt64 <<< 16) |||
-      (b3.toUInt64 <<< 24) |||
-      (b4.toUInt64 <<< 32) |||
-      (b5.toUInt64 <<< 40) |||
-      (b6.toUInt64 <<< 48) |||
-      (b7.toUInt64 <<< 56)
-    )
-
-private def parseTensorEntry (tensorName sourceFile : String) (entryJson : Json)
-    : Except String TensorSchema := do
-  let dtypeJson ←
-    match getObjVal? entryJson "dtype" with
-    | some j => pure j
-    | none => .error s!"SafeTensors entry '{tensorName}' is missing 'dtype'"
-  let dtypeRaw ←
-    match getStr? dtypeJson with
-    | some s => pure s
-    | none => .error s!"SafeTensors entry '{tensorName}' has non-string 'dtype'"
-  let dtype ←
-    match DType.ofString? dtypeRaw with
-    | some dt => pure dt
-    | none => .error s!"SafeTensors entry '{tensorName}' has unsupported dtype '{dtypeRaw}'"
-
-  let shapeJson ←
-    match getObjVal? entryJson "shape" with
-    | some j => pure j
-    | none => .error s!"SafeTensors entry '{tensorName}' is missing 'shape'"
-  let dimsJson ←
-    match getArr? shapeJson with
-    | some xs => pure xs
-    | none => .error s!"SafeTensors entry '{tensorName}' has non-array 'shape'"
-
-  let mut shape : Shape := #[]
-  for dimJson in dimsJson do
-    let n ←
-      match getNat? dimJson with
-      | some x => pure x
-      | none => .error s!"SafeTensors entry '{tensorName}' has non-natural shape dimension"
-    shape := shape.push n.toUInt64
-
-  pure {
-    name := tensorName
-    dtype := dtype
-    shape := shape
-    sourceFile := sourceFile
-  }
-
-private def parseHeaderEntries (sourceFile : String) (headerJson : Json)
-    : Except String (Array TensorSchema) := do
-  let pairs ←
-    match headerJson with
-    | .obj kvs => pure kvs.toList
-    | _ => .error "SafeTensors header is not a JSON object"
-
-  let mut entries : Array TensorSchema := #[]
-  for (tensorName, entryJson) in pairs do
-    if tensorName != "__metadata__" then
-      let parsed ← parseTensorEntry tensorName sourceFile entryJson
-      entries := entries.push parsed
-  pure entries
-
-/-- Maximum JSON header allocation during schema discovery (100 MiB). -/
-def maxHeaderBytes : Nat := 100 * 1024 * 1024
-
-private def readHeaderBytes (handle : IO.FS.Handle) (count : Nat) : IO ByteArray := do
-  let mut bytes := ByteArray.empty
-  while bytes.size < count do
-    let chunk ← handle.read (count - bytes.size).toUSize
-    if chunk.isEmpty then break
-    bytes := bytes ++ chunk
-  pure bytes
-
 private def parseSafeTensorFile (path sourceFile : String) : IO (Array TensorSchema) := do
-  let handle ← IO.FS.Handle.mk path .read
-  let bytes ← readHeaderBytes handle 8
-  let headerSize ←
-    match readU64LE? bytes 0 with
-    | some n => pure n
-    | none => throw <| IO.userError s!"Invalid SafeTensors file '{path}': missing 8-byte header size"
-  let headerSizeNat := headerSize.toNat
-  if headerSizeNat > maxHeaderBytes then
-    throw <| IO.userError
-      s!"Invalid SafeTensors file '{path}': header exceeds {maxHeaderBytes}-byte limit"
-  let fileSize := (← (System.FilePath.mk path).metadata).byteSize.toNat
-  if 8 + headerSizeNat > fileSize then
-    throw <| IO.userError
-      s!"Invalid SafeTensors file '{path}': header exceeds file size ({headerSizeNat} bytes)"
-
-  let headerBytes ← readHeaderBytes handle headerSizeNat
-  if headerBytes.size != headerSizeNat then
-    throw <| IO.userError s!"Invalid SafeTensors file '{path}': truncated header"
-  let headerStr ←
-    match String.fromUTF8? headerBytes with
-    | some s => pure s
-    | none => throw <| IO.userError s!"Invalid SafeTensors file '{path}': header is not UTF-8"
-  let headerJson ←
-    match Json.parse headerStr with
-    | .ok j => pure j
-    | .error err =>
-      throw <| IO.userError s!"Invalid SafeTensors file '{path}': failed to parse header JSON: {err}"
-
-  match parseHeaderEntries sourceFile headerJson with
-  | .ok entries => pure entries
-  | .error err => throw <| IO.userError s!"Invalid SafeTensors file '{path}': {err}"
+  let file ← readHeader path
+  pure <| file.entries.toArray.map fun (name, entry) =>
+    { name, dtype := entry.dtype, shape := entry.shape, sourceFile }
 
 private def parseJsonFile (path : String) : IO Json := do
   let contents ← IO.FS.readFile path

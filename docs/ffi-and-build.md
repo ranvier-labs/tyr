@@ -139,11 +139,10 @@ ScalarType per entry, so reordering, inserting, or renaming a constructor fails
 to compile instead of silently mapping the wrong dtype. `DType` has only
 nullary constructors, so it crosses the ABI as its `uint8_t` tag in both
 directions: `RawTensor.dtype` reads a tag, and casts and conversions send one.
-Dtype names are parsed in Lean (`DType.ofString?`). The one exception is the
-native SafeTensors reader and writer, which use
-`tyr::lean::DTypeSafeTensorTags`: `DType.safeTensorTag?` evaluated by the
-generator for each constructor tag, so native code reads and writes exactly
-the names that function defines.
+Dtype names exist only in Lean. SafeTensors headers are parsed and written by
+`Tyr.SafeTensors.File`, with names and element widths from
+`DType.safeTensorFormat?`; native code only reads and writes tensor bytes, and
+checks each byte count against LibTorch's element size.
 
 ### Consuming tensor updates
 
@@ -425,9 +424,8 @@ change. `tyr_ops.cpp` calls launchers only after a runtime Hopper check (`device
    Makefile ignores generated `.cu` files and links the weak launcher stubs.
 3. Writes `cc/src/generated/tyr_ffi.h` (all builds; see "Generated FFI header"
    above) by running the `GenerateFfiHeader` executable over every `TyrFFI`
-   module. Like the GPU generator, it imports only `Lean` and `TyrCodegen`
-   (`Tyr.Basic.Types`) and links no `libTyrC`, and `TyrFFI` is not
-   precompiled. Lake reruns it when it or a
+   module. Like the GPU generator, it imports only `Lean` and links no
+   `libTyrC`, and `TyrFFI` is not precompiled. Lake reruns it when it or a
    `TyrFFI` module's `.olean` changes.
 4. Runs `make -jN -C cc dylib` on every build (`N` = `TYR_MAKE_JOBS`, or the
    CPU count); a no-op run takes well under a second. Make alone decides what

@@ -1,33 +1,21 @@
 import Tyr.RawTensor
 
-/-! Native SafeTensors boundaries. Public loaders validate stored metadata before
-returning indexed tensors. An empty native shape requests the stored layout. -/
-namespace torch.safetensors
-opaque SafeTensorsHandle : Type
-@[extern "lean_torch_safetensors_open"]
-opaque openHandle (path : @& String) : IO SafeTensorsHandle
-end torch.safetensors
+/-! Native SafeTensors byte transfer. Headers are parsed and written in Lean
+(`Tyr.SafeTensors.File`); native code only moves tensor data. -/
 
 namespace torch.RawTensor
-@[extern "lean_torch_safetensors_load_from_handle"]
-opaque safeTensorsLoadFromHandle (handle : @& safetensors.SafeTensorsHandle)
-    (name : @& String) (shape : Shape) : IO RawTensor
-@[extern "lean_torch_safetensors_load"]
-opaque safeTensorsLoad (path name : @& String) (shape : Shape) : IO RawTensor
-@[extern "lean_torch_safetensors_load_sharded"]
-opaque safeTensorsLoadSharded (dir name : @& String) (shape : Shape) : IO RawTensor
 
-/-- Preserve stored dimensions until the public contract has been checked. -/
-def safeTensorsLoadOnDevice (path name : String) (device : Device) : IO RawTensor := do
-  let raw ← safeTensorsLoad path name #[]
-  pure (toDevice raw.runtimeShape raw device)
+/-- Read `length` bytes at byte `offset` of `path` into a new CPU tensor of
+`dtype` and `shape`. Fails unless `length` is that tensor's byte size. -/
+@[extern "lean_torch_safetensors_read"]
+opaque safeTensorsRead (path : @& String) (offset length : UInt64) (dtype : DType)
+    (shape : @& Shape) : IO RawTensor
 
-def safeTensorsLoadShardedOnDevice (dir name : String) (device : Device) : IO RawTensor := do
-  let raw ← safeTensorsLoadSharded dir name #[]
-  pure (toDevice raw.runtimeShape raw device)
+/-- Write a SafeTensors file: the header's byte size, the header, then each
+tensor's contiguous CPU bytes in order. Fails unless each tensor's byte size is
+its entry in `lengths`. -/
+@[extern "lean_torch_safetensors_write"]
+opaque safeTensorsWrite (path header : @& String) (tensors : @& Array RawTensor)
+    (lengths : @& Array UInt64) : IO Unit
 
-def safeTensorsLoadFromHandleOnDevice (handle : safetensors.SafeTensorsHandle)
-    (name : String) (device : Device) : IO RawTensor := do
-  let raw ← safeTensorsLoadFromHandle handle name #[]
-  pure (toDevice raw.runtimeShape raw device)
 end torch.RawTensor

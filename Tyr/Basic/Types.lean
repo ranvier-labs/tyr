@@ -181,22 +181,25 @@ def DType.canonicalName : DType → String
   | .Float8E8M0FNU => "Float8E8M0FNU"
   | .Float4E2M1FNX2 => "Float4E2M1FNX2"
 
-/-- A dtype tag supported by Tyr's current native SafeTensors reader/writer.
-This is deliberately narrower than the full PyTorch dtype inventory. -/
-def DType.safeTensorTag? : DType → Option String
-  | .UInt8 => some "U8"
-  | .Int8 => some "I8"
-  | .Int16 => some "I16"
-  | .Int32 => some "I32"
-  | .Int64 => some "I64"
-  | .Float16 => some "F16"
-  | .BFloat16 => some "BF16"
-  | .Float32 => some "F32"
-  | .Float64 => some "F64"
-  | .Bool => some "BOOL"
-  | .Float8E4M3FN => some "F8_E4M3"
-  | .Float8E5M2 => some "F8_E5M2"
+/-- SafeTensors' name and element width in bytes for each dtype the format
+stores; the SafeTensors reader and writer use nothing else. -/
+def DType.safeTensorFormat? : DType → Option (String × Nat)
+  | .UInt8 => some ("U8", 1)
+  | .Int8 => some ("I8", 1)
+  | .Int16 => some ("I16", 2)
+  | .Int32 => some ("I32", 4)
+  | .Int64 => some ("I64", 8)
+  | .Float16 => some ("F16", 2)
+  | .BFloat16 => some ("BF16", 2)
+  | .Float32 => some ("F32", 4)
+  | .Float64 => some ("F64", 8)
+  | .Bool => some ("BOOL", 1)
+  | .Float8E4M3FN => some ("F8_E4M3", 1)
+  | .Float8E5M2 => some ("F8_E5M2", 1)
   | _ => none
+
+def DType.safeTensorTag? (dtype : DType) : Option String :=
+  dtype.safeTensorFormat?.map (·.1)
 
 instance : ToString DType where
   toString := DType.canonicalName
