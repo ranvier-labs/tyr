@@ -10,8 +10,6 @@
 #include <string>
 
 extern "C" void lean_initialize();
-// Kept for native ABI compatibility; no current Lean declaration uses rand.
-extern "C" lean_object* lean_torch_rand(lean_object*, int, lean_object*);
 
 // Tests-first mode applies the checked contract to the previous raw boundary.
 // It must fail: native errors escape and successful results lack Except.ok.
@@ -183,23 +181,21 @@ void randintSigned() {
   require(lean_io_result_is_ok(result.get()), "Valid signed randint failed");
   values(lean_io_result_get_value(result.get()), 4, -7);
 }
-void randomFactoryError(bool normal, bool invalidDevice) {
+void randomFactoryError(bool invalidDevice) {
   Object dims(invalidDevice ? shape({4}) : shape({std::numeric_limits<uint64_t>::max()}), lean_dec);
   auto* cuda = lean_alloc_ctor(0, 0, sizeof(uint64_t));
   lean_ctor_set_uint64(cuda, 0, std::numeric_limits<uint64_t>::max());
   Object device(invalidDevice ? cuda : lean_box(1), lean_dec);
   if (!invalidDevice) lean_dec(cuda);
-  Object result(normal ? lean_torch_randn(retain(dims.get()), 0, retain(device.get()))
-                       : lean_torch_rand(retain(dims.get()), 0, retain(device.get())), lean_dec);
+  Object result(lean_torch_randn(retain(dims.get()), 0, retain(device.get())), lean_dec);
   require(lean_io_result_is_error(result.get()), "Random factory did not return IO.error");
   require(dims->m_rc == 1, "Random factory leaked shape on failure");
   if (invalidDevice) require(device->m_rc == 1, "Random factory leaked device on failure");
 }
-void randomFactorySuccess(bool normal) {
+void randomFactorySuccess() {
   Object dims(shape({2, 3}), lean_dec);
   for (bool requiresGrad : {false, true}) {
-    Object result(normal ? lean_torch_randn(retain(dims.get()), requiresGrad, lean_box(1))
-                         : lean_torch_rand(retain(dims.get()), requiresGrad, lean_box(1)), lean_dec);
+    Object result(lean_torch_randn(retain(dims.get()), requiresGrad, lean_box(1)), lean_dec);
     require(lean_io_result_is_ok(result.get()), "Valid random factory failed");
     auto* tensor = lean_io_result_get_value(result.get());
     require(!lean_is_scalar(tensor) && lean_is_external(tensor), "Random factory did not return RawTensor");
@@ -645,12 +641,9 @@ int main() {
   run("randint/bounds-error", [] { randintError(false); });
   run("randint/device-error", [] { randintError(true); });
   run("randint/signed-success", randintSigned);
-  run("randn/device-error", [] { randomFactoryError(true, true); });
-  run("randn/shape-error", [] { randomFactoryError(true, false); });
-  run("randn/success", [] { randomFactorySuccess(true); });
-  run("rand/device-error", [] { randomFactoryError(false, true); });
-  run("rand/shape-error", [] { randomFactoryError(false, false); });
-  run("rand/success", [] { randomFactorySuccess(false); });
+  run("randn/device-error", [] { randomFactoryError(true); });
+  run("randn/shape-error", [] { randomFactoryError(false); });
+  run("randn/success", [] { randomFactorySuccess(); });
   run("dropout/negative-probability", [] { dropoutError(-0.5); });
   run("dropout/excessive-probability", [] { dropoutError(1.5); });
   run("dropout/nan-probability", [] { dropoutError(std::numeric_limits<double>::quiet_NaN()); });

@@ -188,7 +188,7 @@ lean_object* lean_float_buffer_keep_last(lean_object* buf_obj, b_lean_obj_arg co
 // -- Bulk construction from raw float FIFO (used by audio input) ------------
 // This is exposed so audio_input_read_buffer can call it.
 
-lean_object* lean_float_buffer_from_raw(const float* src, size_t n) {
+lean_object* tyr_float_buffer_from_raw(const float* src, size_t n) {
   auto* b = fb_alloc(n);
   if (!b) lean_internal_panic_out_of_memory();
   b->len = n;

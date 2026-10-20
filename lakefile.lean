@@ -164,9 +164,25 @@ target libtyr pkg : Dynlib := do
         ("TYR_GPU_CODEGEN_MODULE", some gpuKernels)
       ]
     }
-    setTrace (← computeTrace tyrCLib)
+    let libTrace ← computeTrace tyrCLib
+    setTrace libTrace
+    return libTrace
+
+  -- 5. Every `lean_*` symbol the library exports must be a Lean extern (a
+  --    `TyrFFI` declaration or a kernel launcher); the generated header only
+  --    checks definitions Lean declares. The library keeps its own trace.
+  let checkModules := ffiModules ++ allKernels
+  let checkJob ← (libJob.mix ffiInputs |>.mix (← generatorInputs allKernels)).mapM fun _ => do
+    buildUnlessUpToDate tyrCLib (← getTrace) (pkg.buildDir / "codegen" / "ffi-exports.trace") do
+      proc {
+        cmd := ffiGenerator.file.toString
+        args := #["--check-exports", tyrCLib.toString] ++ checkModules.map (·.name.toString)
+        env := generatorEnv
+      }
+  let doneJob ← (libJob.zipWith (fun libTrace _ => libTrace) checkJob).mapM fun libTrace => do
+    setTrace libTrace
     return tyrCLib
-  return libJob.map fun path => { path, name := "TyrC" }
+  return doneJob.map fun path => { path, name := "TyrC" }
 
 /-! ## Lean Library -/
 

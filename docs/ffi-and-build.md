@@ -123,6 +123,13 @@ FloatBuffer and Apple I/O). It is not precompiled, so it builds before
 `cc/src` and `cc/tools` include that header. A C++ definition whose signature
 differs from its Lean declaration is a compile error.
 
+The header can only check definitions that Lean declares. After linking,
+`GenerateFfiHeader --check-exports` therefore lists the `lean_*` symbols that
+`libTyrC` exports (`nm`) and fails the build on any that is neither a `TyrFFI`
+extern nor a `TyrKernels` launcher. A native helper that Lean does not call
+must be `static` or carry a name outside the `lean_` prefixes that
+`cc/map/libTyrC.map` exports.
+
 The header also defines `tyr::lean::DType` and `tyr::lean::DeviceKind`, the
 constructor tags of those Lean inductives, and their constructor counts.
 `cc/include/tyr_tensor_metadata.h` maps them to LibTorch types; `static_assert`s
@@ -358,7 +365,7 @@ setup/result errors without leaks, and fatal callback errors in separate process
 
 | File | Exports | Bound from |
 |---|---|---|
-| `tyr.cpp` (5236 lines) | ~235 `lean_torch_*` entry points: creation, elementwise, reductions, shape ops, linalg, norms, autograd, safetensors, sampling, soxr resampling | `Tyr.RawTensor` and its adapter submodules |
+| `tyr.cpp` (5378 lines) | 291 `lean_torch_*` entry points: creation, elementwise, reductions, shape ops, linalg, norms, autograd, safetensors, sampling, soxr resampling | `Tyr.RawTensor` and its adapter submodules |
 | `tyr_ops.cpp` | flash-attention router `tyr_ops::flash_attn_dispatch` + `lean_torch_tyr_flash_attn_4d` | `Tyr.RawTensor.Neural` |
 | `tyr_distributed.cpp` | 15 `lean_torch_dist_*` c10d wrappers (TCPStore, NCCL/Gloo, async work handles) | `Tyr/RawTensor/Distributed.lean` |
 | `tyr_polar.cpp` | `lean_torch_xxt`, `ba_plus_cAA`, `newton_schulz_step`, `polar_express`, `muon_orthogonalize`, `cautious_update` | manifold/optimizer modules |
@@ -421,6 +428,8 @@ change. `tyr_ops.cpp` calls launchers only after a runtime Hopper check (`device
    CPU count); a no-op run takes well under a second. Make alone decides what
    to recompile. The target's trace is the content of `libTyrC`, so if it is
    unchanged (e.g. after a comment-only edit) nothing downstream relinks.
+5. Checks `libTyrC`'s exports against the `TyrFFI` and `TyrKernels` externs
+   (`GenerateFfiHeader --check-exports`; see "Generated FFI header" above).
 
 Make uses compiler dependency files for C, C++, Objective-C++, and CUDA, so
 header changes rebuild their consumers. `cc/build/build-flags.txt` lists every

@@ -8,7 +8,12 @@ definition whose signature disagrees with its Lean declaration fails to compile.
 It also writes `tyr::lean::DType` and `tyr::lean::DeviceKind`, C++ enums of
 those inductives' constructor tags, so native code never hard-codes them.
 
+With `--check-exports`, it instead fails if the library exports a `lean_*`
+symbol that no `@[extern]` in the given modules declares: the header only
+checks definitions Lean knows about, so an orphaned one would go unchecked.
+
 Usage: `GenerateFfiHeader <out.h> <Module> [<Module> ...]`
+       `GenerateFfiHeader --check-exports <lib> <Module> [<Module> ...]`
 -/
 
 open Lean IR
@@ -26,12 +31,19 @@ def prototype (env : Environment) (cName : String) (decl : Decl) : String :=
       else EmitC.toCType p.ty
     s!"{ret} {cName}({", ".intercalate args.toList});"
 
-def prototypes (env : Environment) (modules : NameSet) : Except String (Array String) := do
-  let mut byName : Std.HashMap String String := {}
+/-- The extern declarations of `modules`, with their C names. -/
+def externs (env : Environment) (modules : NameSet) : Array (Name × String) := Id.run do
+  let mut result := #[]
   for (name, _) in env.constants.map₁.toList do
     let some idx := env.getModuleIdxFor? name | continue
     unless modules.contains env.header.moduleNames[idx.toNat]! do continue
     let some cName := getExternNameFor env `c name | continue
+    result := result.push (name, cName)
+  return result
+
+def prototypes (env : Environment) (modules : NameSet) : Except String (Array String) := do
+  let mut byName : Std.HashMap String String := {}
+  for (name, cName) in externs env modules do
     let some decl := findEnvDecl env name
       | throw s!"{name}: extern without compiled declaration"
     let proto := prototype env cName decl
@@ -52,12 +64,38 @@ def tagEnum (env : Environment) (name : Name) : Except String String := do
     "\n".intercalate tags ++ "\n};\n" ++
     s!"inline constexpr unsigned {typeName}Count = {info.ctors.length};"
 
+/-- The `lean_*` symbols that the shared library `lib` defines and exports. -/
+def exportedLeanSymbols (lib : String) : IO (Array String) := do
+  let args := if System.Platform.isOSX then #["-gU", lib] else #["-D", "--defined-only", lib]
+  let out ← IO.Process.output { cmd := "nm", args }
+  unless out.exitCode == 0 do
+    throw <| IO.userError s!"nm {lib} failed: {out.stderr}"
+  return (out.stdout.splitOn "\n").toArray.filterMap fun line =>
+    let symbol := ((line.splitOn " ").getLast?.getD "")
+    let symbol := if System.Platform.isOSX then toString (symbol.drop 1) else symbol
+    if symbol.startsWith "lean_" then some symbol else none
+
+def checkExports (env : Environment) (modules : NameSet) (lib : String) : IO UInt32 := do
+  let declared := (externs env modules).foldl (fun set (_, cName) => set.insert cName)
+    (∅ : Std.HashSet String)
+  let orphans := (← exportedLeanSymbols lib).filter (!declared.contains ·)
+  if orphans.isEmpty then return 0
+  IO.eprintln s!"GenerateFfiHeader: {lib} exports symbols that no Lean @[extern] declares. \
+    Declare each in a TyrFFI module, or make it internal (static, or not named lean_*):"
+  for symbol in orphans.qsort (· < ·) do IO.eprintln s!"  {symbol}"
+  return 1
+
 def main (args : List String) : IO UInt32 := do
-  let out :: modules@(_ :: _) := args
-    | IO.eprintln "Usage: GenerateFfiHeader <out.h> <Module> [<Module> ...]"; return 1
+  let (check?, out, modules) ← match args with
+    | "--check-exports" :: lib :: modules@(_ :: _) => pure (true, lib, modules)
+    | out :: modules@(_ :: _) => pure (false, out, modules)
+    | _ =>
+      IO.eprintln "Usage: GenerateFfiHeader [--check-exports <lib> | <out.h>] <Module> [<Module> ...]"
+      return 1
   let modules := modules.map String.toName
   initSearchPath (← findSysroot)
   let env ← importModules (modules.toArray.map ({ module := · })) {}
+  if check? then return ← checkExports env (modules.foldl NameSet.insert {}) out
   let generated := do
     let protos ← prototypes env (modules.foldl NameSet.insert {})
     let enums ← #[`torch.DType, `torch.DeviceKind].mapM (tagEnum env)

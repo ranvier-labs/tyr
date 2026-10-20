@@ -9,7 +9,7 @@
 #include <atomic>
 
 // Defined in float_buffer.cpp — creates a FloatBuffer from raw float data.
-extern "C" lean_object* lean_float_buffer_from_raw(const float* src, size_t n);
+extern "C" lean_object* tyr_float_buffer_from_raw(const float* src, size_t n);
 
 #ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>
@@ -186,7 +186,7 @@ lean_object* lean_tyr_audio_input_read_buffer(
     uint64_t max_samples,
     uint64_t block_ms) {
   if (max_samples == 0) {
-    return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+    return lean_io_result_mk_ok(tyr_float_buffer_from_raw(nullptr, 0));
   }
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_ms);
@@ -203,14 +203,14 @@ lean_object* lean_tyr_audio_input_read_buffer(
   std::lock_guard<std::mutex> lock(g_audio_mu);
   size_t n = std::min(static_cast<size_t>(max_samples), g_audio_fifo.size());
   if (n == 0) {
-    return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+    return lean_io_result_mk_ok(tyr_float_buffer_from_raw(nullptr, 0));
   }
   auto* tmp = static_cast<float*>(std::malloc(sizeof(float) * n));
   for (size_t i = 0; i < n; ++i) {
     tmp[i] = g_audio_fifo.front();
     g_audio_fifo.pop_front();
   }
-  lean_object* fb = lean_float_buffer_from_raw(tmp, n);
+  lean_object* fb = tyr_float_buffer_from_raw(tmp, n);
   std::free(tmp);
   return lean_io_result_mk_ok(fb);
 }
