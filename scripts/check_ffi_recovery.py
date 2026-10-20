@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NATIVE_SUFFIXES = {".cpp", ".cc", ".cxx", ".cu", ".mm", ".c", ".h", ".hpp"}
 # The existing pure result constructors are deliberately explicit. A new result
 # alias must not silently hide an IO/Except export from the inventory.
-PURE_RESULT_HEADS = {"RawTensor", "Bool", "Float", "String", "Shape", "Device",
+PURE_RESULT_HEADS = {"RawTensor", "DType", "Bool", "Float", "String", "Shape", "Device",
                      "FloatArray", "Int64", "Array"}
 
 # This one polymorphic extern never returns a value. Audit its complete native
