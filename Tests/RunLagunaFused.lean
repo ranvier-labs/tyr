@@ -144,13 +144,13 @@ private def tileToShape {s : Shape} {source : Device} (src : SomeDTypeTensor s s
   let srcD := src.2.to device
   let n0 := srcD.shape.foldl (· * ·) 1
   if n0 == 0 then throw <| IO.userError "tileToShape: empty source tensor"
-  let mut cur : ShapePackedTensor src.1 device := (srcD.reshapeChecked #[n0]).packShape
+  let mut cur : ShapePackedTensor src.1 device := (← IO.ofExcept (srcD.reshapeChecked? #[n0])).packShape
   let mut n := n0
   while n < numel do
     cur := (Tensor.catManyChecked #[cur, cur] 0 #[n * 2]).packShape
     n := n * 2
   let clipped := cur.2.sliceChecked 0 0 numel #[numel]
-  pure ⟨src.1, clipped.reshapeChecked shape⟩
+  pure ⟨src.1, clipped.reshape shape⟩
 
 private def bfloatDynamic {σ : StaticSpec} (t : Tensor σ) : Tensor {σ with dtype := .BFloat16} :=
   t.toBFloat16
@@ -293,11 +293,11 @@ private def runCorrectness (path : String) (device : Device) : IO Unit := do
   let yExpD : Tensor { shape := #[5, 64], device := device, dtype := .BFloat16 } := (← requireBF16 yExp).to device
   let mut worst := 0.0
   for i in [:5] do
-    let x1 : Tensor { shape := #[1, 64], device := device, dtype := .BFloat16 } := Tensor.reshapeChecked (sliceTyped xD 0 i.toUInt64 1) #[1, 64]
+    let x1 : Tensor { shape := #[1, 64], device := device, dtype := .BFloat16 } := Tensor.reshape (sliceTyped xD 0 i 1) #[1, 64]
     let yFused ← block.forward2d testCfg x1
     let yEager ← block.forward2d testCfg x1 false
     let (maxAbs, maxRel) ← maxErrors yFused yEager
-    let yExpRow : Tensor { shape := #[1, 64], device := device, dtype := .BFloat16 } := Tensor.reshapeChecked (sliceTyped yExpD 0 i.toUInt64 1) #[1, 64]
+    let yExpRow : Tensor { shape := #[1, 64], device := device, dtype := .BFloat16 } := Tensor.reshape (sliceTyped yExpD 0 i 1) #[1, 64]
     let (refAbs, _) ← maxErrors yFused yExpRow
     -- The fused kernel evaluates the exact FP4 math in FP32, while the eager
     -- path rounds dequantized weights to BF16 and accumulates in BF16, so
@@ -365,7 +365,7 @@ private def runBenchmark (path : String) (device : Device) : IO Unit := do
   let mi := bigCfg.moe_intermediate_size
   -- FP4 bytes read per token by the fused op: every selected expert's packed
   -- weights + group scales, each exactly once.
-  let bytesPerTok : UInt64 :=
+  let bytesPerTok : Nat :=
     k * (2 * (mi * h / 2 + mi * h / 16) + (h * mi / 2 + h * mi / 16))
   IO.println s!"  FP4 bytes read per token: {bytesPerTok} ({bytesPerTok.toFloat / 1.0e6} MB)"
 

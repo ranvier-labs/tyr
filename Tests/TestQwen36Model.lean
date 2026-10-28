@@ -18,6 +18,7 @@ private def tinyCfg : Config := Config.normalize {
   linear_value_head_dim := 4
   linear_num_key_heads := 2
   linear_num_value_heads := 4
+  linearKeyHeadsDivide := by decide
   layer_types := #[.linearAttention, .fullAttention]
   moe_intermediate_size := 8
   shared_expert_intermediate_size := 8
@@ -28,7 +29,7 @@ private def tinyCfg : Config := Config.normalize {
 @[test]
 def testQwen36InitAndForward : IO Unit := do
   let model ← Qwen36ForCausalLM.init tinyCfg false
-  let ids : Tensor { shape := #[1, 4], dtype := .Int64, device := .CPU } := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshapeChecked #[1, 4]
+  let ids : Tensor { shape := #[1, 4], dtype := .Int64, device := .CPU } := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshape #[1, 4]
   let logits := model.forward tinyCfg ids
   LeanTest.assertEqual logits.runtimeShape #[1, 4, tinyCfg.vocab_size]
     "Qwen3.6 forward should return [batch, seq, vocab]"

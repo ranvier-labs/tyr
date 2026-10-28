@@ -35,14 +35,14 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
   LeanTest.assertEqual (← text.toUInt64Array) #[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2]
 
 @[test] def testFluxRotaryReferenceAndDType : IO Unit := do
-  let ids := (Tensor.fromInt64Array #[1, 0, 0, 0]).reshapeChecked #[1, 1, 4]
+  let ids := (Tensor.fromInt64Array #[1, 0, 0, 0]).reshape #[1, 1, 4]
   let pe := ropeEmbed (head_dim := 8) ids #[2, 2, 2, 2]
   let c := Float.cos 1
   let s := Float.sin 1
-  let expected := (Tensor.fromFloatArray #[c - s, s + c, 1, 1, 1, 1, 1, 1]).reshapeChecked #[1, 1, 1, 8]
-  close (applyRope ((Tensor.ones #[1, 1, 1, 8])) pe) expected
+  let expected := (Tensor.fromFloatArray #[c - s, s + c, 1, 1, 1, 1, 1, 1]).reshape #[1, 1, 1, 8]
+  close (applyRope ((Tensor.ones #[1, 1, 1, 8])) (by decide) pe) expected
   let x := (Tensor.ones #[1, 1, 1, 8]).toBFloat16
-  let y := applyRope x pe
+  let y := applyRope x (by decide) pe
   LeanTest.assertEqual y.actualSpec.dtype .BFloat16
   close y expected.toBFloat16 0.0
 
@@ -51,7 +51,7 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
   let y := timestepEmbedding t 5
   let expected := Tensor.fromFloatArray #[1, 1, 0, 0, 0,
     Float.cos 1, Float.cos 0.01, Float.sin 1, Float.sin 0.01, 0]
-  close y (expected.reshapeChecked #[2, 5])
+  close y (expected.reshape #[2, 5])
 
 @[test] def testFluxForwardAndDenoiseDTypes : IO Unit := do
   let initial ← FluxModel.init cfg
@@ -82,15 +82,15 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
 
 @[test] def testFluxLatentPackRoundTrip : IO Unit := do
   let values := Array.ofFn (n := 2 * 32 * 4 * 6) fun i => i.val.toFloat
-  let spatial := (Tensor.fromFloatArray values).reshapeChecked #[2, 32, 4, 6]
-  let packed := packLatents spatial
+  let spatial := Tensor.fromFloatArrayShaped values #[2, 32, 4, 6] (by simp [values])
+  let packed := packLatents (packed_H := 2) (packed_W := 3) spatial
   LeanTest.assertEqual packed.runtimeShape #[2, 6, 128]
   close (unpackLatents (packed_H := 2) (packed_W := 3) packed) spatial 0.0
   let actual ← packed.toFloatArray
   LeanTest.assertEqual (actual.extract 0 8) #[0, 1, 6, 7, 24, 25, 30, 31]
 
 @[test] def testFluxPPMNativeBoundary : IO Unit := IO.FS.withTempDir fun dir => do
-  let image := (Tensor.fromFloatArray #[1, -1, -1, 1, -1, -1]).reshapeChecked #[1, 3, 1, 2]
+  let image := Tensor.fromFloatArrayShaped #[1, -1, -1, 1, -1, -1] #[1, 3, 1, 2] (by decide)
   let path := dir / "tiny.ppm"
   saveImagePPM image path.toString
   let bytes ← IO.FS.readBinFile path

@@ -79,7 +79,7 @@ private def tinyConfig : Qwen3TTSConfig := {
     LeanTest.assertEqual embedding.raw.dtype .Float32
     LeanTest.assertEqual mel.raw.dtype inputDType "Feature conversion preserves the caller tensor"
     let aligned ← IO.ofExcept (mel.castDType? .Float32)
-    let expected := encoder.forward aligned
+    let expected := encoder.forward (by decide) aligned
     LeanTest.assertEqual (← embedding.toFloatArray) (← expected.toFloatArray)
       "The explicit preprocessing cast is the only cross-role dtype conversion"
 
@@ -94,10 +94,10 @@ private def tinyConfig : Qwen3TTSConfig := {
   let some layer := model.layers[0]? | throw (IO.userError "Expected one test layer")
   let (output, updated) := layer.forwardStep input cos sin cache
   LeanTest.assertEqual output.raw.dtype .BFloat16
-  LeanTest.assertEqual updated.kStoreDyn.2.raw.dtype .BFloat16
-  LeanTest.assertEqual updated.vStoreDyn.2.raw.dtype .BFloat16
+  LeanTest.assertEqual updated.kStore.raw.dtype .BFloat16
+  LeanTest.assertEqual updated.vStore.raw.dtype .BFloat16
   LeanTest.assertEqual updated.seq 1
   LeanTest.assertEqual cache.seq 0 "The original cache value remains unchanged"
-  LeanTest.assertEqual (← cache.kStoreDyn.2.toFloatArray) (Array.replicate (3 * cfg.numKeyValueHeads * cfg.headDim).toNat 0.0)
+  LeanTest.assertEqual (← cache.kStore.toFloatArray) (Array.replicate (3 * cfg.numKeyValueHeads * cfg.headDim) 0.0)
 
 end Tests.TTSDTypeRelations

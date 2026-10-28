@@ -39,7 +39,12 @@ private def getFloat? (j : Json) : Option Float :=
   | some x => some x
   | none => (getNat? j).map (·.toFloat)
 
-private def getNatFieldD (j : Json) (key : String) (d : UInt64) : UInt64 :=
+private def getNatFieldD (j : Json) (key : String) (d : Nat) : Nat :=
+  match getObjVal? j key >>= getNat? with
+  | some n => n
+  | none => d
+
+private def getTokenIdFieldD (j : Json) (key : String) (d : UInt64) : UInt64 :=
   match getObjVal? j key >>= getNat? with
   | some n => n.toUInt64
   | none => d
@@ -54,14 +59,14 @@ private def getStringFieldD (j : Json) (key : String) (d : String) : String :=
   | some (.str s) => s
   | _ => d
 
-private def getNatArrayFieldD (j : Json) (key : String) (d : Array UInt64) : Array UInt64 :=
+private def getNatArrayFieldD (j : Json) (key : String) (d : Array Nat) : Array Nat :=
   match getObjVal? j key >>= getArr? with
   | some arr =>
     Id.run do
-      let mut out : Array UInt64 := #[]
+      let mut out : Array Nat := #[]
       for it in arr do
         match getNat? it with
-        | some n => out := out.push n.toUInt64
+        | some n => out := out.push n
         | none => pure ()
       if out.isEmpty then d else out
   | none => d
@@ -70,26 +75,34 @@ namespace WhisperConfig
 
 def loadFromFile (path : String) (defaults : WhisperConfig := {}) : IO WhisperConfig := do
   let root ← parseJsonFile path
+  let dModel := getNatFieldD root "d_model" defaults.dModel
+  let encoderAttentionHeads := getNatFieldD root "encoder_attention_heads" defaults.encoderAttentionHeads
+  let decoderAttentionHeads := getNatFieldD root "decoder_attention_heads" defaults.decoderAttentionHeads
+  let hHeads ← if h : encoderAttentionHeads ∣ dModel ∧ decoderAttentionHeads ∣ dModel then pure (PLift.up h) else
+    throw <| IO.userError
+      s!"Invalid Whisper config: d_model={dModel}, encoder_heads={encoderAttentionHeads}, decoder_heads={decoderAttentionHeads}"
   let cfg : WhisperConfig := {
     numMelBins := getNatFieldD root "num_mel_bins" defaults.numMelBins
     vocabSize := getNatFieldD root "vocab_size" defaults.vocabSize
-    dModel := getNatFieldD root "d_model" defaults.dModel
+    dModel
     encoderLayers := getNatFieldD root "encoder_layers" defaults.encoderLayers
-    encoderAttentionHeads := getNatFieldD root "encoder_attention_heads" defaults.encoderAttentionHeads
+    encoderAttentionHeads
     encoderFfnDim := getNatFieldD root "encoder_ffn_dim" defaults.encoderFfnDim
     decoderLayers := getNatFieldD root "decoder_layers" defaults.decoderLayers
-    decoderAttentionHeads := getNatFieldD root "decoder_attention_heads" defaults.decoderAttentionHeads
+    decoderAttentionHeads
     decoderFfnDim := getNatFieldD root "decoder_ffn_dim" defaults.decoderFfnDim
     maxSourcePositions := getNatFieldD root "max_source_positions" defaults.maxSourcePositions
     maxTargetPositions := getNatFieldD root "max_target_positions" defaults.maxTargetPositions
     activationFunction := getStringFieldD root "activation_function" defaults.activationFunction
     layerNormEps := getFloatFieldD root "layer_norm_eps" defaults.layerNormEps
-    padTokenId := getNatFieldD root "pad_token_id" defaults.padTokenId
-    bosTokenId := getNatFieldD root "bos_token_id" defaults.bosTokenId
-    eosTokenId := getNatFieldD root "eos_token_id" defaults.eosTokenId
-    decoderStartTokenId := getNatFieldD root "decoder_start_token_id" defaults.decoderStartTokenId
+    padTokenId := getTokenIdFieldD root "pad_token_id" defaults.padTokenId
+    bosTokenId := getTokenIdFieldD root "bos_token_id" defaults.bosTokenId
+    eosTokenId := getTokenIdFieldD root "eos_token_id" defaults.eosTokenId
+    decoderStartTokenId := getTokenIdFieldD root "decoder_start_token_id" defaults.decoderStartTokenId
     suppressTokens := getNatArrayFieldD root "suppress_tokens" defaults.suppressTokens
     beginSuppressTokens := getNatArrayFieldD root "begin_suppress_tokens" defaults.beginSuppressTokens
+    encoderHeadsDivide := hHeads.down.1
+    decoderHeadsDivide := hHeads.down.2
   }
   if !cfg.hasValidHeads then
     throw <| IO.userError

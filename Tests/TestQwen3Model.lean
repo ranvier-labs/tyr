@@ -18,17 +18,17 @@ private def tinyCfg : Config := {
   max_position_embeddings := 128
 }
 
-private def flattenIds {batch seq : UInt64} (ids : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }) : IO (Array UInt64) := do
-  let flat : Tensor { shape := #[batch * seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.toInt64 ids) #[batch * seq]
+private def flattenIds {batch seq : Nat} (ids : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }) : IO (Array UInt64) := do
+  let flat : Tensor { shape := #[batch * seq], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.toInt64 ids) #[batch * seq]
   Tensor.toUInt64Array flat
 
-private def rowToken (vals : Array UInt64) (seq : UInt64) (row col : Nat) : UInt64 :=
-  vals.getD (row * seq.toNat + col) 0
+private def rowToken (vals : Array UInt64) (seq : Nat) (row col : Nat) : UInt64 :=
+  vals.getD (row * seq + col) 0
 
 @[test]
 def testQwen3InitAndForward : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
-  let ids : Tensor { shape := #[1, 4], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array #[1, 2, 3, 4]) #[1, 4]
+  let ids : Tensor { shape := #[1, 4], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[1, 2, 3, 4]) #[1, 4]
   let logits := model.forward ids
   LeanTest.assertEqual logits.runtimeShape #[1, 4, tinyCfg.vocab_size]
     "forward should return [batch, seq, vocab]"
@@ -36,7 +36,7 @@ def testQwen3InitAndForward : IO Unit := do
 @[test]
 def testQwen3GreedyCachedUncachedParity : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
-  let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array #[3, 2, 1]) #[1, 3]
+  let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[3, 2, 1]) #[1, 3]
 
   let ⟨outSeqCached, outCached⟩ ← model.generateGreedy ids 4 #[]
   let ⟨outSeqUncached, outUncached⟩ ← model.generateGreedyUncached ids 4 #[]
@@ -46,8 +46,8 @@ def testQwen3GreedyCachedUncachedParity : IO Unit := do
   LeanTest.assertEqual outSeqUncached (3 + 4)
     "uncached generation should append maxNewTokens"
 
-  let cachedFlat : Tensor { shape := #[outSeqCached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.toInt64 outCached) #[outSeqCached]
-  let uncachedFlat : Tensor { shape := #[outSeqUncached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.toInt64 outUncached) #[outSeqUncached]
+  let cachedFlat : Tensor { shape := #[outSeqCached], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.toInt64 outCached) #[outSeqCached]
+  let uncachedFlat : Tensor { shape := #[outSeqUncached], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.toInt64 outUncached) #[outSeqUncached]
   let cachedIds ← Tensor.toUInt64Array cachedFlat
   let uncachedIds ← Tensor.toUInt64Array uncachedFlat
 
@@ -86,7 +86,7 @@ def testQwen3ConfigLoadRejectsInvalidInvariants : IO Unit := do
 @[test]
 def testQwen3GreedyUncachedEmptyPromptThrows : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
-  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array #[]) #[1, 0]
+  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
   let threw ←
     try
       let _ ← model.generateGreedyUncached ids 1 #[]
@@ -98,13 +98,13 @@ def testQwen3GreedyUncachedEmptyPromptThrows : IO Unit := do
 @[test]
 def testQwen3GreedyZeroNewTokensIdentity : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
-  let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array #[4, 5, 6]) #[1, 3]
+  let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[4, 5, 6]) #[1, 3]
   let ⟨seqCached, outCached⟩ ← model.generateGreedy ids 0 #[]
   let ⟨seqUncached, outUncached⟩ ← model.generateGreedyUncached ids 0 #[]
   LeanTest.assertEqual seqCached 3 "cached generation with maxNewTokens=0 should preserve prompt length"
   LeanTest.assertEqual seqUncached 3 "uncached generation with maxNewTokens=0 should preserve prompt length"
-  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked outCached #[seqCached]
-  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked outUncached #[seqUncached]
+  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshape outCached #[seqCached]
+  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshape outUncached #[seqUncached]
   let gotCached ← Tensor.toUInt64Array flatCached
   let gotUncached ← Tensor.toUInt64Array flatUncached
   LeanTest.assertEqual gotCached #[4, 5, 6] "cached generation should return identity sequence when no new tokens requested"
@@ -129,7 +129,7 @@ def testQwen3BatchedEosIsRowAware : IO Unit := do
         if selected.isNone then
           let row0 := promptRows.getD i #[1, 2, 3]
           let row1 := promptRows.getD j #[3, 2, 1]
-          let ids : Tensor { shape := #[2, 3], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array (row0 ++ row1)) #[2, 3]
+          let ids : Tensor { shape := #[2, 3], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? (row0 ++ row1) #[2, 3]))
           let ⟨seqBase, outBase⟩ ← model.generateGreedy ids 2 #[]
           let baseVals ← flattenIds outBase
           let row0Step1 := rowToken baseVals seqBase 0 3
@@ -160,7 +160,7 @@ def testQwen3BatchedEosIsRowAware : IO Unit := do
     LeanTest.assertTrue (row1First != eosTok)
       "row 1 should still be active when row 0 first reaches EOS"
 
-    for t in [3:seqCached.toNat] do
+    for t in [3:seqCached] do
       let tok := rowToken cachedVals seqCached 0 t
       LeanTest.assertEqual tok eosTok
         "once finished, a row should stay on EOS for subsequent decode steps"

@@ -22,7 +22,7 @@ private def attention : AudioAttention (device := .CPU) cfg :=
     outProjBias := (Tensor.fromFloatArray #[0.25, -0.5]) }
 
 private def input : Tensor { dtype := .Float32, shape := #[1, 2, 2], device := .CPU } :=
-  ((Tensor.fromFloatArray #[2, 4, 6, 8]).reshapeChecked #[1, 2, 2])
+  ((Tensor.fromFloatArray #[2, 4, 6, 8]).reshape #[1, 2, 2])
 
 private def assertClose (actual expected : Array Float) : IO Unit := do
   LeanTest.assertEqual actual.size expected.size
@@ -35,20 +35,20 @@ private def assertClose (actual expected : Array Float) : IO Unit := do
   assertClose (← (attention.forward input).toFloatArray) #[4.25, 5.5, 4.25, 5.5]
 
 @[test] def testASRMaskedAttentionInferenceDisablesConfiguredDropout : IO Unit := do
-  let mask := ((Tensor.fromInt64Array #[1, 1]).reshapeChecked #[1, 2])
+  let mask := ((Tensor.fromInt64Array #[1, 1]).reshape #[1, 2])
   assertClose (← (attention.forward input (some mask)).toFloatArray) #[4.25, 5.5, 4.25, 5.5]
 
 @[test] def testASRAttentionTrainingHonorsConfiguredDropout : IO Unit := do
   -- p=1 drops all attention probabilities, leaving only the output bias.
   assertClose (← (← attention.forwardIO input true).toFloatArray) #[0.25, -0.5, 0.25, -0.5]
-  let mask := ((Tensor.fromInt64Array #[1, 1]).reshapeChecked #[1, 2])
+  let mask := ((Tensor.fromInt64Array #[1, 1]).reshape #[1, 2])
   assertClose (← (← attention.forwardIO input true (some mask)).toFloatArray)
     #[0.25, -0.5, 0.25, -0.5]
 
 @[test] def testASRAttentionEvaluationMatchesInference : IO Unit := do
   assertClose (← (← attention.forwardIO input false).toFloatArray)
     (← (attention.forwardInference input).toFloatArray)
-  let mask := ((Tensor.fromInt64Array #[1, 1]).reshapeChecked #[1, 2])
+  let mask := ((Tensor.fromInt64Array #[1, 1]).reshape #[1, 2])
   assertClose (← (← attention.forwardIO input false (some mask)).toFloatArray)
     (← (attention.forwardInference input (some mask)).toFloatArray)
 
@@ -67,12 +67,12 @@ private def assertClose (actual expected : Array Float) : IO Unit := do
     { layer with selfAttn := { layer.selfAttn with
         outProjWeight := Tensor.zerosLike layer.selfAttn.outProjWeight } } }
   let features := (Tensor.ones #[1, 8, 32])
-  assertClose (← (← model.forwardIO features true).toFloatArray)
-    (← (reference.forwardInference features).toFloatArray)
+  assertClose (← (← model.forwardIO features (by simp +zetaDelta) true).toFloatArray)
+    (← (reference.forwardInference features (by simp +zetaDelta)).toFloatArray)
   assertClose (← (← model.forwardVarLenIO features #[24] true).toFloatArray)
     (← (reference.forwardVarLenInference features #[24]).toFloatArray)
-  assertClose (← (← model.forwardIO features false).toFloatArray)
-    (← (model.forwardInference features).toFloatArray)
+  assertClose (← (← model.forwardIO features (by simp +zetaDelta) false).toFloatArray)
+    (← (model.forwardInference features (by simp +zetaDelta)).toFloatArray)
   assertClose (← (← model.forwardVarLenIO features #[24] false).toFloatArray)
     (← (model.forwardVarLenInference features #[24]).toFloatArray)
 
@@ -95,37 +95,37 @@ private def expectDropoutError (action : IO α) : IO Unit := do
   -- Invalid configuration must reach an IO attention boundary instead of pure inference.
   let model ← Qwen3ASRForConditionalGeneration.init (parentCfg 2.0)
   let features := (Tensor.ones #[1, 8, 32])
-  let textIds := (Tensor.fromInt64Array #[1]).reshapeChecked #[1, 1]
-  let placeholders := (Tensor.fromInt64Array #[7, 7, 7, 7]).reshapeChecked #[1, 4]
+  let textIds := (Tensor.fromInt64Array #[1]).reshape #[1, 1]
+  let placeholders := (Tensor.fromInt64Array #[7, 7, 7, 7]).reshape #[1, 4]
   let featureMask := (Tensor.fullInt #[1, 32] 1)
-  expectDropoutError (model.thinker.encodeAudioIO features true)
+  expectDropoutError (model.thinker.encodeAudioIO features (by simp +zetaDelta) true)
   expectDropoutError (model.thinker.encodeAudioVarLenIO features #[32] true)
-  expectDropoutError (model.forwardFromMelIO features textIds true)
+  expectDropoutError (model.forwardFromMelIO features (by simp +zetaDelta) textIds true)
   expectDropoutError (model.forward placeholders (some features) (training := true))
   expectDropoutError (model.forwardWithAux placeholders (some features) (some featureMask)
     (training := true))
   -- Effectful evaluation still validates the configured probability before disabling dropout.
-  expectDropoutError (model.thinker.encodeAudioIO features false)
-  LeanTest.assertEqual (← (model.thinker.encodeAudio features).toFloatArray).size 8
+  expectDropoutError (model.thinker.encodeAudioIO features (by simp +zetaDelta) false)
+  LeanTest.assertEqual (← (model.thinker.encodeAudio features (by simp +zetaDelta)).toFloatArray).size 8
 
 @[test] def testASRParentTrainingFlagControlsRNG : IO Unit := do
   let model ← Qwen3ASRForConditionalGeneration.init (parentCfg 0.5)
   let features := (Tensor.ones #[1, 8, 32])
-  let textIds := (Tensor.fromInt64Array #[1]).reshapeChecked #[1, 1]
-  let placeholders := (Tensor.fromInt64Array #[7, 7, 7, 7]).reshapeChecked #[1, 4]
+  let textIds := (Tensor.fromInt64Array #[1]).reshape #[1, 1]
+  let placeholders := (Tensor.fromInt64Array #[7, 7, 7, 7]).reshape #[1, 4]
   let featureMask := Tensor.fullInt #[1, 32] 1
   -- Valid p distinguishes true from false; invalid p is rejected in both modes.
   -- Model initialization finishes before seeding, and these forwards have no
   -- random operation other than attention dropout.
   let entrypoints : Array (String × (Bool → IO Unit)) := #[
     ("encodeAudioIO", fun training =>
-      (model.thinker.encodeAudioIO features training).map (fun _ => ())),
+      (model.thinker.encodeAudioIO features (by simp +zetaDelta) training).map (fun _ => ())),
     ("encodeAudioVarLenIO", fun training =>
       (model.thinker.encodeAudioVarLenIO features #[32] training).map (fun _ => ())),
     ("thinker.forwardFromMelIO", fun training =>
-      (model.thinker.forwardFromMelIO features textIds training).map (fun _ => ())),
+      (model.thinker.forwardFromMelIO features (by simp +zetaDelta) textIds training).map (fun _ => ())),
     ("forwardFromMelIO", fun training =>
-      (model.forwardFromMelIO features textIds training).map (fun _ => ())),
+      (model.forwardFromMelIO features (by simp +zetaDelta) textIds training).map (fun _ => ())),
     ("forward", fun training =>
       (model.forward placeholders (some features) (training := training)).map (fun _ => ())),
     ("forward varlen", fun training =>

@@ -14,7 +14,7 @@ private def values {σ : StaticSpec} (t : Tensor σ) : IO (Array Float) :=
 /-- Exercise boxed Lean Int/Nat arguments through the real native bridge. -/
 @[test]
 def testBoxedIndexAndUnbind : IO Unit := do
-  let x := (Tensor.arangeFrom 0 6).reshapeChecked #[2, 3]
+  let x := (Tensor.arangeFrom 0 6).reshape #[2, 3]
   LeanTest.assertEqual (← values (x.getOp 0)) #[0.0, 1.0, 2.0]
   LeanTest.assertEqual (← values (x.getOp 1)) #[3.0, 4.0, 5.0]
   LeanTest.assertEqual (← values (x.getOp (-1))) #[3.0, 4.0, 5.0]
@@ -29,7 +29,7 @@ def testBoxedIndexAndUnbind : IO Unit := do
 
 @[test]
 def testArangeLengthAndScalarWidths : IO Unit := do
-  let cases : Array (UInt64 × UInt64 × UInt64) :=
+  let cases : Array (Nat × Nat × Nat) :=
     #[(0, 5, 2), (0, 6, 2), (2, 2, 1), (0, 1, 4), (4294967296, 4294967299, 1)]
   for (start, stop, step) in cases do
     let x := Tensor.arangeFrom start stop step
@@ -37,9 +37,9 @@ def testArangeLengthAndScalarWidths : IO Unit := do
   LeanTest.assertEqual (← values (Tensor.arangeFrom 0 5 2)) #[0.0, 2.0, 4.0]
   -- Host arrays use float32 conversion; item preserves these int64 values.
   let wide := Tensor.arangeFrom 4294967296 4294967299
-  LeanTest.assertEqual (Tensor.item ((wide.getOp 0).reshapeChecked #[])) 4294967296.0
-  LeanTest.assertEqual (Tensor.item ((wide.getOp 1).reshapeChecked #[])) 4294967297.0
-  LeanTest.assertEqual (Tensor.item ((wide.getOp 2).reshapeChecked #[])) 4294967298.0
+  LeanTest.assertEqual (Tensor.item ((wide.getOp 0).reshape #[])) 4294967296.0
+  LeanTest.assertEqual (Tensor.item ((wide.getOp 1).reshape #[])) 4294967297.0
+  LeanTest.assertEqual (Tensor.item ((wide.getOp 2).reshape #[])) 4294967298.0
   LeanTest.assertEqual (Tensor.eye 2).runtimeShape #[2, 2]
   LeanTest.assertEqual (← values (Tensor.linspace 0.0 1.0 3)) #[0.0, 0.5, 1.0]
   LeanTest.assertEqual (← values (Tensor.logspace 0.0 2.0 3)) #[1.0, 10.0, 100.0]
@@ -69,7 +69,7 @@ def testExactLoadRejectsSameNumelWrongShape : IO Unit :=
 def testStftNativeFailuresAreRecoverable : IO Unit := do
   let input := Tensor.ones #[8]
   let window := Tensor.hannWindow 4
-  let invalid : Array (UInt64 × UInt64) := #[(0, 1), (4, 0), (2, 1), (16, 1)]
+  let invalid : Array (Nat × Nat) := #[(0, 1), (4, 0), (2, 1), (16, 1)]
   for (nFft, hopLength) in invalid do
     let caught ← try
       let _ ← Tensor.stft input nFft hopLength window (center := false)

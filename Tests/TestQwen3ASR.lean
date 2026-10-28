@@ -91,7 +91,7 @@ private def tinyChunkedCfg : Qwen3ASRConfig :=
     supportLanguages := #["English"]
   }
 
-private def tinyPreprocessorCfg (melBins frames : UInt64) : PreprocessorConfig := {
+private def tinyPreprocessorCfg (melBins frames : Nat) : PreprocessorConfig := {
   featureExtractorType := "WhisperFeatureExtractor"
   featureSize := melBins
   samplingRate := 16000
@@ -124,12 +124,12 @@ private def mkDeterministicWavSamples (n : Nat) : Array Float := Id.run do
 
 private def writeDeterministicWavFixture
     (name : String)
-    (sampleCount : UInt64 := 10240)
-    (sampleRate : UInt64 := 16000)
+    (sampleCount : Nat := 10240)
+    (sampleRate : Nat := 16000)
     : IO String := do
   let path := s!"/tmp/tyr_qwen3asr_{name}.wav"
   let wave : Tensor { shape := #[sampleCount], dtype := .Float32, device := .CPU } :=
-    Tensor.reshapeChecked (Tensor.fromFloatArray (mkDeterministicWavSamples sampleCount.toNat)) #[sampleCount]
+    (← IO.ofExcept (Tensor.fromFloatArrayAs? (mkDeterministicWavSamples sampleCount) #[sampleCount]))
   Tensor.saveWav wave path sampleRate
   pure path
 
@@ -309,6 +309,7 @@ def testQwen3ASRTimestampsRequireForcedAlignerOrHandle : IO Unit := do
       let _ ← model.transcribeWaveform
         tok
         pre
+        rfl
         audio
         (context := "")
         (language := some "English")
@@ -330,12 +331,14 @@ def testQwen3ASRTimestampsRequireForcedAlignerOrHandle : IO Unit := do
     model := alignModel
     tok := tok
     preprocessor := tinyPreprocessorCfg alignCfg.thinkerConfig.audioConfig.numMelBins 32
+    melBinsMatch := rfl
   }
   let threwWithHandle ←
     try
       let _ ← model.transcribeWaveform
         tok
         pre
+        rfl
         audio
         (forcedAligner := some aligner)
         (context := "")
@@ -361,6 +364,7 @@ def testQwen3ASRTranscribeAudioInputAndBatchStepParity : IO Unit := do
   let outWaveform ← model.transcribeWaveform
     tok
     pre
+    rfl
     audioA
     (context := "")
     (language := some "English")
@@ -370,6 +374,7 @@ def testQwen3ASRTranscribeAudioInputAndBatchStepParity : IO Unit := do
   let outAudioInput ← model.transcribeAudioInput
     tok
     pre
+    rfl
     (.waveform audioA 16000)
     (context := "")
     (language := some "English")
@@ -385,6 +390,7 @@ def testQwen3ASRTranscribeAudioInputAndBatchStepParity : IO Unit := do
   let outsUnbounded ← model.transcribeWaveforms
     tok
     pre
+    rfl
     audios
     (contexts := #["ctx"])
     (languages := #[some "English"])
@@ -395,6 +401,7 @@ def testQwen3ASRTranscribeAudioInputAndBatchStepParity : IO Unit := do
   let outsChunked ← model.transcribeWaveforms
     tok
     pre
+    rfl
     audios
     (contexts := #["ctx"])
     (languages := #[some "English"])
@@ -520,6 +527,7 @@ def testQwen3ASRStreamingPromptCacheLifecycle : IO Unit := do
     model
     tok
     pre
+    rfl
     #[0.1, 0.2, 0.3, 0.4, 0.5]
     st0
     (maxNewTokens := 1)
@@ -533,6 +541,7 @@ def testQwen3ASRStreamingPromptCacheLifecycle : IO Unit := do
     model
     tok
     pre
+    rfl
     st1
     (prefixCache := cache1)
     (maxNewTokens := 1)
@@ -553,6 +562,7 @@ def testQwen3ASRTranscribeWavOffline : IO Unit := do
   let out ← model.transcribeWav
     tok
     pre
+    rfl
     wavPath
     (context := "")
     (language := some "english")
@@ -576,6 +586,7 @@ def testQwen3ASRTranscribeWaveformsBatchBroadcastAndMismatch : IO Unit := do
   let outs ← model.transcribeWaveforms
     tok
     pre
+    rfl
     audios
     (contexts := #["ctx"])
     (languages := #[some "English"])
@@ -592,6 +603,7 @@ def testQwen3ASRTranscribeWaveformsBatchBroadcastAndMismatch : IO Unit := do
       let _ ← model.transcribeWaveforms
         tok
         pre
+        rfl
         audios
         (contexts := #["a", "b", "c"])
         (languages := #[some "English"])
@@ -614,10 +626,10 @@ def testQwen3ASRInitAndLanguages : IO Unit := do
 def testQwen3ASRAudioForward : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 2
-  let frames : UInt64 := 32
+  let batch : Nat := 2
+  let frames : Nat := 32
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
-  let audio := model.thinker.encodeAudio mel
+  let audio := model.thinker.encodeAudio mel (by simp +zetaDelta)
   let s := Tensor.item (Tensor.sumAll audio)
   LeanTest.assertTrue (Float.isFinite s) "audio encoder output sum should be finite"
 
@@ -626,36 +638,36 @@ def testQwen3ASRForwardFromMel : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 2
-  let frames : UInt64 := 32
-  let textSeq : UInt64 := 6
-  let outSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq
+  let batch : Nat := 2
+  let frames : Nat := 32
+  let textSeq : Nat := 6
+  let outSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq
 
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let textIds ← Tensor.randint 0 cfg.thinkerConfig.textConfig.vocabSize.toInt64 #[batch, textSeq]
-  let logits := model.forwardFromMel mel textIds
+  let logits := model.forwardFromMel mel (by simp +zetaDelta) textIds
 
   let s := Tensor.item (Tensor.sumAll logits)
   LeanTest.assertTrue (Float.isFinite s) "logit sum should be finite"
 
   let idxs ← IO.ofExcept (Tensor.argmax? logits 2)
-  let flat : Tensor { shape := #[batch * outSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idxs #[batch * outSeq]
+  let flat : Tensor { shape := #[batch * outSeq], dtype := .Int64, device := .CPU } := Tensor.reshape idxs #[batch * outSeq]
   let toks ← Tensor.toUInt64Array flat
-  LeanTest.assertEqual toks.size (batch * outSeq).toNat "flattened argmax token count should match output length"
+  LeanTest.assertEqual toks.size (batch * outSeq) "flattened argmax token count should match output length"
 
 @[test]
 def testQwen3ASRFaithfulForwardPlaceholderScatter : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 1
-  let frames : UInt64 := 32
-  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
-  let seq : UInt64 := audioSeq + 4
+  let batch : Nat := 1
+  let frames : Nat := 32
+  let audioSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let seq : Nat := audioSeq + 4
 
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let idsVals : Array Int64 := #[aTok, aTok, aTok, aTok, 1, 2, 3, 4]
-  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, seq]
+  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, seq]))
 
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.fullInt #[batch, frames] 1
@@ -669,17 +681,17 @@ def testQwen3ASRFaithfulForwardPlaceholderMismatchThrows : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 1
-  let frames : UInt64 := 32
-  let audioSeq : UInt64 := AudioEncoderConfig.featExtractOutputLength frames
-  let seq : UInt64 := audioSeq + 2
+  let batch : Nat := 1
+  let frames : Nat := 32
+  let audioSeq : Nat := AudioEncoderConfig.featExtractOutputLength frames
+  let seq : Nat := audioSeq + 2
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let mut idsVals : Array Int64 := #[]
   let placeholderCount := if audioSeq > 0 then audioSeq - 1 else 0
-  for i in [:seq.toNat] do
-    let v : Int64 := if i.toUInt64 < placeholderCount then aTok else (Int64.ofNat i + 5)
+  for i in [:seq] do
+    let v : Int64 := if i < placeholderCount then aTok else (Int64.ofNat i + 5)
     idsVals := idsVals.push v
-  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, seq]
+  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, seq]))
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.fullInt #[batch, frames] 1
 
@@ -698,24 +710,24 @@ def testQwen3ASRForwardFromOutputWav : IO Unit := do
 
   let wavPath ← writeDeterministicWavFixture "forward_from_wav"
 
-  let batch : UInt64 := 1
-  let frames : UInt64 := 64
-  let textSeq : UInt64 := 5
-  let outSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq
+  let batch : Nat := 1
+  let frames : Nat := 64
+  let textSeq : Nat := 5
+  let outSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq
 
   let frontendCfg := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins frames
   let frontendOut ← wavToWhisperFeatures frontendCfg wavPath
   let mel := frontendOut.inputFeatures
   let textIds ← Tensor.randint 0 cfg.thinkerConfig.textConfig.vocabSize.toInt64 #[batch, textSeq]
-  let logits := model.forwardFromMel mel textIds
+  let logits := model.forwardFromMel mel frontendOut.framesPos textIds
 
   let s := Tensor.item (Tensor.sumAll logits)
   LeanTest.assertTrue (Float.isFinite s) "logit sum from WAV-derived mel should be finite"
 
   let idxs ← IO.ofExcept (Tensor.argmax? logits 2)
-  let flat : Tensor { shape := #[batch * outSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idxs #[batch * outSeq]
+  let flat : Tensor { shape := #[batch * outSeq], dtype := .Int64, device := .CPU } ← IO.ofExcept (idxs.reshapeChecked? #[batch * outSeq])
   let toks ← Tensor.toUInt64Array flat
-  LeanTest.assertEqual toks.size (batch * outSeq).toNat "flattened argmax token count should match output length"
+  LeanTest.assertEqual toks.size (batch * outSeq) "flattened argmax token count should match output length"
 
 @[test]
 def testQwen3ASRPreprocessorConfigLoad : IO Unit := do
@@ -780,7 +792,7 @@ def testQwen3ASRFrontendWavWhisperFeatures : IO Unit := do
   let s := Tensor.item (Tensor.sumAll mel)
   LeanTest.assertTrue (Float.isFinite s) "Whisper frontend mel sum should be finite"
 
-  let flatMask : Tensor { shape := #[64], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked fmask #[64]
+  let flatMask : Tensor { shape := #[64], dtype := .Int64, device := .CPU } := Tensor.reshape fmask #[64]
   let maskVals ← Tensor.toUInt64Array (Tensor.toInt64 flatMask)
   LeanTest.assertEqual maskVals.size 64 "feature mask length should equal configured frames"
   LeanTest.assertTrue (maskVals.all (fun v => v == 1))
@@ -790,28 +802,28 @@ def testQwen3ASRFrontendWavWhisperFeatures : IO Unit := do
 def testQwen3ASRForwardForcedAlignerHead : IO Unit := do
   let cfg := tinyForcedAlignerCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 2
-  let seq : UInt64 := 5
+  let batch : Nat := 2
+  let seq : Nat := 5
   let textIds ← Tensor.randint 0 cfg.thinkerConfig.textConfig.vocabSize.toInt64 #[batch, seq]
   let logits := model.forwardText textIds
   let s := Tensor.item (Tensor.sumAll logits)
   LeanTest.assertTrue (Float.isFinite s) "forced-aligner logits should be finite"
 
   let idxs ← IO.ofExcept (Tensor.argmax? logits 2)
-  let flat : Tensor { shape := #[batch * seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idxs #[batch * seq]
+  let flat : Tensor { shape := #[batch * seq], dtype := .Int64, device := .CPU } := Tensor.reshape idxs #[batch * seq]
   let ids ← Tensor.toUInt64Array flat
-  LeanTest.assertTrue (ids.all (fun i => i < cfg.thinkerConfig.classifyNum))
+  LeanTest.assertTrue (ids.all (fun i => i.toNat < cfg.thinkerConfig.classifyNum))
     "argmax ids should be within forced-aligner classify_num range"
 
 @[test]
 def testQwen3ASRForwardWithAuxRopeDeltas : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 1
-  let seq : UInt64 := 6
+  let batch : Nat := 1
+  let seq : Nat := 6
   let ids ← Tensor.randint 0 cfg.thinkerConfig.textConfig.vocabSize.toInt64 #[batch, seq]
   let attnVals : Array Int64 := #[0, 0, 1, 1, 1, 1]
-  let attnMask : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array attnVals) #[batch, seq]
+  let attnMask : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array attnVals) #[batch, seq]
   let out ← model.forwardWithAux
     ids
     (inputFeatures := (none : Option (Tensor { dtype := .Float32, shape := #[batch, cfg.thinkerConfig.audioConfig.numMelBins, 1], device := .CPU })))
@@ -821,9 +833,9 @@ def testQwen3ASRForwardWithAuxRopeDeltas : IO Unit := do
   | none =>
     LeanTest.fail "forwardWithAux should populate ropeDeltas when attention mask is provided"
   | some d =>
-    let flat : Tensor { shape := #[batch], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked d #[batch]
+    let flat : Tensor { shape := #[batch], dtype := .Int64, device := .CPU } := Tensor.reshape d #[batch]
     let arr ← Tensor.toUInt64Array (Tensor.toInt64 flat)
-    LeanTest.assertEqual arr.size batch.toNat "ropeDeltas batch size should match"
+    LeanTest.assertEqual arr.size batch "ropeDeltas batch size should match"
 
 @[test]
 def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
@@ -831,17 +843,17 @@ def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
   let model ← Qwen3ASRForConditionalGeneration.init cfg
   let wavPath ← writeDeterministicWavFixture "greedy_generate"
 
-  let batch : UInt64 := 1
-  let frames : UInt64 := 64
-  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
-  let promptSeq : UInt64 := audioSeq + 2
+  let batch : Nat := 1
+  let frames : Nat := 64
+  let audioSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : Nat := audioSeq + 2
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let mut idsVals : Array Int64 := #[]
-  for _ in [:audioSeq.toNat] do
+  for _ in [:audioSeq] do
     idsVals := idsVals.push aTok
   idsVals := idsVals.push 5
   idsVals := idsVals.push 9
-  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, promptSeq]
+  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, promptSeq]))
 
   let frontendCfg := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins frames
   let frontendOut ← wavToWhisperFeatures frontendCfg wavPath
@@ -853,26 +865,26 @@ def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
   let outIds := generated.2
   LeanTest.assertEqual outSeq (promptSeq + 3) "greedy generation should append max_new_tokens when eos set is empty"
 
-  let flat : Tensor { shape := #[outSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked outIds #[outSeq]
+  let flat : Tensor { shape := #[outSeq], dtype := .Int64, device := .CPU } := Tensor.reshape outIds #[outSeq]
   let toks ← Tensor.toUInt64Array flat
-  LeanTest.assertEqual toks.size outSeq.toNat "generated token tensor should match reported output sequence length"
+  LeanTest.assertEqual toks.size outSeq "generated token tensor should match reported output sequence length"
 
 @[test]
 def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
   let model := withZeroLmHead model
-  let batch : UInt64 := 1
-  let frames : UInt64 := 32
-  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
-  let promptSeq : UInt64 := audioSeq + 2
+  let batch : Nat := 1
+  let frames : Nat := 32
+  let audioSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : Nat := audioSeq + 2
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let mut idsVals : Array Int64 := #[]
-  for _ in [:audioSeq.toNat] do
+  for _ in [:audioSeq] do
     idsVals := idsVals.push aTok
   idsVals := idsVals.push 7
   idsVals := idsVals.push 11
-  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, promptSeq]
+  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, promptSeq]))
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let fmask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.fullInt #[batch, frames] 1
 
@@ -885,8 +897,8 @@ def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let idsUncached := outUncached.2
 
   LeanTest.assertEqual seqCached seqUncached "cached and uncached generation should produce same output length"
-  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idsCached #[seqCached]
-  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idsUncached #[seqUncached]
+  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshape idsCached #[seqCached]
+  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshape idsUncached #[seqUncached]
   let toksCached ← Tensor.toUInt64Array flatCached
   let toksUncached ← Tensor.toUInt64Array flatUncached
   LeanTest.assertEqual toksCached toksUncached "cached and uncached generation should produce identical token ids"
@@ -897,17 +909,17 @@ def testQwen3ASRGreedyCachedMatchesUncachedWhenAudioTokenIsGenerated : IO Unit :
     { tinyCfg with thinkerConfig := { tinyCfg.thinkerConfig with audioTokenId := 0 } }
   let model0 ← Qwen3ASRForConditionalGeneration.init cfg
   let model : Qwen3ASRForConditionalGeneration cfg := withZeroLmHead model0
-  let batch : UInt64 := 1
-  let frames : UInt64 := 32
-  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
-  let promptSeq : UInt64 := audioSeq + 2
+  let batch : Nat := 1
+  let frames : Nat := 32
+  let audioSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : Nat := audioSeq + 2
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let mut idsVals : Array Int64 := #[]
-  for _ in [:audioSeq.toNat] do
+  for _ in [:audioSeq] do
     idsVals := idsVals.push aTok
   idsVals := idsVals.push 7
   idsVals := idsVals.push 11
-  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, promptSeq]
+  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, promptSeq]))
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let fmask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.fullInt #[batch, frames] 1
 
@@ -921,25 +933,25 @@ def testQwen3ASRGreedyCachedMatchesUncachedWhenAudioTokenIsGenerated : IO Unit :
 
   LeanTest.assertEqual seqCached seqUncached
     "cached and uncached generation should stay aligned even when the generated token equals the audio placeholder id"
-  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idsCached #[seqCached]
-  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked idsUncached #[seqUncached]
+  let flatCached : Tensor { shape := #[seqCached], dtype := .Int64, device := .CPU } := Tensor.reshape idsCached #[seqCached]
+  let flatUncached : Tensor { shape := #[seqUncached], dtype := .Int64, device := .CPU } := Tensor.reshape idsUncached #[seqUncached]
   let toksCached ← Tensor.toUInt64Array flatCached
   let toksUncached ← Tensor.toUInt64Array flatUncached
   LeanTest.assertEqual toksCached toksUncached
     "cached and uncached generation should produce identical token ids even when the audio placeholder id is generated"
-  LeanTest.assertTrue (toksCached.drop promptSeq.toNat |>.all (· == 0))
+  LeanTest.assertTrue (toksCached.drop promptSeq |>.all (· == 0))
     s!"zero lmHead should force generated continuation tokens to the audio token id, got {reprStr toksCached}"
 
 @[test]
 def testQwen3ASRMaskedPositionsMatchTrimmedLeftPad : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 1
-  let seq : UInt64 := 6
+  let batch : Nat := 1
+  let seq : Nat := 6
   let vocab := cfg.thinkerConfig.textConfig.vocabSize.toInt64
   let ids ← Tensor.randint 0 vocab #[batch, seq]
   let maskVals : Array Int64 := #[0, 0, 1, 1, 1, 1]
-  let attnMask : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array maskVals) #[batch, seq]
+  let attnMask : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array maskVals) #[batch, seq]
 
   let logitsMasked ← model.forward
     ids
@@ -969,23 +981,23 @@ def testQwen3ASRMaskedPositionsMatchTrimmedLeftPad : IO Unit := do
 def testQwen3ASRForwardVariableFeatureMask : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 1
-  let frames : UInt64 := 64
-  let validFrames : UInt64 := 32
-  let audioLen : UInt64 := AudioEncoderConfig.featExtractOutputLength validFrames
-  let seq : UInt64 := audioLen + 2
+  let batch : Nat := 1
+  let frames : Nat := 64
+  let validFrames : Nat := 32
+  let audioLen : Nat := AudioEncoderConfig.featExtractOutputLength validFrames
+  let seq : Nat := audioLen + 2
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
   let mut idsVals : Array Int64 := #[]
-  for _ in [:audioLen.toNat] do
+  for _ in [:audioLen] do
     idsVals := idsVals.push aTok
   idsVals := idsVals.push 3
   idsVals := idsVals.push 4
-  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[batch, seq]
+  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, seq]))
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let mut mask : Array Int64 := #[]
-  for i in [:frames.toNat] do
-    mask := mask.push (if i.toUInt64 < validFrames then 1 else 0)
-  let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array mask) #[batch, frames]
+  for i in [:frames] do
+    mask := mask.push (if i < validFrames then 1 else 0)
+  let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? mask #[batch, frames]))
 
   let logits ← model.forward inputIds (some mel) (some featureMask) none
   let s := Tensor.item (Tensor.sumAll logits)
@@ -995,8 +1007,8 @@ def testQwen3ASRForwardVariableFeatureMask : IO Unit := do
 def testQwen3ASRAudioEncoderFeatureDType : IO Unit := do
   let cfg : AudioEncoderConfig :=
     { tinyChunkedCfg.thinkerConfig.audioConfig with nWindow := 8, nWindowInfer := 32 }
-  let features : Tensor { shape := #[3, cfg.numMelBins, 32], dtype := .Float32, device := .CPU } := Tensor.reshapeChecked
-    (Tensor.sin (Tensor.toFloat32 (Tensor.arange (3 * cfg.numMelBins * 32)))) #[3, cfg.numMelBins, 32]
+  let features : Tensor { shape := #[3, cfg.numMelBins, 32], dtype := .Float32, device := .CPU } := Tensor.reshape
+    (Tensor.sin (Tensor.toFloat32 (Tensor.arange (3 * cfg.numMelBins * 32)))) #[3, cfg.numMelBins, 32] (by simp [Nat.mul_assoc])
   for bf16Weights in #[false, true] do
     let selected : RealFloatingDType :=
       if bf16Weights then ⟨.BFloat16, by decide⟩ else ⟨.Float32, by decide⟩
@@ -1022,8 +1034,8 @@ def testQwen3ASRAudioEncoderFeatureDType : IO Unit := do
       let short : Tensor { dtype := modelDType, shape := #[1, 4, cfg.outputDim], device := .CPU } := Tensor.sliceChecked audio 0 1 1 #[1, 4, cfg.outputDim]
       let padding : Tensor { dtype := modelDType, shape := #[1, 2, cfg.outputDim], device := .CPU } := Tensor.sliceChecked short 1 2 2 #[1, 2, cfg.outputDim]
       LeanTest.assertEqual (Tensor.item (Tensor.maxAllChecked (Tensor.abs padding))) 0.0 "Short-sample output padding stays zero"
-      let dense := encoder.forward mel
-      let denseExpected := encoder.forward expectedInput
+      let dense := encoder.forward mel (by decide)
+      let denseExpected := encoder.forward expectedInput (by decide)
       LeanTest.assertEqual dense.actualSpec.dtype encoder.conv2d1Weight.actualSpec.dtype "Dense encoder output uses model dtype"
       LeanTest.assertEqual (Tensor.item (Tensor.maxAll (Tensor.abs (Tensor.sub (Tensor.toFloat32 dense) (Tensor.toFloat32 denseExpected))))) 0.0
         "Dense path also aligns features and positional embeddings"
@@ -1040,12 +1052,12 @@ def testQwen3ASRBFloat16VariableLengthGeneration : IO Unit := do
   let model ← Qwen3ASRForConditionalGeneration.init cfg (dtype := .BFloat16)
   let model := TensorStruct.detach model
   let aTok := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
-  let ids : Tensor { shape := #[2, 6], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array
+  let ids : Tensor { shape := #[2, 6], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array
     #[aTok, aTok, aTok, aTok, 7, 9, aTok, aTok, 3, 5, 7, 9]) #[2, 6]
-  let mel : Tensor { shape := #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32], dtype := .Float32, device := .CPU } := Tensor.reshapeChecked
+  let mel : Tensor { shape := #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32], dtype := .Float32, device := .CPU } := Tensor.reshape
     (Tensor.sin (Tensor.toFloat32 (Tensor.arange (2 * cfg.thinkerConfig.audioConfig.numMelBins * 32))))
-    #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32]
-  let mask : Tensor { shape := #[2, 32], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array
+    #[2, cfg.thinkerConfig.audioConfig.numMelBins, 32] (by simp [Nat.mul_assoc])
+  let mask : Tensor { shape := #[2, 32], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array
     ((List.range 32).toArray.map (fun i => if i < 25 then (1 : Int64) else 0) ++
      (List.range 32).toArray.map (fun i => if i < 13 then (1 : Int64) else 0))) #[2, 32]
   let logits ← model.forward ids (some mel) (some mask) none
@@ -1067,10 +1079,10 @@ def testQwen3ASRBFloat16VariableLengthGeneration : IO Unit := do
 def testQwen3ASRVarLenAudioEncoderChunkedPath : IO Unit := do
   let cfg := tinyChunkedCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 2
-  let frames : UInt64 := 96
+  let batch : Nat := 2
+  let frames : Nat := 96
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
-  let featureLens : Array UInt64 := #[80, 56]
+  let featureLens : Array Nat := #[80, 56]
   let audio := model.thinker.encodeAudioVarLen mel featureLens
   let s := Tensor.item (Tensor.sumAll audio)
   LeanTest.assertTrue (Float.isFinite s) "varlen chunked audio encoder output should be finite"
@@ -1079,29 +1091,29 @@ def testQwen3ASRVarLenAudioEncoderChunkedPath : IO Unit := do
 def testQwen3ASRForwardVariableFeatureMaskChunkedBatch : IO Unit := do
   let cfg := tinyChunkedCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let batch : UInt64 := 2
-  let frames : UInt64 := 96
-  let valid0 : UInt64 := 80
-  let valid1 : UInt64 := 56
+  let batch : Nat := 2
+  let frames : Nat := 96
+  let valid0 : Nat := 80
+  let valid1 : Nat := 56
   let audioLen0 := AudioEncoderConfig.featExtractOutputLength valid0
   let audioLen1 := AudioEncoderConfig.featExtractOutputLength valid1
-  let seq : UInt64 := 13
+  let seq : Nat := 13
   let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
 
   let mut idVals : Array Int64 := #[]
-  for i in [:seq.toNat] do
-    idVals := idVals.push (if i.toUInt64 < audioLen0 then aTok else (Int64.ofNat i + 3))
-  for i in [:seq.toNat] do
-    idVals := idVals.push (if i.toUInt64 < audioLen1 then aTok else (Int64.ofNat i + 17))
-  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array idVals) #[batch, seq]
+  for i in [:seq] do
+    idVals := idVals.push (if i < audioLen0 then aTok else (Int64.ofNat i + 3))
+  for i in [:seq] do
+    idVals := idVals.push (if i < audioLen1 then aTok else (Int64.ofNat i + 17))
+  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idVals #[batch, seq]))
 
   let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
   let mut maskVals : Array Int64 := #[]
-  for i in [:frames.toNat] do
-    maskVals := maskVals.push (if i.toUInt64 < valid0 then 1 else 0)
-  for i in [:frames.toNat] do
-    maskVals := maskVals.push (if i.toUInt64 < valid1 then 1 else 0)
-  let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array maskVals) #[batch, frames]
+  for i in [:frames] do
+    maskVals := maskVals.push (if i < valid0 then 1 else 0)
+  for i in [:frames] do
+    maskVals := maskVals.push (if i < valid1 then 1 else 0)
+  let featureMask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? maskVals #[batch, frames]))
 
   let logits ← model.forward inputIds (some mel) (some featureMask) none
   let s := Tensor.item (Tensor.sumAll logits)
@@ -1109,13 +1121,13 @@ def testQwen3ASRForwardVariableFeatureMaskChunkedBatch : IO Unit := do
 
 @[test]
 def testQwen3ASRForcedAlignFromOutputIds : IO Unit := do
-  let batch : UInt64 := 1
-  let seq : UInt64 := 6
+  let batch : Nat := 1
+  let seq : Nat := 6
   let timestampTokenId : UInt64 := 99
   let inputVals : Array Int64 := #[1, 99, 99, 7, 99, 99]
   let outputVals : Array Int64 := #[0, 10, 20, 0, 30, 40]
-  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array inputVals) #[batch, seq]
-  let outputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked (Tensor.fromInt64Array outputVals) #[batch, seq]
+  let inputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array inputVals) #[batch, seq]
+  let outputIds : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array outputVals) #[batch, seq]
   let wordLists : Array (Array String) := #[#["a", "b"]]
   let results ← alignFromOutputIds inputIds outputIds wordLists timestampTokenId 10.0
   let r := results.getD 0 { items := #[] }
@@ -1140,6 +1152,7 @@ def testQwen3ASRStreamModelPushAudioBoundsAccum : IO Unit := do
     model := model
     tok := tok
     preprocessor := pre
+    melBinsMatch := rfl
     modelDir := "."
   }
   let ss0 ← newSession sm (chunkSec := 0.5) (hopSec := 10.0)
@@ -1165,6 +1178,7 @@ def testQwen3ASRStreamModelPersistsPromptCache : IO Unit := do
     model := model
     tok := tok
     preprocessor := pre
+    melBinsMatch := rfl
     modelDir := "."
   }
   let chunkSec : Float := 2.0 / 16000.0
@@ -1210,6 +1224,7 @@ def testQwen3ASRStreamingDecodeCacheBenchmark : IO Unit := do
       model
       tok
       pre
+      rfl
       hopAudio
       stBase
       (maxNewTokens := 1)
@@ -1219,6 +1234,7 @@ def testQwen3ASRStreamingDecodeCacheBenchmark : IO Unit := do
       model
       tok
       pre
+      rfl
       hopAudio
       stBase
       (cache := some { promptCache := warmPromptCache })
@@ -1234,6 +1250,7 @@ def testQwen3ASRStreamingDecodeCacheBenchmark : IO Unit := do
         model
         tok
         pre
+        rfl
         hopAudio
         stPrompt
         (prefixCache := promptCache)
@@ -1252,6 +1269,7 @@ def testQwen3ASRStreamingDecodeCacheBenchmark : IO Unit := do
         model
         tok
         pre
+        rfl
         hopAudio
         stDecode
         (cache := decodeCache)

@@ -18,8 +18,8 @@ open torch.diffusion
 def testMaskSchedule : IO Unit := do
   let schedule := MaskedDiffusionSchedule.init 64 0 16
   -- Verify mask_probs goes from 1/64 to ~1.0
-  let firstProb := (schedule.mask_probs.sliceChecked 0 0 1 #[1] |>.reshapeChecked #[]).item
-  let lastProb := (schedule.mask_probs.sliceChecked 0 63 1 #[1] |>.reshapeChecked #[]).item
+  let firstProb := (schedule.mask_probs.sliceChecked 0 0 1 #[1] |>.reshape #[]).item
+  let lastProb := (schedule.mask_probs.sliceChecked 0 63 1 #[1] |>.reshape #[]).item
   LeanTest.assertTrue (firstProb > 0.01) "First prob > 0.01"
   LeanTest.assertTrue (firstProb < 0.05) "First prob < 0.05"
   LeanTest.assertTrue (lastProb > 0.95) "Last prob > 0.95"
@@ -28,9 +28,9 @@ def testMaskSchedule : IO Unit := do
 def testMaskPreservesContext : IO Unit := do
   let schedule := MaskedDiffusionSchedule.init 64 0 16  -- context_len=16
   -- Create random tokens (avoiding 0 which is mask)
-  let x_0 ← Tensor.randint 1 127 #[(2 : UInt64), 128]
+  let x_0 ← Tensor.randint 1 127 #[(2 : Nat), 128]
   -- High timestep = lots of masking
-  let t := Tensor.fullInt #[(2 : UInt64)] 63
+  let t := Tensor.fullInt #[(2 : Nat)] 63
   let x_t ← schedule.addMasks x_0 t
   -- Count total masks and check some were added
   let numMasked := Tensor.item (Tensor.sumAll ((Tensor.eqScalar x_t 0).toFloat32))
@@ -45,15 +45,15 @@ def testMaskPreservesContext : IO Unit := do
 @[test]
 def testMaskedLoss : IO Unit := do
   -- Create dummy logits and targets
-  let logits ← Tensor.randn #[(2 : UInt64), 32, 128] false
-  let targets ← Tensor.randint 0 127 #[(2 : UInt64), 32]
-  let x_t := Tensor.fullInt #[(2 : UInt64), 32] 0  -- All masked
+  let logits ← Tensor.randn #[(2 : Nat), 32, 128] false
+  let targets ← Tensor.randint 0 127 #[(2 : Nat), 32]
+  let x_t := Tensor.fullInt #[(2 : Nat), 32] 0  -- All masked
   let loss := maskedCrossEntropyLoss logits targets x_t 0
   let lossVal := Tensor.item loss
   LeanTest.assertTrue (not lossVal.isNaN) "Loss not NaN"
   LeanTest.assertTrue (lossVal > 0) "Loss positive"
   -- Test with no masked positions
-  let x_t_none ← Tensor.randint 1 127 #[(2 : UInt64), 32]  -- No masks
+  let x_t_none ← Tensor.randint 1 127 #[(2 : Nat), 32]  -- No masks
   let loss_none := maskedCrossEntropyLoss logits targets x_t_none 0
   let lossValNone := Tensor.item loss_none
   -- When no positions are masked, loss should be ~0 (masked loss / small epsilon)
@@ -65,8 +65,8 @@ def testDiffusionForward : IO Unit := do
   let params ← DiffusionParams.init cfg
   let rotaryCache ← RotaryCache.init cfg.seq_len cfg.headDim
   -- Create input tensors
-  let x_t ← Tensor.randint 0 cfg.vocab_size.toInt64 #[(2 : UInt64), cfg.seq_len]
-  let t ← Tensor.randint 0 cfg.diffusion_steps.toInt64 #[(2 : UInt64)]
+  let x_t ← Tensor.randint 0 cfg.vocab_size.toInt64 #[(2 : Nat), cfg.seq_len]
+  let t ← Tensor.randint 0 cfg.diffusion_steps.toInt64 #[(2 : Nat)]
   let logits := forward params x_t t rotaryCache
   -- Verify output is finite
   let sum := Tensor.item (Tensor.sumAll logits)
@@ -125,7 +125,7 @@ def testTrainStep : IO Unit := do
   LeanTest.assertTrue (headDiff > 1e-6) s!"Output head learned (diff={headDiff})"
 
 set_option linter.unusedVariables false in
-example (n : UInt64) (params : MLPParams n) : True := by
+example (n : Nat) (params : MLPParams n) : True := by
   fail_if_success
     have _ : MLPParams n := { params with c_proj := Tensor.zeros #[n, 4*n + 1] }
   trivial
@@ -147,7 +147,7 @@ private def checkpointConfig : Config := {
   let params ← DiffusionParams.init cfg
   let rotary ← RotaryCache.init cfg.seq_len cfg.headDim
   let schedule := MaskedDiffusionSchedule.init 1 0 2
-  let x := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshapeChecked #[1, 4]
+  let x := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshape #[1, 4]
   let opt := Optim.adamw (α := DiffusionParams cfg) (lr := 0.001)
   let trainCfg : diffusion.train.TrainConfig := { gradClip := 0 }
   let (trained, state, loss) ← diffusion.train.trainStep trainCfg params (opt.init params) schedule x rotary 0.001
@@ -172,10 +172,10 @@ private def checkpointConfig : Config := {
   let cfg := { checkpointConfig with n_layer := 0 }
   let params ← DiffusionParams.init cfg
   let head := Tensor.fromFloatArray #[0,0,0,0, 1,1,1,1, 0,0,0,0, 0,0,0,0,
-    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0] |>.reshapeChecked #[8,4]
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0] |>.reshape #[8,4]
   let params := { params with token_emb := Tensor.ones #[8,4], time_emb := Tensor.ones #[2,4], output_head := head }
   let rotary ← RotaryCache.init cfg.seq_len cfg.headDim
-  let contextIds := Tensor.fromInt64Array #[0,3] |>.reshapeChecked #[1,2]
+  let contextIds := Tensor.fromInt64Array #[0,3] |>.reshape #[1,2]
   let topk ← sampleTopK params rotary 2 1.0 4 (some contextIds)
   let confidence ← sampleConfidence params rotary 0.99 1.0 4 (some contextIds)
   LeanTest.assertEqual (← topk.toUInt64Array) #[0,3,1,1]

@@ -36,10 +36,10 @@ private def getBool? (j : Json) : Option Bool :=
 private def getString? (j : Json) : Option String :=
   fromJson? j
 
-private def getNatArray? (j : Json) : Option (Array UInt64) :=
+private def getNatArray? (j : Json) : Option (Array Nat) :=
   match j with
   | .arr xs =>
-    let mapped := xs.map (fun x => (getNat? x).map (·.toUInt64))
+    let mapped := xs.map getNat?
     if mapped.all Option.isSome then
       some <| mapped.map (fun x => x.getD 0)
     else
@@ -51,9 +51,9 @@ private def getFloat? (j : Json) : Option Float :=
   | some x => some x
   | none => (getNat? j).map (·.toFloat)
 
-private def getNatFieldD (j : Json) (key : String) (d : UInt64) : UInt64 :=
+private def getNatFieldD (j : Json) (key : String) (d : Nat) : Nat :=
   match getObjVal? j key >>= getNat? with
-  | some n => n.toUInt64
+  | some n => n
   | none => d
 
 private def getBoolFieldD (j : Json) (key : String) (d : Bool) : Bool :=
@@ -71,8 +71,8 @@ private def getFloatFieldD (j : Json) (key : String) (d : Float) : Float :=
   | some x => x
   | none => d
 
-private def getOptNatField (j : Json) (key : String) : Option UInt64 :=
-  (getObjVal? j key >>= getNat?).map (·.toUInt64)
+private def getOptNatField (j : Json) (key : String) : Option Nat :=
+  getObjVal? j key >>= getNat?
 
 private def parseLayerTypes (j : Json) (key : String) : Option (Array LayerType) :=
   match getObjVal? j key with
@@ -87,7 +87,7 @@ private def parseLayerTypes (j : Json) (key : String) : Option (Array LayerType)
 private def nestedFloatField? (j : Json) (objKey fieldKey : String) : Option Float :=
   getObjVal? j objKey >>= fun nested => getObjVal? nested fieldKey >>= getFloat?
 
-def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Config :=
+def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Except String Config :=
   let textCfg := match getObjVal? j "text_config" with | some t => t | none => j
 
   let hidden := getNatFieldD textCfg "hidden_size" d.hidden_size
@@ -132,7 +132,9 @@ def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Config :=
     | some xs => xs
     | none => d.mlp_only_layers
 
-  {
+  let linearKeyHeads := getNatFieldD textCfg "linear_num_key_heads" d.linear_num_key_heads
+  let linearValueHeads := getNatFieldD textCfg "linear_num_value_heads" d.linear_num_value_heads
+  if hDiv : linearKeyHeads ∣ linearValueHeads then pure {
     vocab_size := getNatFieldD textCfg "vocab_size" d.vocab_size
     hidden_size := hidden
     intermediate_size := getNatFieldD textCfg "intermediate_size" d.intermediate_size
@@ -154,8 +156,8 @@ def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Config :=
     linear_conv_kernel_dim := getNatFieldD textCfg "linear_conv_kernel_dim" d.linear_conv_kernel_dim
     linear_key_head_dim := getNatFieldD textCfg "linear_key_head_dim" d.linear_key_head_dim
     linear_value_head_dim := getNatFieldD textCfg "linear_value_head_dim" d.linear_value_head_dim
-    linear_num_key_heads := getNatFieldD textCfg "linear_num_key_heads" d.linear_num_key_heads
-    linear_num_value_heads := getNatFieldD textCfg "linear_num_value_heads" d.linear_num_value_heads
+    linear_num_key_heads := linearKeyHeads
+    linear_num_value_heads := linearValueHeads
     mamba_ssm_dtype := getStringFieldD textCfg "mamba_ssm_dtype" d.mamba_ssm_dtype
 
     layer_types := layerTypes
@@ -178,24 +180,26 @@ def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Config :=
 
     pad_token_id :=
       match getOptNatField textCfg "pad_token_id" with
-      | some x => some x
+      | some x => some x.toUInt64
       | none => d.pad_token_id
     bos_token_id :=
       match getOptNatField textCfg "bos_token_id" with
-      | some x => some x
+      | some x => some x.toUInt64
       | none => d.bos_token_id
     eos_token_id :=
       match getOptNatField textCfg "eos_token_id" with
-      | some x => some x
+      | some x => some x.toUInt64
       | none => d.eos_token_id
+    linearKeyHeadsDivide := hDiv
   }
+  else .error s!"Invalid Qwen3.5 config: linear_num_value_heads ({linearValueHeads}) must be divisible by linear_num_key_heads ({linearKeyHeads})"
 
 namespace Config
 
 /-- Load Qwen3.5 config from a HuggingFace-style `config.json` file. -/
 def loadFromFile (path : String) (defaults : Config := Config.qwen35_9B) : IO Config := do
   let root ← parseJsonFile path
-  pure (Config.normalize (Config.parseJson root defaults))
+  pure (Config.normalize (← IO.ofExcept (Config.parseJson root defaults)))
 
 /-- Load Qwen3.5 config from a model directory containing `config.json`. -/
 def loadFromPretrainedDir (modelDir : String) (defaults : Config := Config.qwen35_9B) : IO Config :=

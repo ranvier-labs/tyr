@@ -305,8 +305,8 @@ private def ensureParentDir (path : String) : IO Unit := do
         IO.FS.createDirAll parent
   | none => pure ()
 
-private def formatCodesRows (flat : Array UInt64) (numCodeGroups : UInt64) : String := Id.run do
-  let g := numCodeGroups.toNat
+private def formatCodesRows (flat : Array UInt64) (numCodeGroups : Nat) : String := Id.run do
+  let g := numCodeGroups
   if g == 0 then
     return ""
   let rows := flat.size / g
@@ -344,8 +344,8 @@ private def lookupLanguageId? (cfg : Qwen3TTSConfig) (language : String) : Optio
       return some v
   none
 
-private def idsTensor1 (ids : Array UInt64) : Tensor { shape := #[1, ids.size.toUInt64], dtype := .Int64, device := device } :=
-  (Tensor.reshapeChecked (Tensor.fromInt64Array (ids.map (Int64.ofNat ∘ UInt64.toNat))) #[1, ids.size.toUInt64]).to device
+private def idsTensor1 (ids : Array UInt64) : Tensor { shape := #[1, ids.size], dtype := .Int64, device := device } :=
+  (Tensor.reshape (Tensor.fromInt64Array (ids.map (Int64.ofNat ∘ UInt64.toNat))) #[1, ids.size]).to device
 
 private def saveTokenIds (path : String) (ids : Array UInt64) : IO Unit := do
   ensureParentDir path
@@ -360,7 +360,7 @@ private def loadSpeakerEmbedding? (cfg : Qwen3TTSConfig) (dtype : RealFloatingDT
   match path? with
   | none => pure none
   | some p =>
-      if cfg.speakerEncoderConfig.encDim != cfg.talkerConfig.hiddenSize then
+      let ⟨hDim⟩ ← if h : cfg.speakerEncoderConfig.encDim = cfg.talkerConfig.hiddenSize then pure (PLift.up h) else
         throw <| IO.userError
           s!"speaker embedding dim mismatch: speaker enc_dim={cfg.speakerEncoderConfig.encDim}, talker hidden={cfg.talkerConfig.hiddenSize}"
       let path ← expandHome p
@@ -371,7 +371,7 @@ private def loadSpeakerEmbedding? (cfg : Qwen3TTSConfig) (dtype : RealFloatingDT
         device (some dtype.val)
       let emb ← IO.ofExcept <| Tensor.ofRaw
         (σ := ⟨#[cfg.speakerEncoderConfig.encDim], dtype.val, device⟩) converted
-      pure (some (Tensor.reshapeChecked emb #[1, 1, cfg.talkerConfig.hiddenSize]))
+      pure (some (Tensor.reshape emb #[1, 1, cfg.talkerConfig.hiddenSize] (by simp [hDim])))
 
 private def buildTalkerInputsEquivalent
     (cfg : Qwen3TTSConfig)
@@ -385,16 +385,16 @@ private def buildTalkerInputsEquivalent
     throw <| IO.userError s!"Tokenized assistant input is too short ({inputIds.size}); expected at least 8 tokens."
 
   let roleIds := inputIds.extract 0 3
-  if roleIds.size != 3 then
+  let ⟨hRole⟩ ← if h : roleIds.size = 3 then pure (PLift.up h) else
     throw <| IO.userError s!"Unexpected role-token size: {roleIds.size} (expected 3)."
   let textMainIds := inputIds.extract 3 (inputIds.size - 5)
-  let textMainLen : UInt64 := textMainIds.size.toUInt64
-  let hidden : UInt64 := cfg.talkerConfig.hiddenSize
+  let textMainLen : Nat := textMainIds.size
+  let hidden : Nat := cfg.talkerConfig.hiddenSize
 
-  let roleTensor : Tensor { shape := #[1, 3], dtype := .Int64, device := device } := Tensor.reshapeChecked (idsTensor1 roleIds) #[1, 3]
+  let roleTensor : Tensor { shape := #[1, 3], dtype := .Int64, device := device } := Tensor.reshape (idsTensor1 roleIds) #[1, 3] (by simp [hRole])
   let roleEmbed : Tensor { shape := #[1, 3, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedText model.talker.model roleTensor
 
-  let ttsSpecialIds : Tensor { shape := #[1, 3], dtype := .Int64, device := device } := Tensor.reshapeChecked ((Tensor.fromInt64Array #[
+  let ttsSpecialIds : Tensor { shape := #[1, 3], dtype := .Int64, device := device } := Tensor.reshape ((Tensor.fromInt64Array #[
     Int64.ofNat cfg.ttsBosTokenId.toNat,
     Int64.ofNat cfg.ttsEosTokenId.toNat,
     Int64.ofNat cfg.ttsPadTokenId.toNat
@@ -438,11 +438,11 @@ private def buildTalkerInputsEquivalent
           cfg.talkerConfig.codecThinkBosId,
           cfg.talkerConfig.codecThinkEosId
         ]
-  let codecPrefillLen : UInt64 := codecPrefillIds.size.toUInt64
+  let codecPrefillLen : Nat := codecPrefillIds.size
   let codecPrefillTensor : Tensor { shape := #[1, codecPrefillLen], dtype := .Int64, device := device } := idsTensor1 codecPrefillIds
   let codecEmb0 : Tensor { shape := #[1, codecPrefillLen, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedCodec model.talker.model codecPrefillTensor
 
-  let codecPadBosIds : Tensor { shape := #[1, 2], dtype := .Int64, device := device } := Tensor.reshapeChecked ((Tensor.fromInt64Array #[
+  let codecPadBosIds : Tensor { shape := #[1, 2], dtype := .Int64, device := device } := Tensor.reshape ((Tensor.fromInt64Array #[
     Int64.ofNat cfg.talkerConfig.codecPadId.toNat,
     Int64.ofNat cfg.talkerConfig.codecBosId.toNat
   ]).to device) #[1, 2]
@@ -478,9 +478,9 @@ private def buildTalkerInputsEquivalent
   let codecBosEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedCodec model.talker.model codecBosOnlyIds
   let partC : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.add ttsPadEmbed codecBosEmbed
 
-  let partABLen : UInt64 := (3 + (codecInputLen - 1)) + (textMainLen + 1)
+  let partABLen : Nat := (3 + (codecInputLen - 1)) + (textMainLen + 1)
   let partAB : Tensor { shape := #[1, partABLen, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat partA partB 1
-  let outLen : UInt64 := partABLen + 1
+  let outLen : Nat := partABLen + 1
   let talkerInputs : Tensor { shape := #[1, outLen, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat partAB partC 1
   pure ((⟨outLen, talkerInputs⟩), ttsPadEmbed)
 
@@ -529,8 +529,8 @@ def runEndToEnd (args : Args) : IO Unit := do
   IO.println s!"Language: {args.language}"
   IO.println s!"Target device: {repr targetDevice}"
   let thinkMode := parseThinkMode args.thinkMode
-  let subtalkerTopKsByGroup : Option (Array UInt64) :=
-    args.subtalkerTopKsByGroup.map (fun xs => xs.map Nat.toUInt64)
+  let subtalkerTopKsByGroup : Option (Array Nat) :=
+    args.subtalkerTopKsByGroup
   match args.seed with
   | some seed =>
       torch.manualSeed seed
@@ -541,7 +541,7 @@ def runEndToEnd (args : Args) : IO Unit := do
   -- Load runtime config from HF config.json so tensor shapes match real checkpoints.
   let cfg ← Qwen3TTSConfig.loadFromPretrainedDir modelDir
   IO.println s!"Model type: {cfg.ttsModelType}, talker hidden={cfg.talkerConfig.hiddenSize}, code groups={cfg.talkerConfig.numCodeGroups}"
-  let vocabTopKMax := cfg.talkerConfig.codePredictorConfig.vocabSize.toNat
+  let vocabTopKMax := cfg.talkerConfig.codePredictorConfig.vocabSize
   if args.topK > vocabTopKMax then
     throw <| IO.userError
       s!"--top-k ({args.topK}) exceeds talker vocab size ({vocabTopKMax})"
@@ -591,7 +591,7 @@ def runEndToEnd (args : Args) : IO Unit := do
     else
       rawTokenIds
   saveTokenIds tokenIdsPath tokenIds
-  let textTokenCount := tokenIds.size.toUInt64
+  let textTokenCount := tokenIds.size
   if textTokenCount == 0 then
     throw <| IO.userError "Tokenized prompt is empty."
   IO.println s!"Tokenized prompt length: {textTokenCount}"
@@ -626,7 +626,7 @@ def runEndToEnd (args : Args) : IO Unit := do
     buildTalkerInputsEquivalent cfg model tokenIds languageId thinkMode speakerEmbed
   IO.println s!"Built conditioned talker inputs, seq={talkerSeq}"
 
-  let maxFrames : UInt64 := args.maxFrames.toUInt64
+  let maxFrames : Nat := args.maxFrames
   if args.trueStreaming then
     let canUseLeanStreamingDecode : Bool :=
       !args.skipDecode && !args.decodeViaPython && cfg.talkerConfig.numCodeGroups == 16
@@ -669,26 +669,26 @@ def runEndToEnd (args : Args) : IO Unit := do
       maxFrames
       minNewTokens := 2
       temperature := args.temperature
-      topK := args.topK.toUInt64
+      topK := args.topK
       topP := args.topP
       subtalkerTemperature := args.subtalkerTemperature
-      subtalkerTopK := args.subtalkerTopK.toUInt64
+      subtalkerTopK := args.subtalkerTopK
       subtalkerTopP := args.subtalkerTopP
       repetitionPenalty := args.repetitionPenalty
-      suppressTail := args.suppressTail.toUInt64
+      suppressTail := args.suppressTail
       trailingTextHidden := some ⟨1, ttsPadEmbed⟩
       ttsPadEmbed := some ttsPadEmbed
       subtalkerTemperaturesByGroup := args.subtalkerTemperaturesByGroup
       subtalkerTopKsByGroup := subtalkerTopKsByGroup
       subtalkerTopPsByGroup := args.subtalkerTopPsByGroup
-      decodeChunkSize := args.streamChunkFrames.toUInt64
-      decodeLeftContext := args.decodeLeftContext.toUInt64
+      decodeChunkSize := args.streamChunkFrames
+      decodeLeftContext := args.decodeLeftContext
       emitEosFrame := false
     }
     let streamOut ←
       model.streamFromTalkerInputs talkerInputs streamOpts speechDecoder? callbacks
 
-    let codeLen := streamOut.codeRows.size.toUInt64
+    let codeLen := streamOut.codeRows.size
     let codesText := formatCodesMatrix streamOut.codeRows
     IO.FS.writeFile codesPath codesText
     IO.println s!"Generated {codeLen} codec frames."
@@ -706,19 +706,19 @@ def runEndToEnd (args : Args) : IO Unit := do
     let out ← TalkerForConditionalGeneration.generateCodesWithLengths
       cfg.talkerConfig model.talker talkerInputs maxFrames
       2
-      args.temperature args.topK.toUInt64 args.topP
-      args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
-      args.repetitionPenalty args.suppressTail.toUInt64
+      args.temperature args.topK args.topP
+      args.subtalkerTemperature args.subtalkerTopK args.subtalkerTopP
+      args.repetitionPenalty args.suppressTail
       (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
       args.subtalkerTemperaturesByGroup subtalkerTopKsByGroup args.subtalkerTopPsByGroup
     let codeLen := out.lengths.getD 0 maxFrames
 
     let codes3 : Tensor { shape := #[1, maxFrames, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := qwen35.typedSlice out.codes 0 0 1
     let codes2 : Tensor { shape := #[maxFrames, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } :=
-      Tensor.reshapeChecked codes3 #[maxFrames, cfg.talkerConfig.numCodeGroups]
+      Tensor.reshape codes3 #[maxFrames, cfg.talkerConfig.numCodeGroups]
     let trimmed : Tensor { shape := #[codeLen, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := qwen35.typedSlice codes2 0 0 codeLen
     let flat : Tensor { shape := #[codeLen * cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } :=
-      Tensor.reshapeChecked trimmed #[codeLen * cfg.talkerConfig.numCodeGroups]
+      Tensor.reshape trimmed #[codeLen * cfg.talkerConfig.numCodeGroups]
     let codeVals ← Tensor.toUInt64Array flat
 
     ensureParentDir codesPath
@@ -731,7 +731,7 @@ def runEndToEnd (args : Args) : IO Unit := do
       IO.println "Skipping waveform decode (--skip-decode enabled)."
     else
       ensureParentDir wavPath
-      if args.decodeViaPython || cfg.talkerConfig.numCodeGroups != 16 then
+      if hPython : args.decodeViaPython ∨ cfg.talkerConfig.numCodeGroups ≠ 16 then
         if !args.decodeViaPython && cfg.talkerConfig.numCodeGroups != 16 then
           IO.println
             s!"Lean speech-tokenizer decoder supports 16 code groups; got {cfg.talkerConfig.numCodeGroups}. Falling back to Python decode bridge."
@@ -745,10 +745,11 @@ def runEndToEnd (args : Args) : IO Unit := do
             | none => pure s!"{modelDir}/speech_tokenizer"
           IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
           let ⟨_codecDTypes, speechDecoder⟩ ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
-          let trimmed16 : Tensor { shape := #[codeLen, 16], dtype := .Int64, device := targetDevice } := Tensor.reshapeChecked trimmed #[codeLen, 16]
+          let trimmed16 : Tensor { shape := #[codeLen, 16], dtype := .Int64, device := targetDevice } := Tensor.reshape trimmed #[codeLen, 16]
+            (by simp at hPython; simp [hPython.2])
           if args.streamingDecode then
             speechDecoder.decodeFrameMajorChunkedToWav
-              trimmed16 wavPath args.decodeChunkSize.toUInt64 args.decodeLeftContext.toUInt64
+              trimmed16 wavPath args.decodeChunkSize args.decodeLeftContext
             IO.println s!"Saved waveform to {wavPath} (Lean decoder, chunked streaming)"
           else
             speechDecoder.decodeFrameMajorToWav trimmed16 wavPath

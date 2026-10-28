@@ -23,7 +23,7 @@ structure Args where
   cacheDir : String := "~/.cache/huggingface/tyr-models"
   language : Option String := none
   context : String := ""
-  maxNewTokens : UInt64 := 128
+  maxNewTokens : Nat := 128
   chunkSec : Float := 2.0
   hopSec : Float := 0.5
   keepSec : Float := 0.2
@@ -40,9 +40,9 @@ structure Args where
   simpleOutput : Bool := false
   deriving Inhabited
 
-private def parseNatArg (name : String) (v : String) : IO UInt64 :=
+private def parseNatArg (name : String) (v : String) : IO Nat :=
   match v.toNat? with
-  | some n => pure n.toUInt64
+  | some n => pure n
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
 private def trimWhitespace (s : String) : String :=
@@ -99,13 +99,13 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
   | "--run-sec" :: v :: rest =>
       parseArgsLoop rest { acc with runSec := (← parseFloatArg "--run-sec" v) }
   | "--commit-every" :: v :: rest =>
-      parseArgsLoop rest { acc with commitEvery := (← parseNatArg "--commit-every" v).toNat }
+      parseArgsLoop rest { acc with commitEvery := (← parseNatArg "--commit-every" v) }
   | "--prompt-tokens" :: v :: rest =>
-      parseArgsLoop rest { acc with promptTokens := (← parseNatArg "--prompt-tokens" v).toNat }
+      parseArgsLoop rest { acc with promptTokens := (← parseNatArg "--prompt-tokens" v) }
   | "--use-case" :: v :: rest =>
       parseArgsLoop rest { acc with useCase := (← parseUseCaseArg v) }
   | "--rollback-chars" :: v :: rest =>
-      parseArgsLoop rest { acc with rollbackChars := (← parseNatArg "--rollback-chars" v).toNat }
+      parseArgsLoop rest { acc with rollbackChars := (← parseNatArg "--rollback-chars" v) }
   | "--silence-sec" :: v :: rest =>
       parseArgsLoop rest { acc with silenceSec := (← parseFloatArg "--silence-sec" v) }
   | "--min-speech-sec" :: v :: rest =>
@@ -287,6 +287,8 @@ def runMain (argv : List String) : IO UInt32 := do
   let cfg ← Qwen3ASRConfig.loadFromPretrainedDir modelDir
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let pre ← PreprocessorConfig.loadFromPretrainedDir modelDir
+  let ⟨hMel⟩ ← if h : pre.featureSize = cfg.thinkerConfig.audioConfig.numMelBins then pure (PLift.up h) else
+    throw (IO.userError s!"preprocessor feature_size {pre.featureSize} does not match num_mel_bins {cfg.thinkerConfig.audioConfig.numMelBins}")
   let ⟨_device, _dtype, model⟩ ← Qwen3ASRForConditionalGeneration.loadSharded modelDir cfg
 
   let hopSamples := toSamples args.hopSec
@@ -295,7 +297,7 @@ def runMain (argv : List String) : IO UInt32 := do
   let ratioSteps := Nat.max 1 (((args.chunkSec / args.hopSec) + 0.5).toUInt64.toNat)
   let autoCommitEvery := Nat.max 1 (safeSubNat ratioSteps 1)
   let commitEverySteps := if args.commitEvery == 0 then autoCommitEvery else args.commitEvery
-  let maxNewTokensStream : UInt64 :=
+  let maxNewTokensStream : Nat :=
     if args.useCase == .conversation then
       args.maxNewTokens
     else if args.maxNewTokens == 128 then
@@ -328,7 +330,7 @@ def runMain (argv : List String) : IO UInt32 := do
         let mut seenSpeech := false
         let mut lastTranscribeSize : Nat := 0
         for _ in [:steps] do
-          let pcm ← Tyr.Audio.AppleInput.read hopSamples.toUInt64 1500
+          let pcm ← Tyr.Audio.AppleInput.read hopSamples 1500
           if pcm.isEmpty then continue
 
           let frameRms := rms pcm
@@ -355,7 +357,7 @@ def runMain (argv : List String) : IO UInt32 := do
           if conversationActive && newSinceTranscribe >= transcribeInterval && utteranceAudio.size > 0 then
             lastTranscribeSize := utteranceAudio.size
             let out ← model.transcribeWaveform
-              tok pre utteranceAudio
+              tok pre hMel utteranceAudio
               (context := args.context) (language := args.language)
               (maxNewTokens := maxNewTokensStream)
             let text := trimWhitespace out.text
@@ -372,7 +374,7 @@ def runMain (argv : List String) : IO UInt32 := do
           if conversationActive && activeSilenceSamples >= silenceSamples then
             -- Final transcription on the full utterance.
             let out ← model.transcribeWaveform
-              tok pre utteranceAudio
+              tok pre hMel utteranceAudio
               (context := args.context) (language := args.language)
               (maxNewTokens := maxNewTokensStream)
             let finalText := trimWhitespace out.text
@@ -390,7 +392,7 @@ def runMain (argv : List String) : IO UInt32 := do
 
         if seenSpeech || conversationActive then
           let out ← model.transcribeWaveform
-            tok pre utteranceAudio
+            tok pre hMel utteranceAudio
             (context := args.context) (language := args.language)
             (maxNewTokens := maxNewTokensStream)
           let finalText := trimWhitespace out.text
@@ -417,7 +419,7 @@ def runMain (argv : List String) : IO UInt32 := do
         let mut lockedLanguage : Option String := args.language
         let mut backpressureDrops : Nat := 0
         for _ in [:steps] do
-          let pcm ← Tyr.Audio.AppleInput.read hopSamples.toUInt64 1500
+          let pcm ← Tyr.Audio.AppleInput.read hopSamples 1500
           if !pcm.isEmpty then
             pcmNew := pcmNew.pushChunk pcm
 
@@ -436,6 +438,7 @@ def runMain (argv : List String) : IO UInt32 := do
           let asrNext ← model.streamingTranscribe
             tok
             pre
+            hMel
             newAudio
             asrState
             (maxNewTokens := maxNewTokensStream)
@@ -482,6 +485,7 @@ def runMain (argv : List String) : IO UInt32 := do
         let asrFinal ← model.finishStreamingTranscribe
           tok
           pre
+          hMel
           asrState
           (maxNewTokens := maxNewTokensStream)
         asrState := asrFinal

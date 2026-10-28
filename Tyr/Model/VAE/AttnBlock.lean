@@ -16,7 +16,7 @@ variable {device : Device} {dtype : DType}
 variable [DType.RealFloating dtype]
 /-- Self-attention block for VAE.
     Applies spatial attention using 1×1 convolutions. -/
-structure AttnBlock (channels : UInt64) (dtype : DType := .Float32) where
+structure AttnBlock (channels : Nat) (dtype : DType := .Float32) where
   /-- GroupNorm before attention -/
   norm : GroupNormParams (device := device) (dtype := dtype) 32 channels
   /-- Query projection (1×1 conv) -/
@@ -33,7 +33,7 @@ structure AttnBlock (channels : UInt64) (dtype : DType := .Float32) where
 namespace AttnBlock
 
 /-- Initialize attention block -/
-def init (channels : UInt64) (device : Device := .CPU) (dtype : DType := .Float32) : IO (AttnBlock (device := device) (dtype := dtype) channels) := do
+def init (channels : Nat) (device : Device := .CPU) (dtype : DType := .Float32) : IO (AttnBlock (device := device) (dtype := dtype) channels) := do
   let norm ← GroupNormParams.init (dtype := dtype) (device := device) 32 channels
   let q ← Conv2dParams.init (dtype := dtype) (device := device) channels channels 1 0
   let k ← Conv2dParams.init (dtype := dtype) (device := device) channels channels 1 0
@@ -46,9 +46,10 @@ def init (channels : UInt64) (device : Device := .CPU) (dtype : DType := .Float3
     Output: [batch, channels, height, width]
 
     Applies single-head spatial self-attention. -/
-def forward {batch channels height width : UInt64}
+def forward {batch channels height width : Nat}
     (attn : AttnBlock (device := device) (dtype := dtype) channels)
     (x : Tensor { dtype := dtype, device := device, shape := #[batch, channels, height, width] })
+    (hh : 0 < height) (hw : 0 < width)
     : Tensor { dtype := dtype, device := device, shape := #[batch, channels, height, width] } :=
   let h := attn.norm.forward x
 
@@ -59,9 +60,9 @@ def forward {batch channels height width : UInt64}
 
   -- Reshape to [batch, channels, height*width]
   let spatial := height * width
-  let q := Tensor.reshapeChecked q #[batch, channels, spatial]
-  let k := Tensor.reshapeChecked k #[batch, channels, spatial]
-  let v := Tensor.reshapeChecked v #[batch, channels, spatial]
+  let q := Tensor.reshape q #[batch, channels, spatial] (by simp +zetaDelta [Tensor.convExtent_same hh (by decide : 2 * 0 + 1 = 1), Tensor.convExtent_same hw (by decide : 2 * 0 + 1 = 1), Nat.mul_assoc])
+  let k := Tensor.reshape k #[batch, channels, spatial] (by simp +zetaDelta [Tensor.convExtent_same hh (by decide : 2 * 0 + 1 = 1), Tensor.convExtent_same hw (by decide : 2 * 0 + 1 = 1), Nat.mul_assoc])
+  let v := Tensor.reshape v #[batch, channels, spatial] (by simp +zetaDelta [Tensor.convExtent_same hh (by decide : 2 * 0 + 1 = 1), Tensor.convExtent_same hw (by decide : 2 * 0 + 1 = 1), Nat.mul_assoc])
 
   -- Compute attention: softmax(Qᵀ K / sqrt(channels)) V
   -- Q: [batch, channels, spatial], K: [batch, channels, spatial]
@@ -79,11 +80,11 @@ def forward {batch channels height width : UInt64}
   let out := Tensor.transpose out 1 2  -- [batch, channels, spatial]
 
   -- Reshape back to spatial
-  let out := Tensor.reshapeChecked out #[batch, channels, height, width]
+  let out := Tensor.reshape out #[batch, channels, height, width] (by simp +zetaDelta [Nat.mul_assoc])
 
   -- Output projection + residual
   let out := Tensor.conv2dBias out attn.proj_out.weight attn.proj_out.bias #[1, 1] #[0, 0]
-  let out := Tensor.reshapeChecked out #[batch, channels, height, width]
+  let out := Tensor.reshape out #[batch, channels, height, width] (by simp +zetaDelta [Tensor.convExtent_same hh (by decide : 2 * 0 + 1 = 1), Tensor.convExtent_same hw (by decide : 2 * 0 + 1 = 1), Nat.mul_assoc])
 
   Tensor.add x out
 

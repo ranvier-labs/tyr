@@ -30,7 +30,7 @@ private def linBridge2d (_ : Unit) (x0 x1 : Tensor { dtype := .Float32, shape :=
 private def discreteBridge (_ : Unit) (_x0 x1 : Nat) (_t0 _t1 : Float) : Nat :=
   x1
 
-structure MixParams (vocab hidden : UInt64) where
+structure MixParams (vocab hidden : Nat) where
   contW : Tensor { dtype := .Float32, shape := #[hidden, 2], device := .CPU }
   contB : Tensor { dtype := .Float32, shape := #[hidden], device := .CPU }
   timeW : Tensor { dtype := .Float32, shape := #[hidden, 1], device := .CPU }
@@ -48,7 +48,7 @@ structure MixParams (vocab hidden : UInt64) where
 
 namespace MixParams
 
-def init (vocab hidden : UInt64) : IO (MixParams vocab hidden) := do
+def init (vocab hidden : Nat) : IO (MixParams vocab hidden) := do
   let contW ← randnDynamic #[hidden, 2]
   let contB := zerosDynamic #[hidden]
   let timeW ← randnDynamic #[hidden, 1]
@@ -86,7 +86,7 @@ private def f (x : Float) : Float :=
   x + Float.sin (3.0 * x)
 
 private def mkPoint (x y : Float) : Tensor { dtype := .Float32, shape := #[2], device := .CPU } :=
-  Tensor.reshapeChecked (floatsDynamic #[x, y]) #[2]
+  Tensor.reshape (floatsDynamic #[x, y]) #[2]
 
 private def X1target (rng : Rng) : BranchingState (Tensor { dtype := .Float32, shape := #[2], device := .CPU } × Nat) × Rng := Id.run do
   let (n, rng') := randLen rng
@@ -140,20 +140,20 @@ private def splitResult
       descendants := res.descendants, del := res.del, splitsTarget := res.splitsTarget, prevCoalescence := res.prevCoalescence }
   (resCont, resDisc)
 
-private def maskedCrossEntropy {batch maxLen vocab : UInt64}
+private def maskedCrossEntropy {batch maxLen vocab : Nat}
     (logits : Tensor { dtype := .Float32, shape := #[batch, maxLen, vocab], device := .CPU })
     (targets : Tensor { shape := #[batch, maxLen], dtype := .Int64, device := .CPU })
     (mask : Tensor { dtype := .Float32, shape := #[batch, maxLen], device := .CPU }) : Tensor { dtype := .Float32, shape := #[], device := .CPU } :=
-  let n : UInt64 := batch * maxLen
-  let logits2 := Tensor.reshapeChecked logits #[n, vocab]
-  let targets2 := Tensor.reshapeChecked targets #[n]
-  let mask2 := Tensor.reshapeChecked mask #[n]
+  let n : Nat := batch * maxLen
+  let logits2 := Tensor.reshape logits #[n, vocab]
+  let targets2 := Tensor.reshape targets #[n]
+  let mask2 := Tensor.reshape mask #[n]
   let per := Tensor.crossEntropyNoneChecked logits2 targets2
   let masked := Tensor.mul per mask2
   let denom := Tensor.sumAll mask2
   Tensor.div (Tensor.sumAll masked) (Tensor.addScalar denom 1.0e-8)
 
-private def maskedMSE {batch maxLen : UInt64}
+private def maskedMSE {batch maxLen : Nat}
     (pred target mask : Tensor { dtype := .Float32, shape := #[batch, maxLen], device := .CPU }) : Tensor { dtype := .Float32, shape := #[], device := .CPU } :=
   let diff := Tensor.sub pred target
   let sq := Tensor.mul diff diff
@@ -161,7 +161,7 @@ private def maskedMSE {batch maxLen : UInt64}
   let denom := Tensor.sumAll mask
   Tensor.div (Tensor.sumAll masked) (Tensor.addScalar denom 1.0e-8)
 
-private def maskedMSE3d {batch maxLen dim : UInt64}
+private def maskedMSE3d {batch maxLen dim : Nat}
     (pred target : Tensor { dtype := .Float32, shape := #[batch, maxLen, dim], device := .CPU }) (mask : Tensor { dtype := .Float32, shape := #[batch, maxLen], device := .CPU }) : Tensor { dtype := .Float32, shape := #[], device := .CPU } :=
   let mask3 := Tensor.expand (Tensor.unsqueeze mask 2) #[batch, maxLen, dim]
   let diff := Tensor.sub pred target
@@ -170,7 +170,7 @@ private def maskedMSE3d {batch maxLen dim : UInt64}
   let denom := Tensor.sumAll mask3
   Tensor.div (Tensor.sumAll masked) (Tensor.addScalar denom 1.0e-8)
 
-private def maskedBCEWithLogits {batch maxLen : UInt64}
+private def maskedBCEWithLogits {batch maxLen : Nat}
     (logits target mask : Tensor { dtype := .Float32, shape := #[batch, maxLen], device := .CPU }) : Tensor { dtype := .Float32, shape := #[], device := .CPU } :=
   let probs := Tensor.sigmoid logits
   let loss := binaryCrossEntropySum probs target mask
@@ -178,9 +178,9 @@ private def maskedBCEWithLogits {batch maxLen : UInt64}
   Tensor.div loss (Tensor.addScalar denom 1.0e-8)
 
 def runDemo : IO Unit := do
-  let vocab : UInt64 := 3
-  let hidden : UInt64 := 32
-  let maxLen : UInt64 := 64
+  let vocab : Nat := 3
+  let hidden : Nat := 32
+  let maxLen : Nat := 64
   let steps : Nat := 200
   let batch : Nat := 16
 
@@ -223,7 +223,7 @@ def runDemo : IO Unit := do
         mergeTuple
         (useBranchingTimeProb := 0.5)
         (deletionPad := 1.5)
-        (maxLen := some maxLen.toNat)
+        (maxLen := some maxLen)
         (rng := rng)
     rng := rng'
 
@@ -250,8 +250,8 @@ def runDemo : IO Unit := do
     let predTok := Tensor.affine3d hiddenState paramsTrain.proj paramsTrain.tokB
     let split3 := Tensor.affine3d hiddenState paramsTrain.splitW paramsTrain.splitB
     let del3 := Tensor.affine3d hiddenState paramsTrain.delW paramsTrain.delB
-    let splitLogits := split3.reshapeChecked #[batchU, maxLen]
-    let delLogits := del3.reshapeChecked #[batchU, maxLen]
+    let splitLogits := split3.reshape #[batchU, maxLen]
+    let delLogits := del3.reshape #[batchU, maxLen]
 
     let mask := Tensor.mul packedDisc.padmask packedDisc.flowmask
     let contLoss := maskedMSE3d predLoc packedCont.anchor mask
@@ -283,7 +283,7 @@ def runDemo : IO Unit := do
       uniformTimeDist uniformTimeDist
       (sequentialUniformPolicy (Tensor { dtype := .Float32, shape := #[2], device := .CPU } × Nat))
       mergeTuple
-      (maxLen := some maxLen.toNat)
+      (maxLen := some maxLen)
       (rng := rng)
   let (resCont, resDisc) := splitResult bridgeRes
   let ⟨batchU, packedCont⟩ ← packBranchingTensor (dim := 2) cfg resCont

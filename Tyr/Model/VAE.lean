@@ -43,8 +43,8 @@ def invNormalize (ae : (AutoEncoder (device := device) dtypes)) (z : Tensor { dt
   let var_plus_eps := Tensor.addScalar ae.bn_running_var bn_eps
   let scale := Tensor.sqrt var_plus_eps
   -- Reshape and expand for element-wise ops: [128] → [1, 128, 1, 1] → [1, 128, 16, 16]
-  let scale := Tensor.reshapeChecked scale #[1, 128, 1, 1]
-  let mean := Tensor.reshapeChecked ae.bn_running_mean #[1, 128, 1, 1]
+  let scale := Tensor.reshape scale #[1, 128, 1, 1]
+  let mean := Tensor.reshape ae.bn_running_mean #[1, 128, 1, 1]
   -- Expand channel statistics over the spatial dimensions.
   let scale := Tensor.expand scale #[1, 128, 16, 16]
   let mean := Tensor.expand mean #[1, 128, 16, 16]
@@ -58,11 +58,11 @@ def invNormalize (ae : (AutoEncoder (device := device) dtypes)) (z : Tensor { dt
     The reshape and permutation preserve the indexed spatial layout. -/
 def unpackLatents16x16 {dtype : DType} (z : Tensor { dtype := dtype, device := device, shape := #[1, 128, 16, 16] }) : Tensor { dtype := dtype, device := device, shape := #[1, 32, 32, 32] } :=
   -- Reshape: [1, 128, 16, 16] → [1, 32, 2, 2, 16, 16]
-  let z := Tensor.reshapeChecked z #[1, 32, 2, 2, 16, 16]
+  let z := Tensor.reshape z #[1, 32, 2, 2, 16, 16] (by simp)
   -- Permute: [1, 32, 2, 2, 16, 16] → [1, 32, 16, 2, 16, 2]
   let z := Tensor.permute z #[0, 1, 4, 2, 5, 3]
   -- Reshape to final: [1, 32, 32, 32]
-  Tensor.reshapeChecked z #[1, 32, 32, 32]
+  Tensor.reshape z #[1, 32, 32, 32] (by simp)
 
 /-- Full decode pipeline: inv_normalize → unpack → decoder.
     Input: packed latents [1, 128, 16, 16]

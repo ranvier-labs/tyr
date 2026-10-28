@@ -21,7 +21,7 @@ variable [DType.RealFloating dtype]
 /-- Single-stream transformer block.
     Processes concatenated image + text tokens with shared attention.
     Uses fused QKV + MLP projection for efficiency. -/
-structure SingleStreamBlock (hidden_size num_heads head_dim mlp_hidden : UInt64) (dtype : DType := .Float32) where
+structure SingleStreamBlock (hidden_size num_heads head_dim mlp_hidden : Nat) (dtype : DType := .Float32) where
   /-- Pre-norm (LayerNorm) -/
   pre_norm : LayerNorm (device := device) hidden_size dtype
   /-- Fused projection for Q, K, V and MLP gate/up
@@ -41,7 +41,7 @@ structure SingleStreamBlock (hidden_size num_heads head_dim mlp_hidden : UInt64)
 namespace SingleStreamBlock
 
 /-- Initialize single-stream block -/
-def init (hidden_size num_heads head_dim mlp_hidden : UInt64)
+def init (hidden_size num_heads head_dim mlp_hidden : Nat)
     (device : Device := .CPU) (dtype : DType := .Float32) : IO (SingleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads head_dim mlp_hidden) := do
   let floating ← IO.ofExcept (DType.realFloating? dtype)
   let _ := floating.down
@@ -66,16 +66,17 @@ def init (hidden_size num_heads head_dim mlp_hidden : UInt64)
     pe: RoPE embeddings
     mod: [batch, 3, hidden_size] - shift/scale/gate modulation
     Returns: [batch, seq, hidden_size] -/
-def forward {batch seq hidden_size num_heads head_dim mlp_hidden : UInt64}
+def forward {batch seq hidden_size num_heads head_dim mlp_hidden : Nat}
     (block : SingleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads head_dim mlp_hidden)
+    (heven : 2 ∣ head_dim)
     (x : Tensor { dtype := dtype, device := device, shape := #[batch, seq, hidden_size] })
     (pe : Tensor { device := device, shape := #[batch, 1, seq, head_dim / 2, 2, 2], dtype := .Float32 })  -- Shape depends on RoPE implementation
     (mod : Tensor { dtype := dtype, device := device, shape := #[batch, 3, hidden_size] })
     : Tensor { dtype := dtype, device := device, shape := #[batch, seq, hidden_size] } :=
   -- Extract shift, scale, gate from modulation
-  let mod_shift := Tensor.reshapeChecked (sliceTyped mod 1 0 1) #[batch, hidden_size]
-  let mod_scale := Tensor.reshapeChecked (sliceTyped mod 1 1 1) #[batch, hidden_size]
-  let mod_gate := Tensor.reshapeChecked (sliceTyped mod 1 2 1) #[batch, hidden_size]
+  let mod_shift := Tensor.reshape (sliceTyped mod 1 0 1) #[batch, hidden_size]
+  let mod_scale := Tensor.reshape (sliceTyped mod 1 1 1) #[batch, hidden_size]
+  let mod_gate := Tensor.reshape (sliceTyped mod 1 2 1) #[batch, hidden_size]
 
   -- Pre-norm with modulation
   let x_norm := block.pre_norm.forward3d x
@@ -90,17 +91,17 @@ def forward {batch seq hidden_size num_heads head_dim mlp_hidden : UInt64}
   let mlp := sliceTyped qkv_mlp 2 qkv_dim (mlp_hidden * 2)
 
   -- Reshape QKV
-  let qkv := Tensor.reshapeChecked qkv #[batch, seq, 3, num_heads, head_dim]
-  let q := Tensor.reshapeChecked (sliceTyped qkv 2 0 1) #[batch, seq, num_heads, head_dim]
-  let k := Tensor.reshapeChecked (sliceTyped qkv 2 1 1) #[batch, seq, num_heads, head_dim]
-  let v := Tensor.reshapeChecked (sliceTyped qkv 2 2 1) #[batch, seq, num_heads, head_dim]
+  let qkv := Tensor.reshape qkv #[batch, seq, 3, num_heads, head_dim]
+  let q := Tensor.reshape (sliceTyped qkv 2 0 1) #[batch, seq, num_heads, head_dim]
+  let k := Tensor.reshape (sliceTyped qkv 2 1 1) #[batch, seq, num_heads, head_dim]
+  let v := Tensor.reshape (sliceTyped qkv 2 2 1) #[batch, seq, num_heads, head_dim]
 
   -- QK normalization
   let (q, k) := block.norm.forward q k
 
   -- Apply RoPE
-  let q := flux.applyRope q pe
-  let k := flux.applyRope k pe
+  let q := flux.applyRope q heven pe
+  let k := flux.applyRope k heven pe
 
   -- Transpose for attention: [batch, num_heads, seq, head_dim]
   let q := transposeAttention q
@@ -112,12 +113,12 @@ def forward {batch seq hidden_size num_heads head_dim mlp_hidden : UInt64}
 
   -- Transpose back and reshape
   let attn := fromAttention attn
-  let attn := Tensor.reshapeChecked attn #[batch, seq, num_heads * head_dim]
+  let attn := Tensor.reshape attn #[batch, seq, num_heads * head_dim]
 
   -- MLP: SwiGLU
-  let mlp := Tensor.reshapeChecked mlp #[batch, seq, 2, mlp_hidden]
-  let gate := Tensor.reshapeChecked (sliceTyped mlp 2 0 1) #[batch, seq, mlp_hidden]
-  let up := Tensor.reshapeChecked (sliceTyped mlp 2 1 1) #[batch, seq, mlp_hidden]
+  let mlp := Tensor.reshape mlp #[batch, seq, 2, mlp_hidden]
+  let gate := Tensor.reshape (sliceTyped mlp 2 0 1) #[batch, seq, mlp_hidden]
+  let up := Tensor.reshape (sliceTyped mlp 2 1 1) #[batch, seq, mlp_hidden]
   let mlp_out := Tensor.mul (Tensor.silu gate) up
 
   -- Concatenate attention and MLP outputs

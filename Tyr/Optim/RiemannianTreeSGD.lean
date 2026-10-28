@@ -11,7 +11,7 @@ open Tyr.Modular
 /-- Whole-model diagnostics for one tree-structured Riemannian step. -/
 structure StepDiagnostics where
   gradientNorm : Float := 0.0
-  factorRank : UInt64 := 0
+  factorRank : Nat := 0
   innerConditionEstimate : Float := 0.0
   residualNorm : Float := 0.0
   updateNorm : Float := 0.0
@@ -24,8 +24,8 @@ structure StepResult (Params : Type) (s : Shape) where
   diagnostics : StepDiagnostics := {}
   loss : Float := 0.0
 
-private def shapeNumel (s : Shape) : UInt64 :=
-  s.foldl (fun acc d => acc * d) 1
+private abbrev shapeNumel (s : Shape) : Nat :=
+  TensorSpec.numelOfShape s
 
 private def treeDot [TensorStruct α] [FloatingTensorStruct α] (x y : α) : Float :=
   let prod := FloatingTensorStruct.zipWith Tensor.mul x y
@@ -49,59 +49,56 @@ private def weightedInvDot [TensorStruct α] [FloatingTensorStruct α] (mass : �
   treeDot (applyInvMass mass x) y
 
 /-- Tree-valued low-rank factor on parameter space. -/
-structure TreeMetricFactor (Params : Type) (rank : UInt64) where
+structure TreeMetricFactor (Params : Type) (rank : Nat) where
   rows : Array Params
-  rows_size : rows.size = rank.toNat
+  rows_size : rows.size = rank
 
 namespace TreeMetricFactor
 
-private def rowAt {Params : Type} {rank : UInt64}
-    (K : TreeMetricFactor Params rank) (i : Fin rank.toNat) : Params :=
+private def rowAt {Params : Type} {rank : Nat}
+    (K : TreeMetricFactor Params rank) (i : Fin rank) : Params :=
   K.rows[i.val]'(by simp [K.rows_size])
 
-def apply {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : UInt64}
+def apply {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : Nat}
     (K : TreeMetricFactor Params rank)
     (x : Params) : Tensor { shape := #[rank], dtype := .Float32, device := .CPU } :=
   let coeffs :=
-    ((List.finRange rank.toNat).toArray.map fun i =>
+    ((List.finRange rank).toArray.map fun i =>
       let row := K.rowAt i
       treeDot row x)
-  Tensor.reshapeChecked (Tensor.fromFloatArray coeffs) #[rank]
+  Tensor.reshape (Tensor.fromFloatArray coeffs) #[rank]
 
-def applyTranspose {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : UInt64}
+def applyTranspose {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : Nat}
     (K : TreeMetricFactor Params rank)
     (prototype : Params)
     (coeffs : Tensor { shape := #[rank], dtype := .Float32, device := .CPU }) : Params :=
   Id.run do
     let mut acc := TensorStruct.map Tensor.zerosLike prototype
-    for i in List.finRange rank.toNat do
-      let coeff1 := Tensor.sliceChecked coeffs 0 (UInt64.ofNat i.val) 1 #[1]
+    for i in List.finRange rank do
+      let coeff1 := Tensor.sliceChecked coeffs 0 i.val 1 #[1]
       let coeff := Tensor.item (Tensor.sumAll coeff1)
       let row := K.rowAt i
       acc := TensorStruct.add acc (TensorStruct.scale row coeff)
     pure acc
 
-def woodburyInner {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : UInt64}
+def woodburyInner {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : Nat}
     (mass : Params)
     (K : TreeMetricFactor Params rank) : Tensor { shape := #[rank, rank], dtype := .Float32, device := .CPU } :=
-  let entries : Array Float := Id.run do
-    let mut acc : Array Float := #[]
-    for i in List.finRange rank.toNat do
-      for j in List.finRange rank.toNat do
-        let rowI := K.rowAt i
-        let rowJ := K.rowAt j
-        let entry := weightedInvDot mass rowJ rowI
-        acc := acc.push (if i.val == j.val then entry + 1.0 else entry)
-    pure acc
-  Tensor.reshapeChecked (Tensor.fromFloatArray entries) #[rank, rank]
+  let entries : Array Float := Array.ofFn (n := rank * rank) fun k =>
+    have hRank : 0 < rank := Nat.pos_of_ne_zero (by rintro rfl; exact absurd k.isLt (by simp))
+    let i : Fin rank := ⟨k.val / rank, Nat.div_lt_of_lt_mul k.isLt⟩
+    let j : Fin rank := ⟨k.val % rank, Nat.mod_lt _ hRank⟩
+    let entry := weightedInvDot mass (K.rowAt j) (K.rowAt i)
+    if i.val == j.val then entry + 1.0 else entry
+  Tensor.fromFloatArrayShaped entries #[rank, rank] (by simp [entries])
 
-def applyRegularized {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : UInt64}
+def applyRegularized {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : Nat}
     (mass : Params)
     (K : TreeMetricFactor Params rank)
     (x : Params) : Params :=
   TensorStruct.add (applyMass mass x) (K.applyTranspose x (K.apply x))
 
-def solveWoodbury {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : UInt64}
+def solveWoodbury {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params] {rank : Nat}
     (mass : Params)
     (K : TreeMetricFactor Params rank)
     (g : Params) : Params :=
@@ -110,7 +107,7 @@ def solveWoodbury {Params : Type} [TensorStruct Params] [FloatingTensorStruct Pa
   let base := applyInvMass mass g
   let correctionArg := K.apply base
   let correctionInner : Tensor { shape := #[rank], dtype := .Float32, device := .CPU } :=
-    Tensor.reshapeChecked (Tensor.mm innerInv (Tensor.reshapeChecked correctionArg #[rank, 1])) #[rank]
+    Tensor.reshape (Tensor.mm innerInv (Tensor.reshape correctionArg #[rank, 1])) #[rank]
   let correction := applyInvMass mass (K.applyTranspose g correctionInner)
   TensorStruct.sub base correction
 
@@ -125,34 +122,34 @@ private def paramVjpFromPrepared [TensorStruct Params] [FloatingTensorStruct Par
     (retainGraph := some retainGraph)
   pure (TensorStruct.detach gradient)
 
-private def buildTreeFactorFromCotangentRows [TensorStruct Params] [FloatingTensorStruct Params] {s : Shape} {rank : UInt64}
+private def buildTreeFactorFromCotangentRows [TensorStruct Params] [FloatingTensorStruct Params] {s : Shape} {rank : Nat}
     (output : Tensor { shape := s, dtype := .Float32, device := device })
     (params : Params)
     (rows : Array (Tensor { shape := s, dtype := .Float32, device := device }))
-    (rows_size : rows.size = rank.toNat) : IO (TreeMetricFactor Params rank) := do
-  let indices : torch.Vector rank.toNat (Fin rank.toNat) :=
-    ⟨(List.finRange rank.toNat).toArray, by simp⟩
+    (rows_size : rows.size = rank) : IO (TreeMetricFactor Params rank) := do
+  let indices : torch.Vector rank (Fin rank) :=
+    ⟨(List.finRange rank).toArray, by simp⟩
   let pulled ← indices.mapM fun i =>
     let row := rows[i.val]'(by rw [rows_size]; exact i.isLt)
     -- Each row shares the forward graph; the final pullback releases it.
-    paramVjpFromPrepared output params row (i.val + 1 < rank.toNat)
+    paramVjpFromPrepared output params row (i.val + 1 < rank)
   pure { rows := pulled.data, rows_size := pulled.size_eq }
 
-private def buildTreeFactorFromOutputFactor [TensorStruct Params] [FloatingTensorStruct Params] {s : Shape} {rank : UInt64}
+private def buildTreeFactorFromOutputFactor [TensorStruct Params] [FloatingTensorStruct Params] {s : Shape} {rank : Nat}
     (output : Tensor { shape := s, dtype := .Float32, device := device })
     (params : Params)
     (outputFactor : MetricFactor rank (shapeNumel s) .Float32 device) : IO (TreeMetricFactor Params rank) := do
   let rows :=
-    ((List.range rank.toNat).toArray.map fun i =>
+    ((List.range rank).toArray.map fun i =>
       let rowFlat : Tensor { shape := #[shapeNumel s], dtype := .Float32, device := device } :=
-        Tensor.reshapeChecked (Tensor.sliceChecked outputFactor.matrix 0 (UInt64.ofNat i) 1 #[1, shapeNumel s])
+        Tensor.reshape (Tensor.sliceChecked outputFactor.matrix 0 i 1 #[1, shapeNumel s])
           #[shapeNumel s]
-      Tensor.reshapeChecked rowFlat s)
+      Tensor.reshape rowFlat s (by simp))
   buildTreeFactorFromCotangentRows output params rows (by simp [rows])
 
 private def finalizePreparedStepWithTreeFactor
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {s : Shape} {rank : UInt64}
+    {s : Shape} {rank : Nat}
     (params : Params)
     (predictionReq : Tensor { shape := s, dtype := .Float32, device := device })
     (mass : Params)
@@ -179,7 +176,7 @@ private def finalizePreparedStepWithTreeFactor
 
 private def stepPreparedWithFactorAndMass
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {s : Shape} {rank : UInt64}
+    {s : Shape} {rank : Nat}
     (params : Params)
     (paramsReq : Params)
     (predictionReq : Tensor { shape := s, dtype := .Float32, device := device })
@@ -195,7 +192,7 @@ private def stepPreparedWithFactorAndMass
 /-- Whole-model tree step with explicit output cotangent and output-space factor. -/
 def stepWithFactorAndMass
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {s : Shape} {rank : UInt64}
+    {s : Shape} {rank : Nat}
     (params : Params)
     (forward : Params → IO (Tensor { shape := s, dtype := .Float32, device := device }))
     (mass : Params)
@@ -211,7 +208,7 @@ def stepWithFactorAndMass
 /-- Whole-model tree step with unit diagonal mass. -/
 def stepWithFactor
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {s : Shape} {rank : UInt64}
+    {s : Shape} {rank : Nat}
     (params : Params)
     (forward : Params → IO (Tensor { shape := s, dtype := .Float32, device := device }))
     (outputFactor : MetricFactor rank (shapeNumel s) .Float32 device)
@@ -223,7 +220,7 @@ def stepWithFactor
 
 private def prepareCrossEntropyStep
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {batch seq vocab : UInt64}
+    {batch seq vocab : Nat}
     (params : Params)
     (forward : Params → IO (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }))
     (targets : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
@@ -232,23 +229,23 @@ private def prepareCrossEntropyStep
   let paramsReq ← TensorStruct.makeLeafParams params
   let predictionReq ← forward paramsReq
   let logitsFlat : Tensor { shape := #[batch * seq, vocab], dtype := .Float32, device := device } :=
-    Tensor.reshapeChecked predictionReq #[batch * seq, vocab]
+    Tensor.reshape predictionReq #[batch * seq, vocab]
   let targetsFlat : Tensor { shape := #[batch * seq], dtype := .Int64, device := device } :=
-    Tensor.reshapeChecked targets #[batch * seq]
+    Tensor.reshape targets #[batch * seq]
   let lossT ← IO.ofExcept (Tensor.crossEntropy? logitsFlat targetsFlat)
   let outputCotangent ← Tensor.grad lossT predictionReq (Tensor.onesLike lossT)
   pure (paramsReq, predictionReq, lossT, Tensor.detach outputCotangent)
 
 private def sampledFisherCotangentRows
-    {batch seq vocab : UInt64}
+    {batch seq vocab : Nat}
     (predictionReq : Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device })
-    (probeCount : UInt64)
-    : IO { rows : Array (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }) // rows.size = probeCount.toNat } := do
+    (probeCount : Nat)
+    : IO { rows : Array (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }) // rows.size = probeCount } := do
   if probeCount == 0 then
     throw <| IO.userError "RiemannianTreeSGD.stepCrossEntropySampledFisher requires probeCount > 0"
   let tokenCount := batch * seq
   let probs3d := Tensor.detach (Tensor.softmax predictionReq (-1) rfl)
-  let probs : Tensor { shape := #[tokenCount, vocab], dtype := .Float32, device := device } := Tensor.reshapeChecked probs3d #[tokenCount, vocab]
+  let probs : Tensor { shape := #[tokenCount, vocab], dtype := .Float32, device := device } := Tensor.reshape probs3d #[tokenCount, vocab]
   let scale := 1.0 / Float.sqrt probeCount.toFloat
   let srcOnes0 : Tensor { shape := #[tokenCount, 1], dtype := .Float32, device := device } := Tensor.ones #[tokenCount, 1] false device
   let srcOnes := srcOnes0
@@ -260,29 +257,29 @@ private def sampledFisherCotangentRows
       let base : Tensor { shape := #[tokenCount, vocab], dtype := .Float32, device := device } := Tensor.zerosLike probs
       let sampledOneHot := Tensor.scatter2d base 1 sampledIdx srcOnes
       let rowFlat := Tensor.mulScalar (Tensor.sub sampledOneHot probs) scale
-      let row : Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device } := Tensor.reshapeChecked rowFlat #[batch, seq, vocab]
+      let row : Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device } := Tensor.reshape rowFlat #[batch, seq, vocab]
       let ⟨rest, hRest⟩ ← sampleRows n
       pure ⟨row :: rest, by simp [hRest]⟩
-  let ⟨rowsList, hRowsList⟩ ← sampleRows probeCount.toNat
+  let ⟨rowsList, hRowsList⟩ ← sampleRows probeCount
   let rows := rowsList.toArray
-  have hRows : rows.size = probeCount.toNat := by
+  have hRows : rows.size = probeCount := by
     simp [rows, hRowsList]
   pure ⟨rows, hRows⟩
 
 private def sampledFisherTreeFactor
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {batch seq vocab : UInt64} {rank : UInt64}
+    {batch seq vocab : Nat} {rank : Nat}
     (predictionReq : Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device })
     (paramsReq : Params)
     (rows : Array (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }))
-    (rows_size : rows.size = rank.toNat)
+    (rows_size : rows.size = rank)
     : IO (TreeMetricFactor Params rank) :=
   buildTreeFactorFromCotangentRows predictionReq paramsReq rows rows_size
 
 /-- Cross-entropy step for tensor-logit models with unit diagonal mass. -/
 def stepCrossEntropy
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {batch seq vocab : UInt64}
+    {batch seq vocab : Nat}
     (params : Params)
     (forward : Params → IO (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }))
     (targets : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
@@ -326,11 +323,11 @@ def stepCrossEntropy
     The loss gradient remains exact; only the output metric factor is sketched. -/
 def stepCrossEntropySampledFisher
     {Params : Type} [TensorStruct Params] [FloatingTensorStruct Params]
-    {batch seq vocab : UInt64}
+    {batch seq vocab : Nat}
     (params : Params)
     (forward : Params → IO (Tensor { shape := #[batch, seq, vocab], dtype := .Float32, device := device }))
     (targets : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
-    (probeCount : UInt64)
+    (probeCount : Nat)
     (lr : Float)
     (gradClip : Float := 0.0)
     : IO (StepResult (device := device) Params #[batch, seq, vocab]) := do

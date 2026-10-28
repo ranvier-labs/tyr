@@ -52,7 +52,12 @@ private def getFloat? (j : Json) : Option Float :=
   | some x => some x
   | none => (getNat? j).map (·.toFloat)
 
-private def getNatFieldD (j : Json) (key : String) (d : UInt64) : UInt64 :=
+private def getNatFieldD (j : Json) (key : String) (d : Nat) : Nat :=
+  match getObjVal? j key >>= getNat? with
+  | some n => n
+  | none => d
+
+private def getTokenIdFieldD (j : Json) (key : String) (d : UInt64) : UInt64 :=
   match getObjVal? j key >>= getNat? with
   | some n => n.toUInt64
   | none => d
@@ -72,14 +77,14 @@ private def getStrFieldD (j : Json) (key : String) (d : String) : String :=
   | some x => x
   | none => d
 
-private def getUInt64ArrayFieldD (j : Json) (key : String) (d : Array UInt64) : Array UInt64 :=
+private def getUInt64ArrayFieldD (j : Json) (key : String) (d : Array Nat) : Array Nat :=
   match getObjVal? j key >>= getArr? with
   | some arr =>
     Id.run do
-      let mut out : Array UInt64 := #[]
+      let mut out : Array Nat := #[]
       for item in arr do
         match getNat? item with
-        | some n => out := out.push n.toUInt64
+        | some n => out := out.push n
         | none => pure ()
       if out.isEmpty then d else out
   | none => d
@@ -171,30 +176,48 @@ private def parseTalkerConfig (j : Json) (d : TalkerConfig := {}) : TalkerConfig
     numCodeGroups := getNatFieldD j "num_code_groups" d.numCodeGroups
     textHiddenSize := getNatFieldD j "text_hidden_size" d.textHiddenSize
     textVocabSize := getNatFieldD j "text_vocab_size" d.textVocabSize
-    codecEosTokenId := getNatFieldD j "codec_eos_token_id" d.codecEosTokenId
-    codecThinkId := getNatFieldD j "codec_think_id" d.codecThinkId
-    codecNoThinkId := getNatFieldD j "codec_nothink_id" d.codecNoThinkId
-    codecThinkBosId := getNatFieldD j "codec_think_bos_id" d.codecThinkBosId
-    codecThinkEosId := getNatFieldD j "codec_think_eos_id" d.codecThinkEosId
-    codecPadId := getNatFieldD j "codec_pad_id" d.codecPadId
-    codecBosId := getNatFieldD j "codec_bos_id" d.codecBosId
+    codecEosTokenId := getTokenIdFieldD j "codec_eos_token_id" d.codecEosTokenId
+    codecThinkId := getTokenIdFieldD j "codec_think_id" d.codecThinkId
+    codecNoThinkId := getTokenIdFieldD j "codec_nothink_id" d.codecNoThinkId
+    codecThinkBosId := getTokenIdFieldD j "codec_think_bos_id" d.codecThinkBosId
+    codecThinkEosId := getTokenIdFieldD j "codec_think_eos_id" d.codecThinkEosId
+    codecPadId := getTokenIdFieldD j "codec_pad_id" d.codecPadId
+    codecBosId := getTokenIdFieldD j "codec_bos_id" d.codecBosId
     spkId
     spkIsDialect
     codecLanguageId
   }
 
 private def parseSpeakerEncoderConfig (j : Json) (d : SpeakerEncoderConfig := {})
-    : SpeakerEncoderConfig := {
+    : Except String SpeakerEncoderConfig :=
+  let encChannels := getUInt64ArrayFieldD j "enc_channels" d.encChannels
+  let encKernelSizes := getUInt64ArrayFieldD j "enc_kernel_sizes" d.encKernelSizes
+  let encDilations := getUInt64ArrayFieldD j "enc_dilations" d.encDilations
+  if samePaddingEven :
+      2 ∣ encDilations.getD 0 1 * (encKernelSizes.getD 0 5 - 1) ∧
+      2 ∣ encDilations.getD 1 2 * (encKernelSizes.getD 1 3 - 1) ∧
+      2 ∣ encDilations.getD 2 3 * (encKernelSizes.getD 2 3 - 1) ∧
+      2 ∣ encDilations.getD 3 4 * (encKernelSizes.getD 3 3 - 1) ∧
+      2 ∣ encDilations.getD 4 1 * (encKernelSizes.getD 4 1 - 1) then
+  if residualChannels :
+      encChannels.getD 0 512 = encChannels.getD 1 512 ∧
+      encChannels.getD 1 512 = encChannels.getD 2 512 ∧
+      encChannels.getD 2 512 = encChannels.getD 3 512 then .ok {
   melDim := getNatFieldD j "mel_dim" d.melDim
   encDim := getNatFieldD j "enc_dim" d.encDim
-  encChannels := getUInt64ArrayFieldD j "enc_channels" d.encChannels
-  encKernelSizes := getUInt64ArrayFieldD j "enc_kernel_sizes" d.encKernelSizes
-  encDilations := getUInt64ArrayFieldD j "enc_dilations" d.encDilations
+  encChannels
+  encKernelSizes
+  encDilations
   encAttentionChannels := getNatFieldD j "enc_attention_channels" d.encAttentionChannels
   encRes2NetScale := getNatFieldD j "enc_res2net_scale" d.encRes2NetScale
   encSeChannels := getNatFieldD j "enc_se_channels" d.encSeChannels
   sampleRate := getNatFieldD j "sample_rate" d.sampleRate
+  samePaddingEven
+  residualChannels
 }
+  else .error s!"Invalid speaker encoder config: enc_channels {encChannels} must be equal across the SE-Res2Net blocks"
+  else .error
+    s!"Invalid speaker encoder config: dilation * (kernel - 1) must be even for every TDNN block, got kernels {encKernelSizes} and dilations {encDilations}"
 
 namespace Qwen3TTSConfig
 
@@ -205,21 +228,21 @@ def loadFromFile (path : String) (defaults : Qwen3TTSConfig := {}) : IO Qwen3TTS
     match getObjVal? root "talker_config" with
     | some j => parseTalkerConfig j defaults.talkerConfig
     | none => defaults.talkerConfig
-  let speakerEncoderConfig :=
+  let speakerEncoderConfig ←
     match getObjVal? root "speaker_encoder_config" with
-    | some j => parseSpeakerEncoderConfig j defaults.speakerEncoderConfig
-    | none => defaults.speakerEncoderConfig
+    | some j => IO.ofExcept (parseSpeakerEncoderConfig j defaults.speakerEncoderConfig)
+    | none => pure defaults.speakerEncoderConfig
   pure {
     talkerConfig
     speakerEncoderConfig
     tokenizerType := getStrFieldD root "tokenizer_type" defaults.tokenizerType
     ttsModelSize := getStrFieldD root "tts_model_size" defaults.ttsModelSize
     ttsModelType := getStrFieldD root "tts_model_type" defaults.ttsModelType
-    imStartTokenId := getNatFieldD root "im_start_token_id" defaults.imStartTokenId
-    imEndTokenId := getNatFieldD root "im_end_token_id" defaults.imEndTokenId
-    ttsPadTokenId := getNatFieldD root "tts_pad_token_id" defaults.ttsPadTokenId
-    ttsBosTokenId := getNatFieldD root "tts_bos_token_id" defaults.ttsBosTokenId
-    ttsEosTokenId := getNatFieldD root "tts_eos_token_id" defaults.ttsEosTokenId
+    imStartTokenId := getTokenIdFieldD root "im_start_token_id" defaults.imStartTokenId
+    imEndTokenId := getTokenIdFieldD root "im_end_token_id" defaults.imEndTokenId
+    ttsPadTokenId := getTokenIdFieldD root "tts_pad_token_id" defaults.ttsPadTokenId
+    ttsBosTokenId := getTokenIdFieldD root "tts_bos_token_id" defaults.ttsBosTokenId
+    ttsEosTokenId := getTokenIdFieldD root "tts_eos_token_id" defaults.ttsEosTokenId
   }
 
 /-- Load Qwen3-TTS config from a model directory containing `config.json`. -/

@@ -52,7 +52,7 @@ private def toDecodeOptions (args : Args) : WhisperDecodeOptions := {
   bestOf := args.bestOf
   temperature := args.temperature
   temperatureInc := args.temperatureInc
-  topK := args.topK
+  topK := args.topK.toNat
   topP := args.topP
   logprobThreshold := args.logprobThreshold
   noSpeechThreshold := args.noSpeechThreshold
@@ -147,6 +147,7 @@ def runMain (argv : List String) : IO UInt32 := do
       bundle.model
       bundle.tok
       bundle.preprocessor
+      bundle.melBinsMatch
       args.wavPath
       args.language
       args.maxNewTokens

@@ -17,11 +17,11 @@ deriving Repr, BEq, DecidableEq
 namespace TensorSpec
 
 /-- Reorder dimensions for a permutation. -/
-def permuteShape (s : Shape) (permutation : Array UInt64) : Shape :=
-  permutation.map fun p => s.getD p.toNat 0
+@[simp] def permuteShape (s : Shape) (permutation : Array Nat) : Shape :=
+  permutation.map fun p => s.getD p 0
 
 /-- Shape after concatenation along `dim`; libtorch checks compatibility. -/
-def catShape (s1 s2 : Shape) (dim : Nat) : Shape :=
+@[simp] def catShape (s1 s2 : Shape) (dim : Nat) : Shape :=
   if s1.size == s2.size then s1.set! dim (s1.getD dim 0 + s2.getD dim 0)
   else if s1 == #[0] then s2
   else if s2 == #[0] then s1
@@ -33,8 +33,8 @@ def scalar (dtype : DType) : TensorSpec :=
 def rank (spec : TensorSpec) : Nat :=
   spec.shape.size
 
-def numelOfShape (shape : Shape) : Nat :=
-  shape.foldl (fun acc dim => acc * dim.toNat) 1
+@[simp] def numelOfShape (shape : Shape) : Nat :=
+  shape.foldl (fun acc dim => acc * dim) 1
 
 def numel (spec : TensorSpec) : Nat :=
   numelOfShape spec.shape
@@ -45,7 +45,7 @@ def withShape (spec : TensorSpec) (shape : Shape) : TensorSpec :=
 def withDType (spec : TensorSpec) (dtype : DType) : TensorSpec :=
   { spec with dtype }
 
-private def dimFromRight (shape : Shape) (offset : Nat) : UInt64 :=
+private def dimFromRight (shape : Shape) (offset : Nat) : Nat :=
   if offset < shape.size then
     shape.getD (shape.size - 1 - offset) 1
   else
@@ -56,7 +56,7 @@ def broadcastShapes? (lhs rhs : Shape) : Option Shape :=
   else if rhs.isEmpty then some lhs
   else
     let maxLen := Nat.max lhs.size rhs.size
-    let rec go : List Nat → List UInt64 → Option Shape
+    let rec go : List Nat → List Nat → Option Shape
       | [], revOut => some revOut.toArray
       | offset :: rest, revOut =>
           let ldim := dimFromRight lhs offset
@@ -122,7 +122,7 @@ def division? (lhs rhs : TensorSpec) : Option TensorSpec := do
   let dtype ← pointwiseDType? lhs rhs
   pure { shape, dtype := DType.divideResult dtype }
 
-def matmulShape? (lhs rhs : Shape) : Option Shape :=
+@[simp] def matmulShape? (lhs rhs : Shape) : Option Shape :=
   match lhs.size, rhs.size with
   | 0, _ => none
   | _, 0 => none
@@ -136,19 +136,19 @@ def matmulShape? (lhs rhs : Shape) : Option Shape :=
       if lhs.getD 1 0 == rhs.getD 0 0 then some #[lhs.getD 0 0, rhs.getD 1 0] else none
   | 1, n₂ =>
       if lhs.getD 0 0 == rhs.getD (n₂ - 2) 0 then
-        some <| rhs[:n₂ - 2].toArray ++ #[rhs.getD (n₂ - 1) 0]
+        some <| rhs.extract 0 (n₂ - 2) ++ #[rhs.getD (n₂ - 1) 0]
       else
         none
   | n₁, 1 =>
       if lhs.getD (n₁ - 1) 0 == rhs.getD 0 0 then
-        some <| lhs[:n₁ - 2].toArray ++ #[lhs.getD (n₁ - 2) 0]
+        some <| lhs.extract 0 (n₁ - 2) ++ #[lhs.getD (n₁ - 2) 0]
       else
         none
   | n₁, n₂ =>
       if lhs.getD (n₁ - 1) 0 != rhs.getD (n₂ - 2) 0 then
         none
       else
-        match broadcastShapes? (lhs[:n₁ - 2].toArray) (rhs[:n₂ - 2].toArray) with
+        match broadcastShapes? (lhs.extract 0 (n₁ - 2)) (rhs.extract 0 (n₂ - 2)) with
         | some batch => some <| batch ++ #[lhs.getD (n₁ - 2) 0, rhs.getD (n₂ - 1) 0]
         | none => none
 

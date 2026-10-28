@@ -20,12 +20,12 @@ structure Args where
   streamHopSec : Float := 0.5
   streamDecodeMode : StreamingDecodeMode := .rollingWindow
   maxInferenceBatchSize : Int := -1
-  maxNewTokens : UInt64 := 1024
+  maxNewTokens : Nat := 1024
   deriving Inhabited
 
-private def parseNatArg (name : String) (v : String) : IO UInt64 := do
+private def parseNatArg (name : String) (v : String) : IO Nat := do
   match v.toNat? with
-  | some n => pure n.toUInt64
+  | some n => pure n
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
 private def parseIntArg (name : String) (v : String) : IO Int := do
@@ -131,9 +131,10 @@ private def transcribeWavStreamed
     (model : Qwen3ASRForConditionalGeneration (device := device) (dtype := dtype.val) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
+    (hMel : pre.featureSize = cfg.thinkerConfig.audioConfig.numMelBins)
     (wavPath : String)
     (language : Option String)
-    (maxNewTokens : UInt64)
+    (maxNewTokens : Nat)
     (chunkSec : Float)
     (hopSec : Float)
     (decodeMode : StreamingDecodeMode)
@@ -143,7 +144,7 @@ private def transcribeWavStreamed
   let wav16k ← normalizeAudioTo16kFromWav wavPath
   let maxSamples := PreprocessorConfig.expectedSampleCount pre
   let effectiveDecodeMode ←
-    if decodeMode == .fullAccumulation && wav16k.size.toUInt64 > maxSamples then do
+    if decodeMode == .fullAccumulation && wav16k.size > maxSamples then do
       let maxSec := maxSamples.toFloat / 16000.0
       IO.eprintln
         s!"stream-decode-mode=full exceeds model maxSeconds={maxSec} for this file; switching to rolling mode."
@@ -157,6 +158,7 @@ private def transcribeWavStreamed
     model := model
     tok := tok
     preprocessor := pre
+    melBinsMatch := hMel
     modelDir := modelDir
   }
   let mut ss ← newSession sm
@@ -218,6 +220,8 @@ def runMain (argv : List String) : IO UInt32 := do
   let cfg ← Qwen3ASRConfig.loadFromPretrainedDir modelDir
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let pre ← PreprocessorConfig.loadFromPretrainedDir modelDir
+  let ⟨hMel⟩ ← if h : pre.featureSize = cfg.thinkerConfig.audioConfig.numMelBins then pure (PLift.up h) else
+    throw (IO.userError s!"preprocessor feature_size {pre.featureSize} does not match num_mel_bins {cfg.thinkerConfig.audioConfig.numMelBins}")
   let ⟨_device, dtype, model⟩ ← Qwen3ASRForConditionalGeneration.loadSharded modelDir cfg
   IO.println s!"Qwen3-ASR target device: {repr model.thinker.lmHead.device}"
   let forcedAligner ←
@@ -234,6 +238,7 @@ def runMain (argv : List String) : IO UInt32 := do
         model
         tok
         pre
+        hMel
         args.wavPath
         args.language
         args.maxNewTokens
@@ -247,6 +252,7 @@ def runMain (argv : List String) : IO UInt32 := do
       let outs ← model.transcribeWavs
         tok
         pre
+        hMel
         #[args.wavPath]
         (forcedAligner := forcedAligner)
         (contexts := #[""])

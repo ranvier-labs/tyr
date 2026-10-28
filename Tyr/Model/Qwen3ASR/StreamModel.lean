@@ -20,6 +20,8 @@ structure StreamModel where
   model : Qwen3ASRForConditionalGeneration (device := device) (dtype := dtype.val) cfg
   tok : tokenizer.qwen3.QwenTokenizer
   preprocessor : PreprocessorConfig
+  /-- The preprocessor produces as many mel bins as the audio encoder consumes; checked on load. -/
+  melBinsMatch : preprocessor.featureSize = cfg.thinkerConfig.audioConfig.numMelBins
   modelDir : String
 
 /-- Streaming session mutable state.
@@ -36,8 +38,8 @@ structure StreamSession (cfg : Qwen3ASRConfig) (dtype : DType := .Float32) where
   sileroVAD : Option Tyr.Text.SileroProvider := none
   decodeCache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none
   promptCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none
-  encoderCachedFrames : UInt64 := 0
-  decoderCachedTokens : UInt64 := 0
+  encoderCachedFrames : Nat := 0
+  decoderCachedTokens : Nat := 0
 
 structure StreamStepOutput where
   didDecode : Bool := false
@@ -63,8 +65,11 @@ def loadFromPretrained
   let cfg ← Qwen3ASRConfig.loadFromPretrainedDir modelDir
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let preprocessor ← PreprocessorConfig.loadFromPretrainedDir modelDir
+  let ⟨melBinsMatch⟩ ← if h : preprocessor.featureSize = cfg.thinkerConfig.audioConfig.numMelBins then
+      pure (PLift.up h)
+    else throw (IO.userError s!"Qwen3-ASR preprocessor feature_size {preprocessor.featureSize} does not match num_mel_bins {cfg.thinkerConfig.audioConfig.numMelBins}")
   let ⟨device, dtype, model⟩ ← Qwen3ASRForConditionalGeneration.loadSharded modelDir cfg
-  pure { cfg, device, dtype, model, tok, preprocessor, modelDir }
+  pure { cfg, device, dtype, model, tok, preprocessor, melBinsMatch, modelDir }
 
 def newSession
     (m : StreamModel)
@@ -123,7 +128,7 @@ def pushAudio
     (m : StreamModel)
     (s : StreamSession (device := m.device) (dtype := m.dtype.val) m.cfg)
     (pcm16k : Array Float)
-    (maxNewTokens : UInt64 := 128)
+    (maxNewTokens : Nat := 128)
     : IO ((StreamSession (device := m.device) (dtype := m.dtype.val) m.cfg) × StreamStepOutput) := do
   let mut s' := s
   let vadSignal : Tyr.Text.VADSignal ←
@@ -139,7 +144,7 @@ def pushAudio
   let (asrNext, decodeCacheNext) ← streamingTranscribeWithModelStateCached
     m.model
     m.tok
-    m.preprocessor
+    m.preprocessor m.melBinsMatch
     pcm16k
     s'.asrState
     (cache := s'.decodeCache)
@@ -157,8 +162,8 @@ def pushAudio
     let s'' := {
       s' with
       textConsensus := cs'
-      encoderCachedFrames := s'.encoderCachedFrames + decodedSamples.toUInt64
-      decoderCachedTokens := ids.size.toUInt64
+      encoderCachedFrames := s'.encoderCachedFrames + decodedSamples
+      decoderCachedTokens := ids.size
     }
     pure (s'', {
       didDecode := true
@@ -171,13 +176,13 @@ def pushAudio
 def flush
     (m : StreamModel)
     (s : StreamSession (device := m.device) (dtype := m.dtype.val) m.cfg)
-    (maxNewTokens : UInt64 := 128)
+    (maxNewTokens : Nat := 128)
     : IO ((StreamSession (device := m.device) (dtype := m.dtype.val) m.cfg) × StreamStepOutput) := do
   let beforeChunkId := s.asrState.chunkId
   let (asrNext, decodeCacheNext) ← finishStreamingTranscribeWithModelStateCached
     m.model
     m.tok
-    m.preprocessor
+    m.preprocessor m.melBinsMatch
     s.asrState
     (cache := s.decodeCache)
     (maxNewTokens := maxNewTokens)
@@ -192,7 +197,7 @@ def flush
     let s' := {
       s1 with
       textConsensus := cs'
-      decoderCachedTokens := ids.size.toUInt64
+      decoderCachedTokens := ids.size
     }
     pure (s', {
       didDecode := true

@@ -13,9 +13,9 @@ open torch
 variable {device : Device}
 open Tyr.GPU.Kernels
 
-private def launchBlockX : UInt64 := 32
-private def seqLen : UInt64 := 64
-private def hiddenDim : UInt64 := 1024
+private def launchBlockX : Nat := 32
+private def seqLen : Nat := 64
+private def hiddenDim : Nat := 1024
 private def rmsNormEps : Float := 1.0e-6
 
 def suiteName : String := "rmsnorm"
@@ -210,7 +210,7 @@ private def benchmarkBFloat16 (cfg : Benchmark.Config) (stream : UInt64)
 
 private inductive RMSNormBenchPayload where
   | micro
-  | training (rows : UInt64)
+  | training (rows : Nat)
   deriving Repr
 
 private def rmsNormMatrix : LeanBenchmark.Matrix RMSNormBenchPayload := {
@@ -234,7 +234,7 @@ private def rmsNormMatrix : LeanBenchmark.Matrix RMSNormBenchPayload := {
 }
 
 /-- BF16 residual/output/input-gradient reference with Float32 saved inverse RMS and weight gradient. -/
-def referenceTraining {rows : UInt64}
+def referenceTraining {rows : Nat}
     (x residual : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device })
     (weight : Tensor { shape := #[hiddenDim], dtype := .BFloat16, device := device })
     (gradOut gradOutResid : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device }) := Id.run do
@@ -245,9 +245,9 @@ def referenceTraining {rows : UInt64}
   let gradOutResidF : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := gradOutResid.toFloat32
   let inv2d : Tensor { shape := #[rows, 1], dtype := .Float32, device := device } :=
     Tensor.rsqrt (Tensor.meanDim (residF * residF) 1 true + rmsNormEps)
-  let expectedInv : Tensor { shape := #[rows], dtype := .Float32, device := device } := Tensor.reshapeChecked inv2d #[rows]
+  let expectedInv : Tensor { shape := #[rows], dtype := .Float32, device := device } := Tensor.reshape inv2d #[rows]
   let invFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := Tensor.expand inv2d #[rows, hiddenDim]
-  let weight2d : Tensor { shape := #[1, hiddenDim], dtype := .Float32, device := device } := Tensor.reshapeChecked weightF #[1, hiddenDim]
+  let weight2d : Tensor { shape := #[1, hiddenDim], dtype := .Float32, device := device } := Tensor.reshape weightF #[1, hiddenDim]
   let weightFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } :=
     Tensor.expand weight2d #[rows, hiddenDim]
   let normalized : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := residF * invFull
@@ -263,12 +263,12 @@ def referenceTraining {rows : UInt64}
   let expectedGradInput : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device } :=
     (weightedGrad * invFull - residF * correctionFull + gradOutResidF).toBFloat16
   let expectedGradWeight : Tensor { shape := #[hiddenDim], dtype := .Float32, device := device } :=
-    (Tensor.sumDim (gradOutF * normalized) 0 false).reshapeChecked #[hiddenDim]
+    (Tensor.sumDim (gradOutF * normalized) 0 false).reshape #[hiddenDim]
 
   return (expectedOut, expectedResid, expectedInv, expectedGradInput, expectedGradWeight)
 
 private def benchmarkTrainingShape (cfg : Benchmark.Config) (stream : UInt64)
-    (caseLabel : String) (rows : UInt64) : IO (Array String × Bool) := do
+    (caseLabel : String) (rows : Nat) : IO (Array String × Bool) := do
   let device ← Device.cuda 0
   let x : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device } :=
     (← Tensor.randn #[rows, hiddenDim] false device).toBFloat16
@@ -290,17 +290,18 @@ private def benchmarkTrainingShape (cfg : Benchmark.Config) (stream : UInt64)
   let gradInput ← Tensor.uniformLike x 0 0
   let gradWeight ← Tensor.uniformLike (Tensor.zeros #[hiddenDim] false device) 0 0
 
+  let rowsArg ← Tyr.GPU.Codegen.launchArg rows "rows"
   let launchForward : IO Unit :=
     fusedRMSNormResidualRows1024Bf16TrainFwd.launch
-      x.raw residual.raw weight.raw out.raw outResid.raw invRms.raw rows
+      x.raw residual.raw weight.raw out.raw outResid.raw invRms.raw rowsArg
       rows 1 1 256 1 1 0 stream
   let launchBwdInput : IO Unit :=
     fusedRMSNormResidualRows1024Bf16BwdInput.launch
-      gradOut.raw gradOutResid.raw outResid.raw weight.raw invRms.raw gradInput.raw rows
+      gradOut.raw gradOutResid.raw outResid.raw weight.raw invRms.raw gradInput.raw rowsArg
       rows 1 1 256 1 1 0 stream
   let launchBwdWeight : IO Unit :=
     fusedRMSNormResidualRows1024Bf16BwdWeight.launch
-      gradOut.raw outResid.raw invRms.raw gradWeight.raw rows
+      gradOut.raw outResid.raw invRms.raw gradWeight.raw rowsArg
       4 1 1 256 1 1 0 stream
   let launchTraining : IO Unit := do
     launchForward

@@ -63,11 +63,11 @@ def testQwen3TTSInitAndCapabilities : IO Unit := do
 
 @[test]
 def testQwen3TTSRMSNormModelDType : IO Unit := do
-  let input : Tensor { shape := #[2, 3, 4], dtype := .Float32, device := .CPU } := Tensor.reshapeChecked (Tensor.fromFloatArray
+  let input : Tensor { shape := #[2, 3, 4], dtype := .Float32, device := .CPU } := Tensor.reshape (Tensor.fromFloatArray
     #[0.17, -0.41, 0.83, 1.27, 0.9, 0.5, -0.7, 1.1,
       -0.6, 1.3, 0.2, -0.9, 1.2, 0.4, -0.8, 0.6,
       0.3, -1.1, 0.7, 0.2, -0.5, 0.8, 1.4, -0.2]) #[2, 3, 4]
-  let weight : Tensor { shape := #[4], dtype := .Float32, device := .CPU } := Tensor.reshapeChecked (Tensor.fromFloatArray #[0.73, 1.19, -0.67, 1.53]) #[4]
+  let weight : Tensor { shape := #[4], dtype := .Float32, device := .CPU } := Tensor.reshape (Tensor.fromFloatArray #[0.73, 1.19, -0.67, 1.53]) #[4]
   for bf16 in #[false, true] do
     let selected : RealFloatingDType :=
       if bf16 then ⟨.BFloat16, by decide⟩ else ⟨.Float32, by decide⟩
@@ -84,12 +84,12 @@ def testQwen3TTSRMSNormModelDType : IO Unit := do
     LeanTest.assertEqual actual.actualSpec.dtype x.actualSpec.dtype "RMSNorm preserves matching FP32/BF16 model dtype"
     LeanTest.assertEqual (Tensor.item (Tensor.maxAllChecked (Tensor.abs (Tensor.sub actual.toFloat32 expected.toFloat32)))) 0.0
       "RMSNorm restores activation dtype before applying non-unit weights"
-    for output in #[(norm.forward2d (Tensor.reshapeChecked x #[6, 4])).reshapeChecked #[2, 3, 4],
-        (norm.forward4d (Tensor.reshapeChecked x #[1, 2, 3, 4])).reshapeChecked #[2, 3, 4],
-        (norm.forward5d (Tensor.reshapeChecked x #[1, 2, 3, 4])).reshapeChecked #[2, 3, 4]] do
+    for output in #[(norm.forward2d (Tensor.reshape x #[6, 4])).reshape #[2, 3, 4],
+        (norm.forward4d (Tensor.reshape x #[1, 2, 3, 4])).reshape #[2, 3, 4],
+        (norm.forward5d (Tensor.reshape x #[1, 2, 3, 4])).reshape #[2, 3, 4]] do
       LeanTest.assertEqual output.actualSpec.dtype x.actualSpec.dtype "All RMSNorm module layouts preserve model dtype"
       LeanTest.assertEqual (Tensor.item (Tensor.maxAllChecked (Tensor.abs
-        (Tensor.sub (Tensor.reshapeChecked output #[2, 3, 4]).toFloat32 expected.toFloat32)))) 0.0
+        (Tensor.sub (Tensor.reshape output #[2, 3, 4]).toFloat32 expected.toFloat32)))) 0.0
         "RMSNorm layout wrappers agree"
     LeanTest.assertEqual (if bf16 then (Tensor.rmsNormWeighted x.toBFloat16 w.toBFloat16 0.01).actualSpec.dtype
       else (Tensor.rmsNormWeighted x.toFloat32 w.toFloat32 0.01).actualSpec.dtype) DType.Float32
@@ -98,7 +98,7 @@ def testQwen3TTSRMSNormModelDType : IO Unit := do
 @[test]
 def testQwen3TTSBFloat16IncrementalCache : IO Unit := do
   torch.manualSeed 7341
-  let inputs : Tensor { shape := #[1, 5, 8], dtype := .Float32, device := .CPU } := Tensor.reshapeChecked
+  let inputs : Tensor { shape := #[1, 5, 8], dtype := .Float32, device := .CPU } := Tensor.reshape
     (Tensor.mulScalar (Tensor.sin (Tensor.toFloat32 (Tensor.arange 40))) 0.5) #[1, 5, 8]
   let (cos, sin) := Tensor.rotaryFreqs 5 4 10000
   for bf16 in #[false, true] do
@@ -120,29 +120,29 @@ def testQwen3TTSBFloat16IncrementalCache : IO Unit := do
     -- Three prompt tokens followed by two decode tokens exercise the Talker cache path.
     let mut outputs : Array (Sigma (fun shape => Tensor { shape := shape, dtype, device := .CPU })) := #[]
     for pos in [:3] do
-      let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos.toUInt64 1 #[1, 1, 8])
-        (Tensor.sliceChecked cos 0 pos.toUInt64 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos.toUInt64 1 #[1, 2]) cache
+      let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos 1 #[1, 1, 8])
+        (Tensor.sliceChecked cos 0 pos 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos 1 #[1, 2]) cache
       LeanTest.assertEqual out.actualSpec.dtype x.actualSpec.dtype "Prefill step retains model dtype"
       cache := next
       outputs := outputs.push out.packShape
     let prefixCache := cache
-    let prefixK ← Tensor.toFloatArray prefixCache.kStoreDyn.2
-    let prefixV ← Tensor.toFloatArray prefixCache.vStoreDyn.2
+    let prefixK ← Tensor.toFloatArray prefixCache.kStore
+    let prefixV ← Tensor.toFloatArray prefixCache.vStore
     for pos in [3:5] do
-      let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos.toUInt64 1 #[1, 1, 8])
-        (Tensor.sliceChecked cos 0 pos.toUInt64 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos.toUInt64 1 #[1, 2]) cache
+      let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos 1 #[1, 1, 8])
+        (Tensor.sliceChecked cos 0 pos 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos 1 #[1, 2]) cache
       LeanTest.assertEqual out.actualSpec.dtype x.actualSpec.dtype "Decode step retains model dtype"
       cache := next
       outputs := outputs.push out.packShape
     LeanTest.assertEqual cache.seq 5 "All prompt and decode tokens enter the cache"
-    LeanTest.assertEqual cache.kStoreDyn.2.actualSpec.dtype x.actualSpec.dtype "K cache follows projected key dtype"
-    LeanTest.assertEqual cache.vStoreDyn.2.actualSpec.dtype x.actualSpec.dtype "V cache follows projected value dtype"
-    LeanTest.assertEqual (← Tensor.toFloatArray prefixCache.kStoreDyn.2) prefixK
+    LeanTest.assertEqual cache.kStore.actualSpec.dtype x.actualSpec.dtype "K cache follows projected key dtype"
+    LeanTest.assertEqual cache.vStore.actualSpec.dtype x.actualSpec.dtype "V cache follows projected value dtype"
+    LeanTest.assertEqual (← Tensor.toFloatArray prefixCache.kStore) prefixK
       "Later decode leaves the functional K snapshot unchanged"
-    LeanTest.assertEqual (← Tensor.toFloatArray prefixCache.vStoreDyn.2) prefixV
+    LeanTest.assertEqual (← Tensor.toFloatArray prefixCache.vStore) prefixV
       "Later decode leaves the functional V snapshot unchanged"
-    LeanTest.assertEqual (Tensor.item (Tensor.sumAll fresh.kStoreDyn.2)) 0.0 "Fresh K snapshot remains empty"
-    LeanTest.assertEqual (Tensor.item (Tensor.sumAll fresh.vStoreDyn.2)) 0.0 "Fresh V snapshot remains empty"
+    LeanTest.assertEqual (Tensor.item (Tensor.sumAll fresh.kStore)) 0.0 "Fresh K snapshot remains empty"
+    LeanTest.assertEqual (Tensor.item (Tensor.sumAll fresh.vStore)) 0.0 "Fresh V snapshot remains empty"
     let stepped : Tensor { shape := #[1, 5, 8], dtype, device := .CPU } := Tensor.catManyChecked outputs 1 #[1, 5, 8]
     let error := Tensor.item (Tensor.maxAll (Tensor.abs (Tensor.sub (Tensor.toFloat32 stepped) (Tensor.toFloat32 full))))
     let tolerance := if bf16 then 0.0078125 else 0.00001
@@ -164,31 +164,31 @@ def testQwen3TTSBFloat16Generation : IO Unit := do
     "BF16 generation completes the requested frames and code groups"
   LeanTest.assertEqual out.lengths #[3] "EOS is suppressed for all requested frames"
   let codes ← Tensor.toUInt64Array out.codes
-  LeanTest.assertEqual codes.size (3 * cfg.numCodeGroups.toNat) "Every generated code materializes"
+  LeanTest.assertEqual codes.size (3 * cfg.numCodeGroups) "Every generated code materializes"
   for i in [:codes.size] do
-    let upper := if i % cfg.numCodeGroups.toNat == 0 then cfg.vocabSize else cfg.codePredictorConfig.vocabSize
-    LeanTest.assertTrue (codes[i]! < upper) "Generated codes stay within their vocabulary"
+    let upper := if i % cfg.numCodeGroups == 0 then cfg.vocabSize else cfg.codePredictorConfig.vocabSize
+    LeanTest.assertTrue (codes[i]!.toNat < upper) "Generated codes stay within their vocabulary"
 
 @[test]
 def testQwen3TTSGenerateFromText : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3TTSForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 2
-  let textSeq : UInt64 := 6
-  let maxFrames : UInt64 := 5
+  let batch : Nat := 2
+  let textSeq : Nat := 6
+  let maxFrames : Nat := 5
 
   let textIds ← Tensor.randint 0 cfg.talkerConfig.textVocabSize.toInt64 #[batch, textSeq]
   let out ← model.generateFromText textIds maxFrames
 
-  LeanTest.assertEqual out.lengths.size batch.toNat "lengths should have one value per batch row"
+  LeanTest.assertEqual out.lengths.size batch "lengths should have one value per batch row"
 
   -- Verify padded output shape by materializing first codebook and flattening.
   let firstBook3 : Tensor { shape := #[batch, maxFrames, 1], dtype := .Int64, device := .CPU } := Tensor.sliceChecked out.codes 2 0 1 #[batch, maxFrames, 1]
-  let firstBook2 : Tensor { shape := #[batch, maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked firstBook3 #[batch, maxFrames]
-  let flat : Tensor { shape := #[batch * maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked firstBook2 #[batch * maxFrames]
+  let firstBook2 : Tensor { shape := #[batch, maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshape firstBook3 #[batch, maxFrames]
+  let flat : Tensor { shape := #[batch * maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshape firstBook2 #[batch * maxFrames]
   let toks ← Tensor.toUInt64Array flat
-  LeanTest.assertEqual toks.size (batch * maxFrames).toNat "flattened token count should match batch*frames"
+  LeanTest.assertEqual toks.size (batch * maxFrames) "flattened token count should match batch*frames"
 
   for len in out.lengths do
     LeanTest.assertTrue (len >= 1 && len <= maxFrames) "each generated length must be within [1, maxFrames]"
@@ -198,22 +198,22 @@ def testQwen3TTSGenerateFromInstructText : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3TTSForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 1
-  let instructSeq : UInt64 := 3
-  let textSeq : UInt64 := 4
-  let maxFrames : UInt64 := 4
+  let batch : Nat := 1
+  let instructSeq : Nat := 3
+  let textSeq : Nat := 4
+  let maxFrames : Nat := 4
 
   let instructIds ← Tensor.randint 0 cfg.talkerConfig.textVocabSize.toInt64 #[batch, instructSeq]
   let textIds ← Tensor.randint 0 cfg.talkerConfig.textVocabSize.toInt64 #[batch, textSeq]
   let out ← model.generateFromInstructText instructIds textIds maxFrames
 
-  LeanTest.assertEqual out.lengths.size batch.toNat "lengths should have one value per batch row"
+  LeanTest.assertEqual out.lengths.size batch "lengths should have one value per batch row"
 
   let firstBook3 : Tensor { shape := #[batch, maxFrames, 1], dtype := .Int64, device := .CPU } := Tensor.sliceChecked out.codes 2 0 1 #[batch, maxFrames, 1]
-  let firstBook2 : Tensor { shape := #[batch, maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked firstBook3 #[batch, maxFrames]
-  let flat : Tensor { shape := #[batch * maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshapeChecked firstBook2 #[batch * maxFrames]
+  let firstBook2 : Tensor { shape := #[batch, maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshape firstBook3 #[batch, maxFrames]
+  let flat : Tensor { shape := #[batch * maxFrames], dtype := .Int64, device := .CPU } := Tensor.reshape firstBook2 #[batch * maxFrames]
   let toks ← Tensor.toUInt64Array flat
-  LeanTest.assertEqual toks.size (batch * maxFrames).toNat "flattened token count should match batch*frames"
+  LeanTest.assertEqual toks.size (batch * maxFrames) "flattened token count should match batch*frames"
 
   for len in out.lengths do
     LeanTest.assertTrue (len >= 1 && len <= maxFrames) "each generated length must be within [1, maxFrames]"
@@ -223,12 +223,12 @@ def testQwen3TTSGenerateFromTextZeroFrames : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3TTSForConditionalGeneration.init cfg
 
-  let batch : UInt64 := 2
-  let textSeq : UInt64 := 5
+  let batch : Nat := 2
+  let textSeq : Nat := 5
   let textIds ← Tensor.randint 0 cfg.talkerConfig.textVocabSize.toInt64 #[batch, textSeq]
   let out ← model.generateFromText textIds 0
 
-  LeanTest.assertEqual out.lengths.size batch.toNat "lengths should have one value per batch row"
+  LeanTest.assertEqual out.lengths.size batch "lengths should have one value per batch row"
   for len in out.lengths do
     LeanTest.assertEqual len 0 "maxFrames=0 should produce zero generated length"
 
@@ -251,8 +251,8 @@ def testQwen3TTSRejectsNonPositiveTemperature : IO Unit := do
 def testQwen3TTSSpeakerEmbedding : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3TTSForConditionalGeneration.init cfg
-  let batch : UInt64 := 2
-  let frames : UInt64 := 12
+  let batch : Nat := 2
+  let frames : Nat := 12
   let mel ← Tensor.randn #[batch, frames, cfg.speakerEncoderConfig.melDim]
   let emb ← model.extractSpeakerEmbedding mel
   let s := Tensor.item (Tensor.sumAll emb)
@@ -266,7 +266,8 @@ def testQwen3TTSSpeakerEmbeddingAlignsFeatureDType : IO Unit := do
     encChannels := #[8, 8, 8, 8, 24]
     encAttentionChannels := 4
     encRes2NetScale := 2
-    encSeChannels := 4 } }
+    encSeChannels := 4
+    residualChannels := by decide } }
   let features : Tensor { shape := #[2, 12, cfg.speakerEncoderConfig.melDim], dtype := .Float32, device := .CPU } ←
     Tensor.randn #[2, 12, cfg.speakerEncoderConfig.melDim]
   for bf16Weights in #[false, true] do
@@ -278,7 +279,7 @@ def testQwen3TTSSpeakerEmbeddingAlignsFeatureDType : IO Unit := do
       let mel := features.castDType (if bf16Features then .BFloat16 else .Float32)
       let originalDType := mel.actualSpec.dtype
       let explicit := mel.castDType speaker.val
-      let expected := enc.forward explicit
+      let expected := enc.forward (by decide) explicit
       let actual ← model.extractSpeakerEmbedding mel
       LeanTest.assertEqual actual.runtimeShape #[2, cfg.speakerEncoderConfig.encDim]
         "Speaker output shape follows the model configuration"
@@ -316,7 +317,7 @@ def testQwen3TTSStreamingApi : IO Unit := do
   let callbacksSeenRef ← IO.mkRef (0 : Nat)
   let callbacks : Qwen3TTSForConditionalGeneration.StreamingCallbacks := {
     onCodeFrame := fun _ row => do
-      LeanTest.assertEqual row.size cfg.talkerConfig.numCodeGroups.toNat "stream row width should equal numCodeGroups"
+      LeanTest.assertEqual row.size cfg.talkerConfig.numCodeGroups "stream row width should equal numCodeGroups"
       callbacksSeenRef.modify (fun n => n + 1)
   }
   let opts : Qwen3TTSForConditionalGeneration.StreamingOptions cfg := {
@@ -326,7 +327,7 @@ def testQwen3TTSStreamingApi : IO Unit := do
   }
   let out ← model.streamFromTalkerInputs talkerInputs opts none callbacks
   LeanTest.assertEqual out.lengths.size 1 "stream lengths should have one value for batch=1"
-  LeanTest.assertTrue (out.codeRows.size <= opts.maxFrames.toNat) "streamed rows should not exceed maxFrames"
+  LeanTest.assertTrue (out.codeRows.size <= opts.maxFrames) "streamed rows should not exceed maxFrames"
   let callbacksSeen ← callbacksSeenRef.get
   LeanTest.assertEqual callbacksSeen out.codeRows.size "callback should fire once per emitted stream row"
 

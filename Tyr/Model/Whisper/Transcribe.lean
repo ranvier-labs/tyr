@@ -34,6 +34,8 @@ structure WhisperBundle where
   model : WhisperForConditionalGeneration (device := device) (dtype := dtype.val) cfg
   tok : tokenizer.qwen3.QwenTokenizer
   preprocessor : PreprocessorConfig
+  /-- The preprocessor produces as many mel bins as the encoder consumes; checked on load. -/
+  melBinsMatch : preprocessor.featureSize = cfg.numMelBins
 
 structure WhisperDecodeOptions where
   beamSize : UInt64 := 1
@@ -41,7 +43,7 @@ structure WhisperDecodeOptions where
   temperature : Float := 0.0
   temperatureInc : Float := 0.2
   maxTemperature : Float := 1.0
-  topK : UInt64 := 0
+  topK : Nat := 0
   topP : Float := 1.0
   logprobThreshold : Float := -1.0
   noSpeechThreshold : Float := 0.6
@@ -53,7 +55,7 @@ structure WhisperDecodeOptions where
   noFallback : Bool := true
   deriving Repr, Inhabited
 
-private def sampleRate16k : UInt64 := 16000
+private def sampleRate16k : Nat := 16000
 
 private structure DecodeState where
   allIds : Array UInt32
@@ -74,7 +76,7 @@ private structure BeamState (cfg : WhisperConfig) (dtype : DType := .Float32) wh
   finished : Bool := false
   caches : Array (WhisperForConditionalGeneration.LayerKVCache (device := device) (dtype := dtype) cfg 1) := #[]
   lastLogits? : Option (Tensor { dtype := dtype, device := device, shape := #[1, cfg.vocabSize] }) := none
-  nextPos : UInt64 := 0
+  nextPos : Nat := 0
   deriving Inhabited
 
 private structure WhisperDecodeCandidate where
@@ -466,7 +468,7 @@ private def buildSingleTokenOnDevice
     (device : Device)
     : Tensor { device := device, shape := #[1, 1], dtype := .Int64 } :=
   let idsVals : Array Int64 := #[Int64.ofNat id.toNat]
-  let inputIdsCpu : Tensor { device := .CPU, shape := #[1, 1], dtype := .Int64 } := Tensor.reshapeChecked (Tensor.fromInt64Array idsVals) #[1, 1]
+  let inputIdsCpu : Tensor { device := .CPU, shape := #[1, 1], dtype := .Int64 } := Tensor.reshape (Tensor.fromInt64Array idsVals) #[1, 1]
   inputIdsCpu.to device
 
 private def isForbiddenToken (rules : DecodeTokenRules) (id : UInt32) : Bool :=
@@ -483,12 +485,12 @@ private def applyInitialTimestampCap
         rules
       else
         let start := ts.toNat + rules.maxInitialTimestampTokens + 1
-        if start >= cfg.vocabSize.toNat then
+        if start >= cfg.vocabSize then
           rules
         else
           Id.run do
             let mut forb := rules.forbidden
-            for i in [start:cfg.vocabSize.toNat] do
+            for i in [start:cfg.vocabSize] do
               forb := pushUniqueId forb i.toUInt32
             { rules with forbidden := forb }
 
@@ -517,7 +519,7 @@ private def applyTimestampPairMask
             let mut forb := rules.forbidden
             if penultimateWasTimestamp then
               -- Two consecutive timestamps are not allowed; force next token to text (or EOT).
-              for i in [tsBegin.toNat:cfg.vocabSize.toNat] do
+              for i in [tsBegin.toNat:cfg.vocabSize] do
                 forb := pushUniqueId forb i.toUInt32
             else
               -- After text->timestamp, next must be timestamp (or EOT).
@@ -551,7 +553,7 @@ private def topKLogProbPairs (logProbs : Array Float) (k : Nat) : Array (Nat × 
       let sorted := pairs.qsort (fun a b => a.2 > b.2)
       sorted.extract 0 (Nat.min k sorted.size)
 
-private def tokenLogProbFromLogits {vocab : UInt64}
+private def tokenLogProbFromLogits {vocab : Nat}
     (logits : Tensor { dtype := dtype, device := device, shape := #[1, vocab] })
     (tokenId : UInt32)
     : IO Float := do
@@ -559,7 +561,7 @@ private def tokenLogProbFromLogits {vocab : UInt64}
   let logProbs := logProbsFromLogitsArray vals
   pure (logProbs.getD tokenId.toNat (-100.0))
 
-private def tokenProbFromLogits {vocab : UInt64}
+private def tokenProbFromLogits {vocab : Nat}
     (logits : Tensor { dtype := dtype, device := device, shape := #[1, vocab] })
     (tokenId : UInt32)
     : IO Float := do
@@ -567,7 +569,7 @@ private def tokenProbFromLogits {vocab : UInt64}
   let logProbs := logProbsFromLogitsArray vals
   pure (Float.exp (logProbs.getD tokenId.toNat (-100.0)))
 
-private def clampTopK (topK vocab : UInt64) : UInt64 :=
+private def clampTopK (topK vocab : Nat) : Nat :=
   if topK == 0 then
     0
   else if topK > vocab then
@@ -575,10 +577,10 @@ private def clampTopK (topK vocab : UInt64) : UInt64 :=
   else
     topK
 
-private def filteredSamplingLogits {vocab : UInt64}
+private def filteredSamplingLogits {vocab : Nat}
     (logits : Tensor { dtype := dtype, device := device, shape := #[1, vocab] })
     (temperature : Float)
-    (topK : UInt64)
+    (topK : Nat)
     (topP : Float)
     : Tensor { dtype := dtype, device := device, shape := #[1, vocab] } :=
   let scaled :=
@@ -604,12 +606,12 @@ private def filteredSamplingLogits {vocab : UInt64}
   else
     Tensor.topPFilter filtered topP'
 
-private def argmaxTokenFromLogits {vocab : UInt64}
+private def argmaxTokenFromLogits {vocab : Nat}
     (logits : Tensor { dtype := dtype, device := device, shape := #[1, vocab] })
     (fallback : UInt64)
     (rules : DecodeTokenRules := {})
     : IO UInt32 := do
-  let kNat := Nat.max 1 (Nat.min 64 vocab.toNat)
+  let kNat := Nat.max 1 (Nat.min 64 vocab)
   let logProbs := logProbsFromLogitsArray (← Tensor.toFloatArray logits)
   let topPairs := topKLogProbPairs logProbs kNat
   for p in topPairs do
@@ -617,22 +619,22 @@ private def argmaxTokenFromLogits {vocab : UInt64}
     if !(isForbiddenToken rules id) then
       return id
   let indices ← IO.ofExcept (Tensor.argmax? logits 1)
-  let nextTokRaw : Tensor { device := device, shape := #[1], dtype := .Int64 } ← IO.ofExcept (indices.reshapeChecked? #[1])
+  let nextTokRaw : Tensor { device := device, shape := #[1], dtype := .Int64 } := indices.reshape #[1]
   let nextVals ← Tensor.toUInt64Array nextTokRaw
   pure (nextVals.getD 0 fallback).toUInt32
 
-private def sampleTokenFromLogits {vocab : UInt64}
+private def sampleTokenFromLogits {vocab : Nat}
     (logits : Tensor { dtype := dtype, device := device, shape := #[1, vocab] })
     (rules : DecodeTokenRules := {})
     (fallback : UInt64 := 0)
     : IO UInt32 := do
   let vals ← Tensor.toFloatArray logits
   let probsVals := (logProbsFromLogitsArray vals).map Float.exp
-  let probs : Tensor { device := device, shape := #[1, vocab], dtype := .Float32 } := Tensor.reshapeChecked ((Tensor.fromFloatArray probsVals).to device) #[1, vocab]
+  let probs : Tensor { device := device, shape := #[1, vocab], dtype := .Float32 } := (← IO.ofExcept (Tensor.fromFloatArrayAs? probsVals #[1, vocab])).to device
   let mut tries : Nat := 0
   while tries < 8 do
     let sampled ← Tensor.multinomial probs 1 false
-    let sampledFlat : Tensor { device := device, shape := #[1], dtype := .Int64 } := Tensor.reshapeChecked sampled #[1]
+    let sampledFlat : Tensor { device := device, shape := #[1], dtype := .Int64 } := Tensor.reshape sampled #[1]
     let sampledVals ← Tensor.toUInt64Array sampledFlat
     let id := (sampledVals.getD 0 0).toUInt32
     if !isForbiddenToken rules id then
@@ -642,11 +644,11 @@ private def sampleTokenFromLogits {vocab : UInt64}
 
 private def prefillPromptCaches
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (promptIds : Array UInt32)
-    : IO (Tensor { dtype := dtype, device := device, shape := #[1, cfg.vocabSize] } × Array (WhisperForConditionalGeneration.LayerKVCache (device := device) (dtype := dtype) cfg 1) × UInt64) := do
+    : IO (Tensor { dtype := dtype, device := device, shape := #[1, cfg.vocabSize] } × Array (WhisperForConditionalGeneration.LayerKVCache (device := device) (dtype := dtype) cfg 1) × Nat) := do
   let support ← dtype.acquireConstantSupport device
   let _ := support.down
   if promptIds.isEmpty then
@@ -654,35 +656,35 @@ private def prefillPromptCaches
   let mut caches : Array (WhisperForConditionalGeneration.LayerKVCache (device := device) (dtype := dtype) cfg 1) :=
     model.initLayerKVCaches cfg.maxTargetPositions device
   let mut last? : Option (Tensor { dtype := dtype, device := device, shape := #[1, cfg.vocabSize] }) := none
-  let mut pos : UInt64 := 0
+  let mut pos : Nat := 0
   for i in [:promptIds.size] do
     let tok := buildSingleTokenOnDevice promptIds[i]! device
     let (logits, caches') ←
-      model.decodeStepWithCache (encSeq := encSeq) tok i.toUInt64 crossCaches caches
+      model.decodeStepWithCache (encSeq := encSeq) tok i crossCaches caches
     caches := caches'
     last? := some logits
-    pos := i.toUInt64 + 1
+    pos := i + 1
   match last? with
   | some last => pure (last, caches, pos)
   | none => throw <| IO.userError "Whisper cached decode failed to prefill prompt"
 
 private partial def decodeLoopCached
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (temperature : Float)
-    (topK : UInt64)
+    (topK : Nat)
     (topP : Float)
     (sample : Bool)
     (remaining : Nat)
     (state : DecodeState)
     (caches : Array (WhisperForConditionalGeneration.LayerKVCache (device := device) (dtype := dtype) cfg 1))
     (lastLogits : Tensor { dtype := dtype, device := device, shape := #[1, cfg.vocabSize] })
-    (nextPos : UInt64)
+    (nextPos : Nat)
     : IO DecodeState := do
   if remaining == 0 then
     pure state
@@ -761,9 +763,9 @@ private def chooseBetterBeam {cfg : WhisperConfig} (a b : BeamState (device := d
 
 private def expandBeamCached
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
@@ -783,7 +785,7 @@ private def expandBeamCached
           match noSpeechTokenId with
           | none => pure 0.0
           | some tid => tokenProbFromLogits last tid
-      let kNat := Nat.max 1 (Nat.min beamWidth.toNat cfg.vocabSize.toNat)
+      let kNat := Nat.max 1 (Nat.min beamWidth.toNat cfg.vocabSize)
       let logitsArr ← Tensor.toFloatArray last
       let logProbs := logProbsFromLogitsArray logitsArr
       let topPairs := topKLogProbPairs logProbs kNat
@@ -840,9 +842,9 @@ private def expandBeamCached
 
 private partial def beamDecodeLoopCached
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
@@ -893,10 +895,10 @@ private partial def beamDecodeLoopCached
 
 private def decodeBeamCached
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (_encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, encSeq, cfg.dModel] })
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
@@ -966,11 +968,11 @@ private def chooseBetterCandidate (a b : WhisperDecodeCandidate) : WhisperDecode
 
 private def decodeAtTemperature
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, encSeq, cfg.dModel] })
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
@@ -1042,11 +1044,11 @@ private def decodeAtTemperature
 
 private partial def decodeWithFallbackLoop
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, encSeq, cfg.dModel] })
-    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg))
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache (device := device) (dtype := dtype) cfg 1 encSeq))
     (promptIds : Array UInt32)
     (promptIdsFallback : Array UInt32)
     (noSpeechTokenId : Option UInt32)
@@ -1096,7 +1098,7 @@ private partial def decodeWithFallbackLoop
 
 private def decodeWithFallback
     {cfg : WhisperConfig}
-    {encSeq : UInt64}
+    {encSeq : Nat}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, encSeq, cfg.dModel] })
@@ -1131,6 +1133,7 @@ private def maybeAppendTailRescue
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
+    (hMel : pre.featureSize = cfg.numMelBins)
     (wav16k : Array Float)
     (basePrompt : Array UInt32)
     (noSpeechTokenId : Option UInt32)
@@ -1157,9 +1160,9 @@ private def maybeAppendTailRescue
     match pack with
     | ⟨frames, out⟩ =>
       let inputFeatures : Tensor { dtype := .Float32, device := device, shape := #[1, cfg.numMelBins, frames] } :=
-        (Tensor.reshapeChecked out.inputFeatures #[1, cfg.numMelBins, frames])
+        (Tensor.reshape out.inputFeatures #[1, cfg.numMelBins, frames] (by simp [hMel]))
       let encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] } ←
-        model.encode (frames := frames) inputFeatures
+        model.encode (frames := frames) inputFeatures out.framesPos
       let maxNewCapPrompt :=
         if maxTarget <= basePrompt.size + 1 then
           1
@@ -1214,14 +1217,18 @@ def loadFromPretrainedDir (modelDir : String) : IO WhisperBundle := do
       doNormalize := false
       dither := 0.0
     }
+  let ⟨melBinsMatch⟩ ← if h : preprocessor.featureSize = cfg.numMelBins then pure (PLift.up h) else
+    throw <| IO.userError
+      s!"Whisper preprocessor feature_size {preprocessor.featureSize} does not match num_mel_bins {cfg.numMelBins}"
   let ⟨device, dtype, model⟩ ← WhisperForConditionalGeneration.loadSharded modelDir cfg
-  pure { cfg, device, dtype, model, tok, preprocessor }
+  pure { cfg, device, dtype, model, tok, preprocessor, melBinsMatch }
 
 private def transcribeWavCore
     {cfg : WhisperConfig}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
+    (hMel : pre.featureSize = cfg.numMelBins)
     (wav16k : Array Float)
     (language : String)
     (maxNewTokens : UInt64)
@@ -1231,7 +1238,7 @@ private def transcribeWavCore
   let frontendDevice := model.model.decoderTokenEmbedding.device
   let basePrompt := buildPromptIds cfg tok language noTimestamps
   let rules := buildDecodeTokenRules tok cfg noTimestamps
-  let maxTarget := cfg.maxTargetPositions.toNat
+  let maxTarget := cfg.maxTargetPositions
   if maxTarget <= basePrompt.size + 1 then
     throw <| IO.userError
       s!"Whisper max_target_positions={cfg.maxTargetPositions} is too small for base prompt size={basePrompt.size}"
@@ -1284,7 +1291,7 @@ private def transcribeWavCore
     if noTimestamps then
       (wav16k.size / defaultAdvance) + 2
     else
-      (wav16k.size / (Nat.max 1 (sr.toNat * 5))) + 4
+      (wav16k.size / (Nat.max 1 (sr * 5))) + 4
   let mut seekStep : Nat := 0
   while seek < wav16k.size && seekStep < maxSeekSteps do
     seekStep := seekStep + 1
@@ -1301,7 +1308,7 @@ private def transcribeWavCore
       stop == wav16k.size &&
       -- Previous overlapped chunk already covered almost everything; decoding <=1s of novel tail
       -- often adds hallucinated suffixes.
-      tailNewSamples <= sr.toNat
+      tailNewSamples <= sr
     if skipShortTail then
       seek := wav16k.size
     else
@@ -1319,9 +1326,9 @@ private def transcribeWavCore
       match pack with
       | ⟨frames, out⟩ =>
         let inputFeatures : Tensor { dtype := .Float32, device := device, shape := #[1, cfg.numMelBins, frames] } :=
-          (Tensor.reshapeChecked out.inputFeatures #[1, cfg.numMelBins, frames])
+          (Tensor.reshape out.inputFeatures #[1, cfg.numMelBins, frames] (by simp [hMel]))
         let encoderHidden : Tensor { dtype := dtype, device := device, shape := #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] } ←
-          model.encode (frames := frames) inputFeatures
+          model.encode (frames := frames) inputFeatures out.framesPos
         let promptIds :=
           composePromptIds
             basePrompt
@@ -1366,7 +1373,7 @@ private def transcribeWavCore
         let mut advance := Nat.min chunk.size defaultAdvance
         if !noTimestamps then
           -- Keep runtime bounded while preserving overlap when explicit timestamp advance is absent.
-          let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr.toNat * 5))
+          let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr * 5))
           let tsAdvance :=
             timestampAdvanceSamples
               cand.generated
@@ -1397,6 +1404,7 @@ private def transcribeWavCore
         model
         tok
         pre
+        hMel
         wav16k
         basePrompt
         noSpeechTokenId
@@ -1419,19 +1427,21 @@ def transcribeWaveform16k
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
+    (hMel : pre.featureSize = cfg.numMelBins)
     (wav16k : Array Float)
     (language : String := "en")
     (maxNewTokens : UInt64 := 128)
     (noTimestamps : Bool := true)
     (decodeOpts : WhisperDecodeOptions := {})
     : IO WhisperTranscription :=
-  transcribeWavCore model tok pre wav16k language maxNewTokens noTimestamps decodeOpts
+  transcribeWavCore model tok pre hMel wav16k language maxNewTokens noTimestamps decodeOpts
 
 def transcribeWav
     {cfg : WhisperConfig}
     (model : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
+    (hMel : pre.featureSize = cfg.numMelBins)
     (wavPath : String)
     (language : String := "en")
     (maxNewTokens : UInt64 := 128)
@@ -1439,6 +1449,6 @@ def transcribeWav
     (decodeOpts : WhisperDecodeOptions := {})
     : IO WhisperTranscription := do
   let wav16k ← normalizeAudioTo16kFromWav wavPath
-  transcribeWavCore model tok pre wav16k language maxNewTokens noTimestamps decodeOpts
+  transcribeWavCore model tok pre hMel wav16k language maxNewTokens noTimestamps decodeOpts
 
 end torch.whisper

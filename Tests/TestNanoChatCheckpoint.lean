@@ -56,7 +56,7 @@ private def trainedCheckpoint : IO (Checkpoint (device := .CPU) tinyConfig) := d
   let optState := { initialOpt with adamState := adamState, dualState := dualState, step := 13 }
   pure { params := params, optState := optState, step := 14, bestValLoss := 1.0e-8 }
 
-private def metadata (tokens : UInt64) : CheckpointMetadata := {
+private def metadata (tokens : Nat) : CheckpointMetadata := {
   modelConfigRepr := s!"{repr tinyConfig}"
   modelConfig? := some tinyConfig
   hyperparameters := { numIterations := 20 }
@@ -196,8 +196,8 @@ private def metadata (tokens : UInt64) : CheckpointMetadata := {
 @[test] def testNanoChatIndexedTrainingStep : IO Unit := do
   let params ← moddedGpt.ModdedGPTParams.init tinyConfig
   let yarn ← moddedGpt.YarnRotary.init tinyConfig.headDim tinyConfig.maxSeqLen
-  let input := (Tensor.fromInt64Array #[0, 1, 2, 3]).reshapeChecked #[1, 4]
-  let target := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshapeChecked #[1, 4]
+  let input := (Tensor.fromInt64Array #[0, 1, 2, 3]).reshape #[1, 4]
+  let target := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshape #[1, 4]
   let opt := OptimizerState.init tinyConfig params
   let (updated, nextOpt, result) ← trainStep params yarn input target opt
     { numIterations := 10 } 1.0
