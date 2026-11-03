@@ -64,6 +64,11 @@ jobs:
           cd docbuild
           lake build Tyr:docs
 
+      - name: Add Berkeley Mono
+        run: |
+          cp docs/site/fonts/*.woff2 docbuild/.lake/build/doc/
+          cat docs/site/fonts.css >> docbuild/.lake/build/doc/style.css
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

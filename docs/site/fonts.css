@@ -1,0 +1,35 @@
+
+/*
+ * Tyr: Berkeley Mono (static files, licensed for web use).
+ * Appended to style.css by .github/workflows/docs.yml; the woff2 files are copied next to it.
+ * doc-gen4's theme asks for 'Berkeley Mono Variable' (BerkeleyMonoVariable.woff2), which we don't ship;
+ * overriding --font-mono (theme CSS) and the Tailwind mono stack (.font-mono and preflight's code/pre/samp,
+ * from doc-gen4's tailwind.config) means that face is never used, so the browser never requests it.
+ * !important is needed because the Tailwind CDN injects its styles after style.css.
+ * Mono text uses weights 420 (args), 575 (decl names, kind, extends) and 700 (class/structure names):
+ * Regular covers 420 and Bold covers 575 and 700. No mono text is italic, so there is no oblique.
+ */
+@font-face {
+  font-family: 'Berkeley Mono';
+  src: url('BerkeleyMono-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Berkeley Mono';
+  src: url('BerkeleyMono-Bold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+:root {
+  --font-mono: 'Berkeley Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+code,
+pre,
+samp,
+.font-mono {
+  font-family: var(--font-mono) !important;
+}
