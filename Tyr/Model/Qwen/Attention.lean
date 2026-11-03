@@ -63,25 +63,23 @@ def init (hidden_size num_heads num_kv_heads head_dim : Nat) (dtype : DType := .
     o_proj := (← Tensor.parameter (Tensor.mulScalar o std))
   }
 
-/-- Incremental KV cache for one attention layer.
-    Stores preallocated K/V buffers with capacity `maxLen`; the store types
-    depend on that field, so `maxLen` stays a runtime value. -/
-structure KVCache (batch num_kv_heads head_dim : Nat) (dtype : DType := .Float32) where
-  maxLen : Nat := 0
-  kStore : Tensor { device := device, shape := #[batch, num_kv_heads, maxLen, head_dim], dtype := dtype }
-  vStore : Tensor { device := device, shape := #[batch, num_kv_heads, maxLen, head_dim], dtype := dtype }
-  seq : Nat := 0
+/-- Incremental KV cache for one attention layer, with preallocated K/V buffers
+    of capacity `cap`. -/
+structure KVCache (batch num_kv_heads head_dim cap : Nat) (dtype : DType := .Float32) where
+  kStore : Tensor { device := device, shape := #[batch, num_kv_heads, cap, head_dim], dtype := dtype }
+  vStore : Tensor { device := device, shape := #[batch, num_kv_heads, cap, head_dim], dtype := dtype }
+  cap_pos : 0 < cap
 
 /-- Empty static KV cache with fixed capacity `maxLen`. -/
 def initKVCache {batch num_kv_heads head_dim : Nat}
     (maxLen : Nat)
     (device : Device := Device.CPU) (dtype : DType := .Float32)
-    [DType.ConstantSupported dtype device] : KVCache (device := device) batch num_kv_heads head_dim dtype :=
+    [DType.ConstantSupported dtype device] (h : 0 < maxLen := by omega) : KVCache (device := device) batch num_kv_heads head_dim maxLen dtype :=
   let k0 : Tensor { device := device, shape := #[batch, num_kv_heads, maxLen, head_dim], dtype := dtype } :=
     Tensor.zerosFor ⟨#[batch, num_kv_heads, maxLen, head_dim], dtype, device⟩
   let v0 : Tensor { device := device, shape := #[batch, num_kv_heads, maxLen, head_dim], dtype := dtype } :=
     Tensor.zerosFor ⟨#[batch, num_kv_heads, maxLen, head_dim], dtype, device⟩
-  { maxLen := maxLen, kStore := k0, vStore := v0, seq := 0 }
+  { kStore := k0, vStore := v0, cap_pos := h }
 
 /-! ## Extern adapters
 
@@ -145,9 +143,11 @@ private def sliceScatterAlong {s srcShape : Shape} {d : DType} {dev : Device}
     (input : Tensor ⟨s, d, dev⟩) (dim : Nat) (start : Nat)
     (src : Tensor ⟨srcShape, d, dev⟩)
     (h : TensorSpec.sliceScatterCompatible s srcShape dim = true := by
-      first | exact of_decide_eq_true rfl | (simp <;> fail "incompatible slice scatter shapes")) :
+      first | exact of_decide_eq_true rfl | (simp <;> fail "incompatible slice scatter shapes"))
+    (bound : start + srcShape.getD dim 0 ≤ s.getD dim 0 := by
+      first | exact of_decide_eq_true rfl | omega | (simp <;> omega)) :
     Tensor ⟨s, d, dev⟩ :=
-  Tensor.sliceScatter input dim start src h
+  Tensor.sliceScatter input dim start src h bound
 
 /-- Mean over one axis with the result shape validated at runtime. -/
 private def meanDimTo {s : Shape} {d : DType} {dev : Device}
@@ -225,14 +225,15 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim : Nat}
     problems (BF16 + qSeq=1 + head_dim=128 or 64 + GQA-valid) to the native
     TK kernel `tkMhaH100DecodeFwd[64]`, and falls back to PyTorch SDPA
     otherwise — so this flag is safe to flip on for any shape. -/
-def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : Nat}
+def forwardStep {batch hidden_size num_heads num_kv_heads head_dim cap : Nat}
     (attn : QwenAttention (device := device) hidden_size num_heads num_kv_heads head_dim dtype)
     (x : Tensor { device := device, shape := #[batch, 1, hidden_size], dtype := dtype })
     (cos : Tensor { device := device, shape := #[1, head_dim / 2], dtype := .Float32 })
     (sin : Tensor { device := device, shape := #[1, head_dim / 2], dtype := .Float32 })
-    (cache : KVCache (device := device) batch num_kv_heads head_dim dtype)
+    (cache : KVCache (device := device) batch num_kv_heads head_dim cap dtype)
+    (pos : Nat) (hpos : pos < cap)
     (useTyrFlashAttn : Bool := false)
-    : Tensor { device := device, shape := #[batch, 1, hidden_size], dtype := dtype } × KVCache (device := device) batch num_kv_heads head_dim dtype :=
+    : Tensor { device := device, shape := #[batch, 1, hidden_size], dtype := dtype } × KVCache (device := device) batch num_kv_heads head_dim cap dtype :=
   -- Project current token to Q/K/V.
   let q0 := Tensor.linear3d x attn.q_proj
   let k0 := Tensor.linear3d x attn.k_proj
@@ -259,61 +260,35 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : Nat}
   let kNew := transposeForAttention k
   let vNew := transposeForAttention v
 
-  let kStore : Tensor { device := device, shape := #[batch, num_kv_heads, cache.maxLen, head_dim], dtype := dtype } :=
+  let kStore : Tensor { device := device, shape := #[batch, num_kv_heads, cap, head_dim], dtype := dtype } :=
     Tensor.castLike kNew cache.kStore
-  let vStore : Tensor { device := device, shape := #[batch, num_kv_heads, cache.maxLen, head_dim], dtype := dtype } :=
+  let vStore : Tensor { device := device, shape := #[batch, num_kv_heads, cap, head_dim], dtype := dtype } :=
     Tensor.castLike vNew cache.vStore
 
-  if cache.seq < cache.maxLen then
-    let kStore' := sliceScatterAlong kStore 2 cache.seq kNew
-    let vStore' := sliceScatterAlong vStore 2 cache.seq vNew
-    let kvLen : Nat := cache.seq + 1
-    let kAll := kStore'.sliceChecked 2 0 kvLen #[batch, num_kv_heads, kvLen, head_dim]
-    let vAll := vStore'.sliceChecked 2 0 kvLen #[batch, num_kv_heads, kvLen, head_dim]
+  let kStore' := sliceScatterAlong kStore 2 pos kNew
+  let vStore' := sliceScatterAlong vStore 2 pos vNew
+  let kvLen : Nat := pos + 1
+  let kAll : Tensor { device := device, shape := #[batch, num_kv_heads, kvLen, head_dim], dtype := dtype } :=
+    kStore'.slice 2 0 kvLen
+  let vAll : Tensor { device := device, shape := #[batch, num_kv_heads, kvLen, head_dim], dtype := dtype } :=
+    vStore'.slice 2 0 kvLen
 
-    -- Use q_len=1, kv_len=(seq+1). Causal masking is unnecessary because KV has no future tokens.
-    let attnOut :=
-      if useTyrFlashAttn then
-        flashAttn4d qh kAll vAll true
-      else
-        sdpaGQAQKV qh kAll vAll false true
-    let attnOut := transposeFromAttention attnOut
-    let attnOut := attnOut.reshape #[batch, 1, num_heads * head_dim]
-    let out := Tensor.linear3d attnOut attn.o_proj
+  -- Use q_len=1, kv_len=(pos+1). Causal masking is unnecessary because KV has no future tokens.
+  let attnOut :=
+    if useTyrFlashAttn then
+      flashAttn4d qh kAll vAll true
+    else
+      sdpaGQAQKV qh kAll vAll false true
+  let attnOut := transposeFromAttention attnOut
+  let attnOut := attnOut.reshape #[batch, 1, num_heads * head_dim]
+  let out := Tensor.linear3d attnOut attn.o_proj
 
-    let cache' : KVCache (device := device) batch num_kv_heads head_dim dtype := {
-      kStore := kStore'
-      vStore := vStore'
-      seq := kvLen
-      maxLen := cache.maxLen
-    }
-    (out, cache')
-  else
-    let writePos : Nat :=
-      if cache.maxLen == 0 then
-        0
-      else
-        cache.maxLen - 1
-    let kStore' := sliceScatterAlong kStore 2 writePos kNew
-    let vStore' := sliceScatterAlong vStore 2 writePos vNew
-    let kvLen : Nat := cache.maxLen
-    let kAll := kStore'.sliceChecked 2 0 kvLen #[batch, num_kv_heads, kvLen, head_dim]
-    let vAll := vStore'.sliceChecked 2 0 kvLen #[batch, num_kv_heads, kvLen, head_dim]
-    let attnOut :=
-      if useTyrFlashAttn then
-        flashAttn4d qh kAll vAll true
-      else
-        sdpaGQAQKV qh kAll vAll false true
-    let attnOut := transposeFromAttention attnOut
-    let attnOut := attnOut.reshape #[batch, 1, num_heads * head_dim]
-    let out := Tensor.linear3d attnOut attn.o_proj
-    let cache' : KVCache (device := device) batch num_kv_heads head_dim dtype := {
-      kStore := kStore'
-      vStore := vStore'
-      seq := cache.maxLen
-      maxLen := cache.maxLen
-    }
-    (out, cache')
+  let cache' : KVCache (device := device) batch num_kv_heads head_dim cap dtype := {
+    cap_pos := cache.cap_pos
+    kStore := kStore'
+    vStore := vStore'
+  }
+  (out, cache')
 
 def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim : Nat}
     {maskDtype : DType}
