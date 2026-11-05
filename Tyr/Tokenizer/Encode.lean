@@ -7,6 +7,12 @@ import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.ByteLevel
 import Tyr.Tokenizer.Pretokenize
 
+/-! # BPE encoding
+
+`tokenizer.encode`: split out special tokens (longest match first), map bytes to
+base tokens, and apply the best-ranked merges repeatedly.
+-/
+
 namespace tokenizer
 
 /-- Insert a special token into an array sorted by decreasing token length. -/

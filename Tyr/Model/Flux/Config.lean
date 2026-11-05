@@ -6,6 +6,15 @@
 -/
 import Tyr.Basic
 
+/-! # Flux configuration
+
+Hyperparameters for the Flux transformer. `torch.flux.FluxConfig` holds the
+model dimensions, `torch.flux.FluxConfig.klein4B` is the Flux2 Klein 4B preset
+(MLP ratio 3.0), and `torch.flux.FluxConfig.mlpHiddenDim` /
+`torch.flux.FluxConfig.ropeDim` derive the MLP width and per-head rotary
+dimension.
+-/
+
 namespace torch.flux
 
 /-- Flux model configuration.

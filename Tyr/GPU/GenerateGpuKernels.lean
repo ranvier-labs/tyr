@@ -1,6 +1,14 @@
 import Lean
 import Tyr.GPU.Codegen.FFI
 
+/-! # GPU kernel generator
+
+Executable used by the `libtyr` Lake target: it emits CUDA for the selected
+kernel modules and, with `--stubs`, placeholder launchers
+(`Tyr.GPU.Codegen.renderLauncherStubs`) so CPU builds still link. Files are only
+rewritten when their content changes.
+-/
+
 open Lean
 
 namespace Tyr.GPU.Codegen

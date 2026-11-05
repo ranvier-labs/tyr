@@ -6,6 +6,12 @@
 -/
 import Tyr.Tokenizer.Types
 
+/-! # Pretokenization
+
+Character classification (`tokenizer.classifyChar`) and splitting text into
+pretokens before BPE (`tokenizer.pretokenize`).
+-/
+
 namespace tokenizer
 
 /-- Check if a character is a letter -/

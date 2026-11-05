@@ -8,6 +8,15 @@
 import Tyr.Basic
 import Tyr.TensorStruct
 
+/-! # Gemma 4 configuration
+
+`torch.gemma4.Gemma4Config` describes the Gemma 4 text model, including the
+per-layer attention schedule `torch.gemma4.LayerType`. Presets:
+`torch.gemma4.Gemma4Config.gemma4_E4B`, `torch.gemma4.Gemma4Config.gemma4_E2B`,
+`torch.gemma4.Gemma4Config.gemma4_26B_A4B` and
+`torch.gemma4.Gemma4Config.gemma4_31B`.
+-/
+
 namespace torch.gemma4
 
 /-- Per-layer attention schedule entry used by Gemma 4. -/

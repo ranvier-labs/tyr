@@ -9,3 +9,10 @@
 -/
 
 import Tyr.GPU.Kernels.Rotary
+
+/-! # Rotary backward (compatibility)
+
+Compatibility import of `Tyr.GPU.Kernels.Rotary`. The former no-op `rotaryBwd`
+was removed; the measured BF16 D64 backward is
+`Tyr.GPU.Kernels.Rotary.rotaryBwdQKD64Bf16Direct`.
+-/

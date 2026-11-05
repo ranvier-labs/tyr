@@ -27,6 +27,13 @@
 -/
 import Tyr.Typed.Neural
 
+/-! # NVFP4 dequantization
+
+Decodes NVFP4 (E2M1 4-bit) weights: `torch.laguna.nvfp4.e2m1Value` decodes one
+nibble (3 magnitude bits, 1 sign bit), and `torch.laguna.nvfp4.dequantMatrix` /
+`torch.laguna.nvfp4.dequantBank` expand packed matrices and expert banks.
+-/
+
 namespace torch.laguna.nvfp4
 
 variable {device : Device}

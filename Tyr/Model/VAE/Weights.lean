@@ -20,6 +20,12 @@ import Tyr.SafeTensors.Exact
 import Tyr.Log
 import Tyr.Model.VAE.Decoder
 
+/-! # VAE weights
+
+Loads the VAE decoder from Diffusers-format tensors (`torch.vae.loadDecoder` and
+its per-block helpers).
+-/
+
 namespace torch.vae
 
 variable {device : Device} {dtype : DType}

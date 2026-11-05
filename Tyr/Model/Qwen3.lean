@@ -8,3 +8,9 @@ import Tyr.Model.Qwen3.Config
 import Tyr.Model.Qwen3.ConfigIO
 import Tyr.Model.Qwen3.Model
 import Tyr.Model.Qwen3.Weights
+
+/-! # Qwen3 causal LM
+
+Umbrella import for the standalone Qwen3 causal language model in `torch.qwen3`:
+config, JSON loading, model and weights.
+-/

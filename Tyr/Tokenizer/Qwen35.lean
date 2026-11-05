@@ -1,5 +1,11 @@
 import Tyr.Tokenizer.Qwen3
 
+/-! # Qwen3.5 tokenizer
+
+Qwen3.5 tokenizer entry points over the Qwen3 BPE, plus chat-template helpers
+for thinking and non-thinking prompts.
+-/
+
 namespace tokenizer.qwen35
 
 /--

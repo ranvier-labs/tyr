@@ -4,6 +4,14 @@ import Tyr.Typed.Neural
 import Tyr.GPU.Ops.AttentionProblem
 import Tyr.GPU.Ops.MhaH100
 
+/-! # Typed FlashAttention
+
+Typed FlashAttention surface: query/key-value/padding-mask wrappers, the
+`Tyr.GPU.Ops.FlashAttn.attentionProblem` descriptor and
+`Tyr.GPU.Ops.FlashAttn.dispatchRoute`, which picks a ThunderKittens kernel or
+the fallback.
+-/
+
 namespace Tyr.GPU.Ops.FlashAttn
 
 open torch

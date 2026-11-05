@@ -5,6 +5,12 @@
 -/
 import Tyr.Basic
 
+/-! # Whisper configuration
+
+`torch.whisper.WhisperConfig` with derived head dimensions and the encoder
+sequence length after the second convolution.
+-/
+
 namespace torch.whisper
 
 structure WhisperConfig where

@@ -11,6 +11,14 @@ import Tyr.Model.Qwen35.Weights
 import Tyr.Model.Qwen35.VLConfigIO
 import Tyr.Model.Qwen35.VLWeights
 
+/-! # Qwen3.5 pretrained loading
+
+Covered Qwen3.5/3.6 repo ids (`torch.qwen35.hub.qwen35CollectionRepoIds`),
+tokenizer files, and `torch.qwen35.Qwen35ForCausalLM.loadFromPretrained` /
+`torch.qwen35.Qwen35ForConditionalGeneration.loadFromPretrained` for text and
+multimodal checkpoints.
+-/
+
 namespace torch.qwen35.hub
 
 open torch.Hub

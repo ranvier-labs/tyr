@@ -3,6 +3,12 @@ import Tyr.GPU.Codegen.TileIR.Attribute
 import Tyr.GPU.Codegen.TileIR.Specialization
 import Tyr.GPU.Codegen.TileIR.Toolchain
 
+/-! # TileIR kernel generator
+
+Command-line generator that emits TileIR kernels for selected modules and
+specializations (`Tyr.GPU.Codegen.TileIR.KernelSpecialization`).
+-/
+
 open Lean
 
 namespace Tyr.GPU.Codegen.TileIR

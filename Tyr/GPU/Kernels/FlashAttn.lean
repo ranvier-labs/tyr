@@ -9,6 +9,12 @@ import Tyr.GPU.Codegen.Macros
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # FlashAttention example kernel
+
+FlashAttention forward with global-memory I/O
+(`Tyr.GPU.Kernels.flashAttnFwdNew`) and a simple GEMM test kernel.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

@@ -17,3 +17,11 @@ import Tyr.Model.Qwen3ASR.Transcribe
 import Tyr.Model.Qwen3ASR.ForcedAligner
 import Tyr.Model.Qwen3ASR.Weights
 import Tyr.Model.Qwen3ASR.Pretrained
+
+/-! # Qwen3-ASR
+
+Umbrella import for Qwen3-ASR speech recognition in `torch.qwen3asr`: configs,
+Whisper-style frontend, audio encoder, thinker model, offline transcription,
+streaming and realtime transcript assembly, forced alignment, weights and
+pretrained loading.
+-/

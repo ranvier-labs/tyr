@@ -22,6 +22,12 @@
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Codegen.Macros
 
+/-! # Hedgehog linear attention
+
+ThunderKittens-aligned Hedgehog kernel (`Tyr.GPU.Kernels.tkHedgehogFwd`):
+softmax feature maps combined with sliding-window attention.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

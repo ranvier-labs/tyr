@@ -12,3 +12,11 @@ import Tyr.Model.KittenTTS.Model
 import Tyr.Model.KittenTTS.Weights
 import Tyr.Model.KittenTTS.Pretrained
 import Tyr.Model.KittenTTS.ReferenceBridge
+
+/-! # KittenTTS
+
+Umbrella import for the KittenTTS text-to-speech model in `torch.kittentts`:
+configuration and JSON loading, checkpoint access, the ALBERT-encoder/generator
+model, weight loading, pretrained download, and a Python reference bridge for
+parity checks.
+-/

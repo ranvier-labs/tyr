@@ -7,6 +7,12 @@ import Tyr.Model.Qwen35.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen3.5 config loading
+
+Loads the Qwen3.5 text config from a Hugging Face `config.json` or a model
+directory.
+-/
+
 namespace torch.qwen35
 
 open Lean

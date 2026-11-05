@@ -7,6 +7,14 @@
 import Tyr.Basic
 import Tyr.TensorStruct
 
+/-! # Qwen3.5 configuration
+
+`torch.qwen35.Qwen35Config` with per-layer token-mixer kinds
+`torch.qwen35.LayerType` and presets including
+`torch.qwen35.Qwen35Config.qwen35_9B` and
+`torch.qwen35.Qwen35Config.qwen35_35B_A3B`.
+-/
+
 namespace torch.qwen35
 
 /-- Per-layer token-mixer kind used by Qwen3.5 hybrid blocks. -/

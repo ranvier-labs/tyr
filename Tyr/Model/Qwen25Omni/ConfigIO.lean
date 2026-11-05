@@ -7,6 +7,11 @@ import Tyr.Model.Qwen25Omni.Config
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen2.5-Omni config loading
+
+Reads the thinker text config out of a Hugging Face `config.json`.
+-/
+
 namespace torch.qwen25omni
 
 open Lean
