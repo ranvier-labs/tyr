@@ -159,6 +159,17 @@ def testQwen35DenseInitAndForward : IO Unit := do
     "dense forward should return [batch, seq, vocab]"
 
 @[test]
+def testQwen35GreedyCachedEmptyPromptThrows : IO Unit := do
+  let model ← Qwen35ForCausalLM.init tinyDenseCfg
+  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let rejected ←
+    try
+      let _ ← model.generateGreedy tinyDenseCfg ids 1 #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generate should reject an empty prompt before sizing its cache"
+
+@[test]
 def testQwen35DenseGreedyCachedUncachedParity : IO Unit := do
   let model ← Qwen35ForCausalLM.init tinyDenseCfg
   let ids : Tensor { shape := #[1, 4], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[3, 1, 2, 4]) #[1, 4]
@@ -421,7 +432,7 @@ def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
   let embeds := model.embedTokens ids
   let (cos, sin) := Tensor.rotaryFreqs 4 (Config.rotaryDim tinyDenseCfg) tinyDenseCfg.rope_theta
   let cache := Qwen35Model.initCache tinyDenseCfg model.model 8 .CPU
-  let (hidden, cache) ← Qwen35Model.forwardWithCache tinyDenseCfg model.model embeds cos sin cache
+  let (hidden, cache) ← Qwen35Model.forwardWithCache tinyDenseCfg model.model embeds cos sin cache (by decide)
   LeanTest.assertEqual hidden.actualSpec.dtype DType.BFloat16
   LeanTest.assertTrue ((← hidden.toFloatArray).all Float.isFinite)
   for state in cache.recurrentStates do

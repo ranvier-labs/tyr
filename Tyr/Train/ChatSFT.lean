@@ -10,10 +10,9 @@
 
   Divergence from nanochat: `trainLoop` currently consumes only
   `embeddingLr` (scaled by `initLrFrac` and the linear decay multiplier)
-  via a single AdamW optimizer applied to all parameters. The `matrixLr`,
-  `unembeddingLr`, `weightDecay`, and `gradClip` config fields are parsed
-  but unused: there is no Muon/Adam dual-optimizer split, no configurable
-  weight decay, and no gradient clipping yet.
+  via a single AdamW optimizer applied to all parameters. `matrixLr` is
+  reported but not used for training: there is no Muon/Adam dual-optimizer
+  split, no configurable weight decay, and no gradient clipping yet.
 -/
 import Tyr.Torch
 import Tyr.Typed
@@ -39,42 +38,39 @@ open torch.dist
 structure SFTConfig where
   /-- Number of training epochs -/
   numEpochs : Nat := 1
-  /-- Override number of iterations (-1 = use numEpochs) -/
-  numIterations : Int := -1
+  /-- Optimizer steps; `none` derives them from `numEpochs`. -/
+  numIterations : Option Nat := none
   /-- Per-device batch size -/
-  deviceBatchSize : Nat := 4
+  deviceBatchSize : PosNat := 4
   /-- Target examples per optimization step (for gradient accumulation) -/
-  targetExamplesPerStep : Nat := 32
+  targetExamplesPerStep : PosNat := 32
   /-- Learning rate for embedding parameters (Adam) -/
   embeddingLr : Float := 0.2
-  /-- Learning rate for unembedding/LM head parameters (Adam) -/
-  unembeddingLr : Float := 0.004
   /-- Learning rate for matrix parameters (Muon) -/
   matrixLr : Float := 0.02
-  /-- Weight decay for Adam parameters -/
-  weightDecay : Float := 0.0
   /-- Initial LR as fraction of base LR (for warmup) -/
   initLrFrac : Float := 0.02
   /-- Maximum sequence length -/
   maxSeqLen : Nat := 2048
-  /-- Evaluate validation loss every N steps -/
-  evalEvery : Nat := 100
+  /-- Steps between validation losses; the last step is always evaluated. -/
+  evalEvery : StepInterval := 100
   /-- Number of batches for validation loss evaluation -/
-  evalSteps : Nat := 100
-  /-- Evaluate chat metrics every N steps -/
-  evalMetricsEvery : Nat := 200
+  evalSteps : PosNat := 100
   /-- Device to train on -/
   device : Device := Device.CPU
-  /-- Gradient clipping (0 = disabled) -/
-  gradClip : Float := 1.0
   /-- Logging interval (steps) -/
-  logInterval : Nat := 10
-  deriving Repr, Inhabited
+  logInterval : StepInterval := 10
+  deriving Repr
 
-/-- Compute gradient accumulation steps from config -/
-def SFTConfig.gradAccumSteps (cfg : SFTConfig) (worldSize : Nat := 1) : Nat :=
-  let examplesPerStep := cfg.deviceBatchSize * worldSize
-  cfg.targetExamplesPerStep / examplesPerStep
+/-- Forward passes per optimizer step; an error when one step holds fewer
+    examples than a single pass across all ranks. -/
+def SFTConfig.gradAccumSteps (cfg : SFTConfig) (worldSize : Nat := 1) : Except String PosNat :=
+  let examplesPerStep := cfg.deviceBatchSize.val * worldSize
+  let steps := cfg.targetExamplesPerStep.val / examplesPerStep
+  if h : 0 < steps then
+    .ok ⟨steps, h⟩
+  else
+    .error s!"SFT targetExamplesPerStep={cfg.targetExamplesPerStep} is smaller than deviceBatchSize*worldSize={examplesPerStep}"
 
 /-! ## Learning Rate Schedule -/
 
@@ -293,7 +289,7 @@ def sftForward {batch seq vocab : Nat} {d m result : DType} {dev : Device}
 
     The loss of each batch is the masked mean per-token cross entropy; batches
     are weighted by their valid-token counts so the result is the global
-    masked mean over all evaluated tokens. -/
+    masked mean over all evaluated tokens; `none` when no token was valid. -/
 def evalValidationLoss [TensorStruct Params]
     (params : Params)
     (dataFn : IO (SFTBatch (device := .CPU)))
@@ -301,7 +297,7 @@ def evalValidationLoss [TensorStruct Params]
       IO (Σ v : Nat, Tensor { shape := #[b, s, v], dtype := .Float32, device := device }))
     (numSteps : Nat)
     (targetDevice : Device := device)
-    : IO Float := do
+    : IO (Option Float) := do
   if targetDevice != device then
     throw (IO.userError "Validation device differs from the model forward device")
   let params := TensorStruct.detach params
@@ -318,8 +314,8 @@ def evalValidationLoss [TensorStruct Params]
       totalValid := totalValid + batch.numValidTokens
 
   if totalValid == 0 then
-    return 0.0
-  return totalLoss / totalValid.toFloat
+    return none
+  return some (totalLoss / totalValid.toFloat)
 
 /-- Logging callback type -/
 def LogCallback := Nat → Float → Float → Nat → IO Unit
@@ -416,17 +412,13 @@ def trainLoop [TensorStruct P] [FloatingTensorStruct P]
   if cfg.device != device then
     throw (IO.userError "Training device differs from the model forward device")
   let isDistributed ← dist.isInitialized
-  let worldSizeU64 ← if isDistributed then dist.getWorldSize else pure 1
-  let worldSize := worldSizeU64.toNat
+  let worldSize ← if isDistributed then dist.getWorldSize else pure 1
 
   -- Compute number of iterations
-  let numIterations : Nat :=
-    if cfg.numIterations >= 0 then
-      cfg.numIterations.toNat
-    else
-      (numTrainExamples / cfg.targetExamplesPerStep) * cfg.numEpochs
+  let numIterations :=
+    cfg.numIterations.getD ((numTrainExamples / cfg.targetExamplesPerStep.val) * cfg.numEpochs)
 
-  let gradAccumSteps := max 1 (cfg.gradAccumSteps worldSize)
+  let gradAccumSteps := (← IO.ofExcept (cfg.gradAccumSteps worldSize)).val
 
   let mut currentParams ← TensorStruct.makeLeafParams params
   let mut currentOptState := optState
@@ -438,11 +430,11 @@ def trainLoop [TensorStruct P] [FloatingTensorStruct P]
 
     -- Validation evaluation
     if let some valFn := valDataFn then
-      if isLastStep || (step > 0 && step % cfg.evalEvery == 0) then
-        let valLoss ← evalValidationLoss currentParams valFn forwardFn cfg.evalSteps cfg.device
-        callbacks.onValidation step valLoss
-        if valLoss < state.bestValLoss then
-          state := { state with bestValLoss := valLoss }
+      if isLastStep || (step > 0 && cfg.evalEvery.fires step) then
+        if let some valLoss ← evalValidationLoss currentParams valFn forwardFn cfg.evalSteps.val cfg.device then
+          callbacks.onValidation step valLoss
+          if valLoss < state.bestValLoss then
+            state := { state with bestValLoss := valLoss }
 
     if isLastStep then
       break
@@ -493,7 +485,7 @@ def trainLoop [TensorStruct P] [FloatingTensorStruct P]
     }
 
     -- Logging
-    if step % cfg.logInterval == 0 then
+    if cfg.logInterval.fires step then
       let avgLoss := if gradAccumSteps > 0
         then accumLoss / gradAccumSteps.toFloat
         else 0.0

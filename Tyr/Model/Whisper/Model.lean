@@ -52,22 +52,21 @@ def init (dModel nHeads : Nat) (device : Device := .CPU) (dtype : DType := .Floa
   pure { qProjWeight, qProjBias, kProjWeight, kProjBias, vProjWeight, vProjBias, outProjWeight, outProjBias }
 
 /-- Incremental self-attention KV cache for one decoder layer. -/
-structure KVCache (batch nHeads headDim : Nat) (dtype : DType := .Float32) where
-  maxLen : Nat := 0
-  kStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, maxLen, headDim] }
-  vStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, maxLen, headDim] }
-  seq : Nat := 0
+structure KVCache (batch nHeads headDim cap : Nat) (dtype : DType := .Float32) where
+  kStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] }
+  vStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] }
+  cap_pos : 0 < cap
 
 /-- Initialize an empty static-capacity KV cache on `device`. -/
 def initKVCache {batch nHeads headDim : Nat}
     (maxLen : Nat)
     (device : Device := Device.CPU) (dtype : DType := .Float32)
-    [DType.ConstantSupported dtype device] : KVCache (device := device) (dtype := dtype) batch nHeads headDim :=
+    [DType.ConstantSupported dtype device] (h : 0 < maxLen := by omega) : KVCache (device := device) (dtype := dtype) batch nHeads headDim maxLen :=
   let k0 : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, maxLen, headDim] } :=
     zerosFor (dtype := dtype) #[batch, nHeads, maxLen, headDim] false device
   let v0 : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, maxLen, headDim] } :=
     zerosFor (dtype := dtype) #[batch, nHeads, maxLen, headDim] false device
-  { maxLen := maxLen, kStore := k0, vStore := v0, seq := 0 }
+  { kStore := k0, vStore := v0, cap_pos := h }
 
 /-- Project external key/value states once into attention layout.
     Output layout is `[batch, nHeads, kvSeq, headDim]`. -/
@@ -124,11 +123,12 @@ def forwardSelf {batch seq : Nat}
   forwardCross m hdiv x x isCausal
 
 /-- Incremental one-token self-attention step with KV cache update. -/
-def forwardSelfStep {batch : Nat}
+def forwardSelfStep {batch cap : Nat}
     (m : WhisperAttention (device := device) (dtype := dtype) dModel nHeads) (hdiv : nHeads ∣ dModel)
     (x : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] })
-    (cache : KVCache (device := device) (dtype := dtype) batch nHeads (dModel / nHeads))
-    : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } × KVCache (device := device) (dtype := dtype) batch nHeads (dModel / nHeads) :=
+    (cache : KVCache (device := device) (dtype := dtype) batch nHeads (dModel / nHeads) cap)
+    (pos : Nat) (hpos : pos < cap)
+    : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } × KVCache (device := device) (dtype := dtype) batch nHeads (dModel / nHeads) cap :=
   let headDim : Nat := dModel / nHeads
   let q0 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.affine3d x m.qProjWeight m.qProjBias
   let k0 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.affine3d x m.kProjWeight m.kProjBias
@@ -142,64 +142,35 @@ def forwardSelfStep {batch : Nat}
   let kNew : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, 1, headDim] } := transposeAttention k
   let vNew : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, 1, headDim] } := transposeAttention v
 
-  let kStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
+  let kStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] } :=
     Tensor.castLike kNew (cache.kStore)
-  let vStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
+  let vStore : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] } :=
     Tensor.castLike vNew (cache.vStore)
 
-  if cache.seq < cache.maxLen then
-    let kStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
-      Tensor.sliceScatter kStore 2 cache.seq kNew
-    let vStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
-      Tensor.sliceScatter vStore 2 cache.seq vNew
-    let kvLen : Nat := cache.seq + 1
-    let kAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := sliceTyped kStore' 2 0 kvLen
-    let vAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := sliceTyped vStore' 2 0 kvLen
-    let attn : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, 1, headDim] } :=
-      Tensor.attentionGQAQKV
-        (kvHeads := nHeads)
-        qh
-        kAll
-        vAll
-        false
-        true
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, nHeads, headDim] } := fromAttention attn
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.reshape out #[batch, 1, dModel] (by head_split)
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.affine3d out m.outProjWeight m.outProjBias
-    let cache' : KVCache (device := device) (dtype := dtype) batch nHeads headDim := {
-      kStore := kStore'
-      vStore := vStore'
-      seq := kvLen
-      maxLen := cache.maxLen
-    }
-    (out, cache')
-  else
-    let writePos : Nat := if cache.maxLen == 0 then 0 else cache.maxLen - 1
-    let kStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
-      Tensor.sliceScatter kStore 2 writePos kNew
-    let vStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cache.maxLen, headDim] } :=
-      Tensor.sliceScatter vStore 2 writePos vNew
-    let kvLen : Nat := cache.maxLen
-    let kAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := sliceTyped kStore' 2 0 kvLen
-    let vAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := sliceTyped vStore' 2 0 kvLen
-    let attn : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, 1, headDim] } :=
-      Tensor.attentionGQAQKV
-        (kvHeads := nHeads)
-        qh
-        kAll
-        vAll
-        false
-        true
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, nHeads, headDim] } := fromAttention attn
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.reshape out #[batch, 1, dModel] (by head_split)
-    let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.affine3d out m.outProjWeight m.outProjBias
-    let cache' : KVCache (device := device) (dtype := dtype) batch nHeads headDim := {
-      kStore := kStore'
-      vStore := vStore'
-      seq := cache.maxLen
-      maxLen := cache.maxLen
-    }
-    (out, cache')
+  let kStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] } :=
+    Tensor.sliceScatter kStore 2 pos kNew
+  let vStore' : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, cap, headDim] } :=
+    Tensor.sliceScatter vStore 2 pos vNew
+  let kvLen : Nat := pos + 1
+  let kAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := kStore'.slice 2 0 kvLen
+  let vAll : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, kvLen, headDim] } := vStore'.slice 2 0 kvLen
+  let attn : Tensor { dtype := dtype, device := device, shape := #[batch, nHeads, 1, headDim] } :=
+    Tensor.attentionGQAQKV
+      (kvHeads := nHeads)
+      qh
+      kAll
+      vAll
+      false
+      true
+  let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, nHeads, headDim] } := fromAttention attn
+  let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.reshape out #[batch, 1, dModel] (by head_split)
+  let out : Tensor { dtype := dtype, device := device, shape := #[batch, 1, dModel] } := Tensor.affine3d out m.outProjWeight m.outProjBias
+  let cache' : KVCache (device := device) (dtype := dtype) batch nHeads headDim cap := {
+    cap_pos := cache.cap_pos
+    kStore := kStore'
+    vStore := vStore'
+  }
+  (out, cache')
 
 end WhisperAttention
 
@@ -294,15 +265,16 @@ def forward {batch seq encSeq : Nat}
   Tensor.add x2 h7
 
 /-- One-token decoder layer step with incremental self KV cache and precomputed cross KV. -/
-def forwardStepCached {batch encSeq : Nat}
+def forwardStepCached {batch encSeq cap : Nat}
     (m : WhisperDecoderLayer (device := device) (dtype := dtype) cfg)
     (x : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] })
     (crossK : Tensor { dtype := dtype, device := device, shape := #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads] })
     (crossV : Tensor { dtype := dtype, device := device, shape := #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads] })
-    (selfCache : WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads))
-    : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } × WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) :=
+    (selfCache : WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) cap)
+    (pos : Nat) (hpos : pos < cap)
+    : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } × WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) cap :=
   let h0 := m.selfAttnLayerNorm.forward3d x
-  let (h1a, selfCache') := m.selfAttn.forwardSelfStep cfg.decoderHeadsDivide h0 selfCache
+  let (h1a, selfCache') := m.selfAttn.forwardSelfStep cfg.decoderHeadsDivide h0 selfCache pos hpos
   let x1 := Tensor.add x h1a
   let h2 := m.encoderAttnLayerNorm.forward3d x1
   let h3 := m.encoderAttn.forwardWithProjectedKV cfg.decoderHeadsDivide h2 crossK crossV (isCausal := false)
@@ -434,8 +406,8 @@ structure LayerCrossCache (cfg : WhisperConfig) (batch encSeq : Nat) (dtype : DT
   v : Tensor { dtype := dtype, device := device, shape := #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads] }
 
 /-- Per-layer self-attention KV cache for decoder incremental decode. -/
-abbrev LayerKVCache (cfg : WhisperConfig) (batch : Nat) (dtype : DType := .Float32) :=
-  WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads)
+abbrev LayerKVCache (cfg : WhisperConfig) (batch cap : Nat) (dtype : DType := .Float32) :=
+  WhisperAttention.KVCache (device := device) (dtype := dtype) batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) cap
 
 def init (cfg : WhisperConfig) (device : Device := .CPU) (dtype : DType := .Float32) : IO (WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg) := do
   let model ← WhisperModel.init (device := device) (dtype := dtype) cfg
@@ -457,20 +429,28 @@ def decode {batch seq encSeq : Nat}
   let hidden ← m.model.decode inputIds encoderHidden
   pure (Tensor.linear3d hidden m.projOut)
 
+/-- Self-attention KV caches of every decoder layer; `position` counts the
+    tokens written so far. -/
+structure SelfKVCaches (cfg : WhisperConfig) (batch cap : Nat) (dtype : DType := .Float32) where
+  layers : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch cap)
+  position : Nat := 0
+  deriving Inhabited
+
 /-- Initialize one self-attention KV cache per decoder layer. -/
 def initLayerKVCaches {batch : Nat}
     (m : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (maxLen : Nat)
     (device : Device)
     [DType.ConstantSupported dtype device]
-    : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch) :=
-  m.model.decoderLayers.map (fun _ =>
-    WhisperAttention.initKVCache
-      (dtype := dtype) maxLen
-      (batch := batch)
-      (nHeads := cfg.decoderAttentionHeads)
-      (headDim := cfg.dModel / cfg.decoderAttentionHeads)
-      device)
+    (h : 0 < maxLen := by omega)
+    : SelfKVCaches (device := device) (dtype := dtype) cfg batch maxLen :=
+  { layers := m.model.decoderLayers.map (fun _ =>
+      WhisperAttention.initKVCache
+        (dtype := dtype) maxLen
+        (batch := batch)
+        (nHeads := cfg.decoderAttentionHeads)
+        (headDim := cfg.dModel / cfg.decoderAttentionHeads)
+        device (h := h)) }
 
 /-- Precompute cross-attention K/V once per decoder layer for an encoded chunk. -/
 def precomputeCrossCaches {batch encSeq : Nat}
@@ -484,22 +464,22 @@ def precomputeCrossCaches {batch encSeq : Nat}
   pure out
 
 /-- Decode one token step using static self KV caches and precomputed cross K/V. -/
-def decodeStepWithCache {batch encSeq : Nat}
+def decodeStepWithCache {batch encSeq cap : Nat}
     (m : WhisperForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (tokenIds : Tensor { device := device, shape := #[batch, 1], dtype := .Int64 })
-    (position : Nat)
+    (position : Nat) (hpos : position < cap) (hcap : cap ≤ cfg.maxTargetPositions)
     (crossCaches : Array (LayerCrossCache (device := device) (dtype := dtype) cfg batch encSeq))
-    (selfCaches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch))
-    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, cfg.vocabSize] } × Array (LayerKVCache (device := device) (dtype := dtype) cfg batch)) := do
-  if position >= cfg.maxTargetPositions then
-    throw <| IO.userError
-      s!"Whisper decoder position {position} exceeds max_target_positions {cfg.maxTargetPositions}"
+    (selfCaches : SelfKVCaches (device := device) (dtype := dtype) cfg batch cap)
+    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, cfg.vocabSize] } × SelfKVCaches (device := device) (dtype := dtype) cfg batch cap) := do
   let tokEmb : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } := Tensor.embedding tokenIds m.model.decoderTokenEmbedding
-  let pos : Tensor { dtype := dtype, device := device, shape := #[1, cfg.dModel] } := sliceTyped m.model.decoderPositionalEmbedding 0 position 1
+  let pos : Tensor { dtype := dtype, device := device, shape := #[1, cfg.dModel] } :=
+    m.model.decoderPositionalEmbedding.slice 0 position 1 (by simp) (by simp; omega)
   let posB : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } :=
     Tensor.expand (Tensor.reshape pos #[1, 1, cfg.dModel]) #[batch, 1, cfg.dModel]
   let mut h : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } := Tensor.add tokEmb posB
-  let mut nextCaches := selfCaches
+  if selfCaches.position != position then
+    throw <| IO.userError s!"Whisper cache position {selfCaches.position} does not match decode position {position}"
+  let mut nextCaches := selfCaches.layers
   for i in [:m.model.decoderLayers.size] do
     let layer ←
       match m.model.decoderLayers[i]? with
@@ -509,21 +489,17 @@ def decodeStepWithCache {batch encSeq : Nat}
       match nextCaches[i]? with
       | some c => pure c
       | none => throw <| IO.userError s!"missing Whisper self KV cache at index {i}"
-    if selfCache.seq != position then
-      throw <| IO.userError s!"Whisper cache position {selfCache.seq} does not match decode position {position}"
-    if selfCache.seq >= selfCache.maxLen then
-      throw <| IO.userError s!"Whisper self KV cache capacity {selfCache.maxLen} exhausted"
     let crossCache ←
       match crossCaches[i]? with
       | some c => pure c
       | none => throw <| IO.userError s!"missing Whisper cross KV cache at index {i}"
-    let (hNext, cacheNext) := layer.forwardStepCached h crossCache.k crossCache.v selfCache
+    let (hNext, cacheNext) := layer.forwardStepCached h crossCache.k crossCache.v selfCache position hpos
     h := hNext
     nextCaches := nextCaches.set! i cacheNext
   let hiddenNorm : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.dModel] } := m.model.decoderLayerNorm.forward3d h
   let logits3 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.vocabSize] } := Tensor.linear3d hiddenNorm m.projOut
   let logits2 : Tensor { dtype := dtype, device := device, shape := #[batch, cfg.vocabSize] } := Tensor.reshape logits3 #[batch, cfg.vocabSize]
-  pure (logits2, nextCaches)
+  pure (logits2, { layers := nextCaches, position := position + 1 })
 
 end WhisperForConditionalGeneration
 

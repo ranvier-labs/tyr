@@ -122,11 +122,10 @@ extern "C" {
  * This should be called with LOCAL_RANK before NCCL collectives to avoid
  * duplicate-device communicator initialization.
  */
-lean_object* lean_torch_dist_set_cuda_device(uint64_t device) {
+lean_object* lean_torch_dist_set_cuda_device(b_lean_obj_arg device_obj) {
   return tyr::checkedIoCall("lean_torch_dist_set_cuda_device", [&] {
       try {
-          if (device > static_cast<uint64_t>(std::numeric_limits<c10::DeviceIndex>::max()))
-              throw std::invalid_argument("CUDA device index exceeds the native DeviceIndex range");
+          const uint64_t device = tyr::natTo<c10::DeviceIndex>(device_obj, "CUDA device index");
   #if TYR_HAS_NCCL
           if (!torch::cuda::is_available()) {
               return lean_io_result_mk_ok(lean_box(0));
@@ -227,7 +226,7 @@ lean_object* lean_torch_dist_get_rank() {
           return lean_io_result_mk_error(lean_mk_io_user_error(
               lean_mk_string("Process group not initialized")));
       }
-      return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_rank)));
+      return lean_io_result_mk_ok(lean_uint64_to_nat(static_cast<uint64_t>(g_rank)));
   });
 }
 
@@ -241,7 +240,7 @@ lean_object* lean_torch_dist_get_world_size() {
           return lean_io_result_mk_error(lean_mk_io_user_error(
               lean_mk_string("Process group not initialized")));
       }
-      return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_world_size)));
+      return lean_io_result_mk_ok(lean_uint64_to_nat(static_cast<uint64_t>(g_world_size)));
   });
 }
 

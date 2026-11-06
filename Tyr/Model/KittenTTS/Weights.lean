@@ -229,12 +229,15 @@ private def loadKittenAlbertFromCheckpoint
         ffnOutput := linearFromTensors (← checkedWeight layer.ffn_output.weight) (← checkedWeight layer.ffn_output.bias)
       }
       pure { layers }
+  let ⟨hGroups⟩ ← if h : groups.size = cfg.plbert.numHiddenGroups then pure (PLift.up h) else
+    throw <| IO.userError
+      s!"KittenTTS checkpoint has {groups.size} ALBERT layer groups, config num_hidden_groups={cfg.plbert.numHiddenGroups}"
   let encoder : KittenAlbertEncoder (device := device) cfg.plbert := {
     embeddingHiddenMappingIn :=
       linearFromTensors
         (← checkedWeight weights.encoder.embedding_hidden_mapping_in.weight)
         (← checkedWeight weights.encoder.embedding_hidden_mapping_in.bias)
-    groups := groups
+    groups := ⟨groups, hGroups⟩
   }
   let pooler : LinearNorm (device := device) cfg.plbert.hiddenSize cfg.plbert.hiddenSize :=
     linearFromTensors (← checkedWeight weights.pooler.weight) (← checkedWeight weights.pooler.bias)
@@ -269,8 +272,12 @@ private def loadTextEncoderFromCheckpoint
 private def loadDurationEncoderFromCheckpoint
     (weights : KokoroCheckpoint.WeightsPredictorTextencoder)
     (cfg : KittenTTSConfig)
-    : IO (DurationEncoder (device := device) cfg) := do pure {
-      lstms := #[
+    : IO (DurationEncoder (device := device) cfg) := do
+  let ⟨hLayers⟩ ← if h : cfg.nLayer = 3 then pure (PLift.up h) else
+    throw <| IO.userError
+      s!"KittenTTS checkpoint has 3 duration-encoder layers, config n_layer={cfg.nLayer}"
+  pure {
+      lstms := ⟨#[
         biLSTMFromTensors
           (← checkedWeight weights.lstms.i0.weight_ih_l0)
           (← checkedWeight weights.lstms.i0.weight_hh_l0)
@@ -298,12 +305,12 @@ private def loadDurationEncoderFromCheckpoint
           (← checkedWeight weights.lstms.i4.weight_hh_l0_reverse)
           (← checkedWeight weights.lstms.i4.bias_ih_l0_reverse)
           (← checkedWeight weights.lstms.i4.bias_hh_l0_reverse)
-      ]
-      norms := #[
+      ], by rw [hLayers]; rfl⟩
+      norms := ⟨#[
         adaLayerNormFromLinear (← checkedWeight weights.lstms.i1.fc.weight) (← checkedWeight weights.lstms.i1.fc.bias),
         adaLayerNormFromLinear (← checkedWeight weights.lstms.i3.fc.weight) (← checkedWeight weights.lstms.i3.fc.bias),
         adaLayerNormFromLinear (← checkedWeight weights.lstms.i5.fc.weight) (← checkedWeight weights.lstms.i5.fc.bias)
-      ]
+      ], by rw [hLayers]; rfl⟩
     }
 
 private def loadProsodyPredictorFromCheckpoint

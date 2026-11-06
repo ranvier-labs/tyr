@@ -115,26 +115,27 @@ def testQwen3TTSBFloat16IncrementalCache : IO Unit := do
     let x := inputs.castDType dtype
     let full := layer.forward x cos sin
     LeanTest.assertEqual full.actualSpec.dtype x.actualSpec.dtype "Full Qwen layer retains model dtype"
-    let fresh : qwen.QwenAttention.KVCache 1 1 4 dtype := qwen.QwenAttention.initKVCache 5 (dtype := dtype)
+    let fresh : qwen.QwenAttention.KVCache 1 1 4 5 dtype := qwen.QwenAttention.initKVCache 5 (dtype := dtype)
     let mut cache := fresh
     -- Three prompt tokens followed by two decode tokens exercise the Talker cache path.
     let mut outputs : Array (Sigma (fun shape => Tensor { shape := shape, dtype, device := .CPU })) := #[]
-    for pos in [:3] do
+    for hp : pos in [:3] do
       let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos 1 #[1, 1, 8])
         (Tensor.sliceChecked cos 0 pos 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos 1 #[1, 2]) cache
+        pos (by have := hp.upper; simp at this; omega)
       LeanTest.assertEqual out.actualSpec.dtype x.actualSpec.dtype "Prefill step retains model dtype"
       cache := next
       outputs := outputs.push out.packShape
     let prefixCache := cache
     let prefixK ← Tensor.toFloatArray prefixCache.kStore
     let prefixV ← Tensor.toFloatArray prefixCache.vStore
-    for pos in [3:5] do
+    for hp : pos in [3:5] do
       let (out, next) := layer.forwardStep (Tensor.sliceChecked x 1 pos 1 #[1, 1, 8])
         (Tensor.sliceChecked cos 0 pos 1 #[1, 2]) (Tensor.sliceChecked sin 0 pos 1 #[1, 2]) cache
+        pos (by have := hp.upper; simp at this; omega)
       LeanTest.assertEqual out.actualSpec.dtype x.actualSpec.dtype "Decode step retains model dtype"
       cache := next
       outputs := outputs.push out.packShape
-    LeanTest.assertEqual cache.seq 5 "All prompt and decode tokens enter the cache"
     LeanTest.assertEqual cache.kStore.actualSpec.dtype x.actualSpec.dtype "K cache follows projected key dtype"
     LeanTest.assertEqual cache.vStore.actualSpec.dtype x.actualSpec.dtype "V cache follows projected value dtype"
     LeanTest.assertEqual (← Tensor.toFloatArray prefixCache.kStore) prefixK
@@ -168,6 +169,20 @@ def testQwen3TTSBFloat16Generation : IO Unit := do
   for i in [:codes.size] do
     let upper := if i % cfg.numCodeGroups == 0 then cfg.vocabSize else cfg.codePredictorConfig.vocabSize
     LeanTest.assertTrue (codes[i]!.toNat < upper) "Generated codes stay within their vocabulary"
+
+@[test]
+def testQwen3TTSGreedyCodesRegression : IO Unit := do
+  -- Greedy codes for a fixed seed. Both the talker and its code predictor decode
+  -- through KV caches, so a change here means cached generation changed.
+  torch.manualSeed 4242
+  let cfg := tinyCfg.talkerConfig
+  let talker ← TalkerForConditionalGeneration.init cfg
+  let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := (Tensor.fromInt64Array #[3, 1, 2]).reshape #[1, 3]
+  let prompt := TalkerModel.buildInputsFromText cfg talker.model ids
+  let out ← TalkerForConditionalGeneration.generateCodesWithLengths cfg talker prompt
+    5 5 1.0 1 1.0 1.0 1 1.0 1.2 0
+  LeanTest.assertEqual (← Tensor.toUInt64Array out.codes)
+    #[85, 63, 9, 39, 99, 24, 27, 21, 115, 55, 9, 21, 18, 10, 9, 21, 77, 4, 9, 39]
 
 @[test]
 def testQwen3TTSGenerateFromText : IO Unit := do
@@ -339,9 +354,13 @@ def testQwen3TTSStreamingApi : IO Unit := do
   LeanTest.assertEqual empty.codes.runtimeShape #[1, 0, cfg.numCodeGroups]
   LeanTest.assertEqual empty.codes.actualSpec.dtype DType.Int64
   LeanTest.assertEqual empty.lengths #[0]
-  let noGroups := { cfg with numCodeGroups := 0 }
-  let model ← TalkerForConditionalGeneration.init noGroups
-  let prompt := TalkerModel.buildInputsFromText noGroups model.model (Tensor.fullInt #[1, 2] 1)
-  let frame ← TalkerForConditionalGeneration.generateFrame noGroups model prompt
-  LeanTest.assertEqual frame.codes.runtimeShape #[1, 0]
-  LeanTest.assertEqual frame.codes.actualSpec.dtype DType.Int64
+
+@[test] def testQwen3TTSConfigRejectsZeroCodeGroups : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := (dir / "config.json").toString
+  IO.FS.writeFile path "{\"talker_config\": {\"num_code_groups\": 0}}"
+  let rejected ←
+    try
+      let _ ← Qwen3TTSConfig.loadFromFile path
+      pure false
+    catch e => pure ((toString e).contains "num_code_groups")
+  LeanTest.assertTrue rejected "a talker without code groups is rejected where the config is loaded"
