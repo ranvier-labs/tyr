@@ -40,42 +40,57 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
     let cross ← model.precomputeCrossCaches encoded
     let initial := model.initLayerKVCaches (batch := 1) 4 .CPU
     let mut caches := initial
-    for pos in [:4] do
+    for h : pos in [:4] do
       let tok := tokens.sliceChecked 1 pos 1 #[1, 1]
-      let (actual, next) ← model.decodeStepWithCache (encSeq := 3) tok pos cross caches
+      let (actual, next) ← model.decodeStepWithCache (encSeq := 3) tok pos h.upper (by decide) cross caches
       close actual ((expected.sliceChecked 1 pos 1 #[1, 1, 16]).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
       LeanTest.assertEqual actual.actualSpec.dtype expected.actualSpec.dtype
       caches := next
-    let some untouched := initial[0]? | throw (IO.userError "missing initial cache")
-    LeanTest.assertEqual untouched.seq 0
+    LeanTest.assertEqual caches.position 4 "every decoded token advances the cache position"
+    LeanTest.assertEqual initial.position 0
+    let some untouched := initial.layers[0]? | throw (IO.userError "missing initial cache")
     let stored ← untouched.kStore.toFloatArray
     LeanTest.assertTrue (stored.all (· == 0)) "incremental updates must preserve the input cache snapshot"
-    let (again, _) ← model.decodeStepWithCache (encSeq := 3) (tokens.sliceChecked 1 0 1 #[1, 1]) 0 cross initial
+    let (again, _) ← model.decodeStepWithCache (encSeq := 3) (tokens.sliceChecked 1 0 1 #[1, 1]) 0 (by decide) (by decide) cross initial
     close again ((expected.sliceChecked 1 0 1 #[1, 1, 16]).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
 
-@[test] def testWhisperCacheCapacityAndPositionErrors : IO Unit := do
+@[test] def testWhisperCachePositionErrors : IO Unit := do
   let model ← WhisperForConditionalGeneration.init cfg
   let encoded ← model.encode features (by decide)
   let cross ← model.precomputeCrossCaches encoded
-  let caches := model.initLayerKVCaches (batch := 1) 1 .CPU
+  let caches := model.initLayerKVCaches (batch := 1) 2 .CPU
   let tok := tokens.sliceChecked 1 0 1 #[1, 1]
-  let (_, filled) ← model.decodeStepWithCache (encSeq := 3) tok 0 cross caches
-  let fullRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 cross filled
-    pure false
-  catch e => pure ((toString e).contains "capacity")
-  LeanTest.assertTrue fullRejected
   let positionRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 cross caches
+    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 (by decide) (by decide) cross caches
     pure false
   catch e => pure ((toString e).contains "position")
   LeanTest.assertTrue positionRejected
-  let empty := model.initLayerKVCaches (batch := 1) 0 .CPU
-  let emptyRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 0 cross empty
-    pure false
-  catch e => pure ((toString e).contains "capacity")
-  LeanTest.assertTrue emptyRejected
+
+set_option linter.unusedVariables false in
+example (model : WhisperForConditionalGeneration (device := .CPU) cfg)
+    (tok : Tensor { shape := #[1, 1], dtype := .Int64, device := .CPU })
+    (cross : Array (WhisperForConditionalGeneration.LayerCrossCache (device := .CPU) cfg 1 3))
+    (caches : WhisperForConditionalGeneration.SelfKVCaches (device := .CPU) cfg 1 1) : True := by
+  have := model.decodeStepWithCache tok 0 (by omega) (by decide) cross caches
+  fail_if_success
+    have := model.decodeStepWithCache tok 1 (by omega) (by decide) cross caches
+  trivial
+
+@[test] def testWhisperConfigRejectsZeroTargetPositions : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := (dir / "config.json").toString
+  IO.FS.writeFile path "{\"max_target_positions\": 0}"
+  let rejected ←
+    try
+      let _ ← WhisperConfig.loadFromFile path
+      pure false
+    catch e => pure ((toString e).contains "max_target_positions")
+  LeanTest.assertTrue rejected "a zero decoder cache capacity is rejected where the config is loaded"
+
+set_option linter.unusedVariables false in
+example : True := by
+  fail_if_success
+    have := WhisperAttention.initKVCache (batch := 1) (nHeads := 1) (headDim := 4) 0
+  trivial
 
 @[test] def testWhisperLengthAndHeadValidation : IO Unit := do
   let model ← WhisperForConditionalGeneration.init cfg
@@ -105,7 +120,7 @@ private def roundTrip {α : Type} [TensorStruct α] (value : α) (dir : String) 
   close (← model.decode tokens encoded) (← restored.decode tokens other) 0
 
 @[test] def testWhisperWaveformGreedyBeamAndSampling : IO Unit := do
-  let audioCfg := { cfg with maxSourcePositions := 16, maxTargetPositions := 16, eosTokenId := 15 }
+  let audioCfg := { cfg with maxSourcePositions := 16, maxTargetPositions := 16, eosTokenId := 15, maxTargetPositionsPos := by decide }
   let model ← WhisperForConditionalGeneration.init audioCfg
   let model := TensorStruct.detach model
   let norm : LayerNorm 8 .Float32 := {

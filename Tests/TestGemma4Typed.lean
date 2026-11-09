@@ -81,11 +81,12 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
   let (sc, ss) := Tensor.rotaryFreqs 7 cfg.head_dim cfg.sliding_rope_theta
   let (fc, fs) := Tensor.rotaryFreqs 7 (Config.fullHeadDim cfg) cfg.full_rope_theta
   let cache := m.model.initCache cfg 7 .CPU
-  let (prefill, initial) := m.model.forwardWithCache cfg (ids.sliceChecked 1 0 3 #[1, 3]) cache sc ss fc fs
+  let (prefill, initial) := m.model.forwardWithCache cfg (ids.sliceChecked 1 0 3 #[1, 3]) cache (by decide) sc ss fc fs
   close prefill (expected.sliceChecked 1 0 3 #[1, 3, cfg.hidden_size])
   let mut cache := initial
-  for pos in [3:7] do
-    let (out, next) := m.model.forwardStep cfg (ids.sliceChecked 1 pos 1 #[1, 1]) pos cache sc ss fc fs
+  for hp : pos in [3:7] do
+    let (out, next) := m.model.forwardStep cfg (ids.sliceChecked 1 pos 1 #[1, 1]) pos
+      (by have := hp.upper; simp at this; omega) cache sc ss fc fs
     close out (expected.sliceChecked 1 pos 1 #[1, 1, cfg.hidden_size])
     cache := next
 
@@ -107,6 +108,24 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
     LeanTest.assertEqual plain.1 10
     LeanTest.assertEqual (← plain.2.toUInt64Array) (← streamed.2.toUInt64Array)
     LeanTest.assertEqual (← steps.get).size 3
+
+@[test] def testGemma4EmptyPromptAndEmptyForward : IO Unit := do
+  let m := textModel cfg
+  let empty : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let rejected ←
+    try
+      let _ ← m.generate cfg empty 1 .greedy #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generate should reject an empty prompt before sizing its cache"
+  -- Shared-KV layers have no source K/V to share in an empty sequence.
+  LeanTest.assertEqual (m.forward cfg empty).runtimeShape #[1, 0, cfg.vocab_size]
+  let embeds := m.embedTokens cfg empty
+  let perLayer := m.model.computePerLayerInputs cfg empty embeds
+  let noMask : Tensor { shape := #[1, 0, 0], dtype := .Int64, device := .CPU } := Tensor.fullInt #[1, 0, 0] 0
+  LeanTest.assertEqual
+    (m.forwardEmbedsWithPerLayerInputsBidirectionalVision cfg empty embeds perLayer noMask noMask).runtimeShape
+    #[1, 0, cfg.vocab_size]
 
 @[noinline, nospecialize]
 private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String) : IO α := do
@@ -145,7 +164,7 @@ private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String)
   let mut expected := qwen35.zerosDynamic #[2, 4]
   let expertIds ← indices.toUInt64Array
   let scales ← weights.toFloatArray
-  for token in [:2] do
+  for ht : token in [:2] do
     let row := x.sliceChecked 0 token 1 #[1, 4]
     let mut sum := qwen35.zerosDynamic #[1, 4]
     for slot in [:2] do
@@ -157,6 +176,7 @@ private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String)
       sum := Tensor.add sum (Tensor.mulScalar
         (Tensor.linear (Tensor.mul (Tensor.gelu g) u) dw) scales[token * 2 + slot]!)
     expected := Tensor.sliceScatter expected 0 token sum
+      (_bound := by have := ht.upper; simp at this ⊢; omega)
   close actual expected 1e-6
 
 private def vlCfg : VLConfig := {

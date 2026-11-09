@@ -870,6 +870,18 @@ def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
   LeanTest.assertEqual toks.size outSeq "generated token tensor should match reported output sequence length"
 
 @[test]
+def testQwen3ASRGreedyCachedEmptyPromptThrows : IO Unit := do
+  let model ← Qwen3ASRForConditionalGeneration.init tinyCfg
+  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let noFeatures : Option (Tensor { shape := #[1, tinyCfg.thinkerConfig.audioConfig.numMelBins, 0], dtype := .Float32, device := .CPU }) := none
+  let rejected ←
+    try
+      let _ ← model.generateGreedy ids noFeatures none 1 #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generateGreedy should reject an empty prompt before sizing its cache"
+
+@[test]
 def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
@@ -902,6 +914,35 @@ def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let toksCached ← Tensor.toUInt64Array flatCached
   let toksUncached ← Tensor.toUInt64Array flatUncached
   LeanTest.assertEqual toksCached toksUncached "cached and uncached generation should produce identical token ids"
+
+@[test]
+def testQwen3ASRGreedyCachedMatchesUncachedWithTrainedHead : IO Unit := do
+  -- Unlike the zeroed-head tests, these logits depend on the cached keys and values.
+  torch.manualSeed 2025
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : Nat := 1
+  let frames : Nat := 32
+  let audioSeq : Nat := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : Nat := audioSeq + 2
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let mut idsVals : Array Int64 := #[]
+  for _ in [:audioSeq] do
+    idsVals := idsVals.push aTok
+  idsVals := idsVals.push 7
+  idsVals := idsVals.push 11
+  let inputIds : Tensor { shape := #[batch, promptSeq], dtype := .Int64, device := .CPU } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? idsVals #[batch, promptSeq]))
+  let mel ← Tensor.randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let fmask : Tensor { shape := #[batch, frames], dtype := .Int64, device := .CPU } := Tensor.fullInt #[batch, frames] 1
+
+  let outCached ← model.generateGreedy inputIds (some mel) (some fmask) 6 #[]
+  let outUncached ← model.generateGreedyUncached inputIds (some mel) (some fmask) 6 #[]
+  LeanTest.assertEqual outCached.1 outUncached.1 "cached and uncached generation should produce same output length"
+  let toksCached ← Tensor.toUInt64Array (Tensor.reshape outCached.2 #[outCached.1])
+  let toksUncached ← Tensor.toUInt64Array (Tensor.reshape outUncached.2 #[outUncached.1])
+  LeanTest.assertEqual toksCached toksUncached "cached and uncached generation should produce identical token ids"
+  LeanTest.assertTrue ((toksCached.extract promptSeq toksCached.size).any (· != 0))
+    "a trained head generates tokens that depend on the logits"
 
 @[test]
 def testQwen3ASRGreedyCachedMatchesUncachedWhenAudioTokenIsGenerated : IO Unit := do
