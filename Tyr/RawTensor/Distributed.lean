@@ -32,15 +32,15 @@ opaque initProcessGroup (backend masterAddr : @& String) (masterPort rank worldS
 /-- Set the current CUDA device for this process (typically LOCAL_RANK).
     Indices outside the native DeviceIndex range fail on every build. -/
 @[extern "lean_torch_dist_set_cuda_device"]
-opaque setCudaDevice (device : UInt64) : IO Unit
+opaque setCudaDevice (device : @& Nat) : IO Unit
 
 /-- Get the rank of this process -/
 @[extern "lean_torch_dist_get_rank"]
-opaque getRank : IO UInt64
+opaque getRank : IO Nat
 
 /-- Get the world size (total number of processes) -/
 @[extern "lean_torch_dist_get_world_size"]
-opaque getWorldSize : IO UInt64
+opaque getWorldSize : IO Nat
 
 /-- Check if distributed is initialized -/
 @[extern "lean_torch_dist_is_initialized"]
