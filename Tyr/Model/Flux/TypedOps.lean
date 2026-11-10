@@ -7,7 +7,7 @@ namespace torch.flux
 
 variable {device : Device} {dtype : DType}
 def randomWeight (s : Shape) (device : Device := .CPU) (dtype : DType := .Float32) : IO (Tensor { dtype := dtype, device := device, shape := s }) := do
-  IO.ofExcept ((← Tensor.randn (device := device) s).castDType? dtype)
+  pure ((← Tensor.randn (device := device) s).castDType dtype)
 
 def zerosWeight (s : Shape) (device : Device := .CPU) (dtype : DType := .Float32)
     [DType.ConstantSupported dtype device] : Tensor { dtype := dtype, device := device, shape := s } :=
@@ -24,9 +24,6 @@ def initLayerNorm (dim : Nat) (eps : Float := 1e-5) (train : Bool := true) (devi
     pure { weight := (← weight.parameter), bias := (← bias.parameter), eps := ⟨eps⟩ }
   else
     pure { weight, bias, eps := ⟨eps⟩ }
-
-def sliceTyped {s : Shape} {d : DType} (x : Tensor { device := device, shape := s, dtype := d }) (dim : Nat) (start len : Nat) : Tensor { device := device, shape := (s.set! dim len), dtype := d } :=
-  x.sliceChecked dim start len (s.set! dim len)
 
 def transposeAttention {b s h d : Nat} {dt : DType} (x : Tensor { device := device, shape := #[b, s, h, d], dtype := dt }) : Tensor { device := device, shape := #[b, h, s, d], dtype := dt } := x.transpose 1 2
 

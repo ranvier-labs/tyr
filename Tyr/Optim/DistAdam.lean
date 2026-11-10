@@ -176,13 +176,11 @@ private def firstDimShardShape (s : Shape) (worldSize : Nat) : Shape :=
   else
     #[s[0]! / worldSize] ++ s[1:].toArray
 
-/-- Slice the leading axis of a tensor to `[start, start + len)`, re-validating
-    the runtime handle against the computed target shape. -/
+/-- Slice the leading axis of a tensor to `[start, start + len)`; the result is
+    admitted at the caller's target shape. -/
 private def sliceFirstDim {σ : StaticSpec} (t : Tensor σ) (start len : Nat)
-    (shape' : Shape) : IO (Tensor (σ.withShape shape')) := do
-  match Tensor.ofRaw (RawTensor.slice t.raw 0 start len) with
-  | .ok r => pure r
-  | .error message => throw (IO.userError s!"DistAdam.stepDistributed slice: {message}")
+    (shape' : Shape) : Tensor (σ.withShape shape') :=
+  Tensor.ofRaw! (RawTensor.slice t.raw 0 start len)
 
 def stepDistributed {σ : StaticSpec} [DType.RealFloating σ.dtype] (param : Tensor σ) (grad : Tensor σ) (state : ParamState σ)
     (cfg : Config) (lrMul : Float := 1.0) (wdMul : Float := 1.0) : IO (Tensor σ × ParamState σ) := do
@@ -193,8 +191,8 @@ def stepDistributed {σ : StaticSpec} [DType.RealFloating σ.dtype] (param : Ten
   if !isDist then
     return (← stepSingle param grad state cfg lrMul wdMul)
 
-  let worldSize := (← dist.getWorldSize).toNat
-  let rank := (← dist.getRank).toNat
+  let worldSize ← dist.getWorldSize
+  let rank ← dist.getRank
   if worldSize <= 1 then
     return (← stepSingle param grad state cfg lrMul wdMul)
 
@@ -218,18 +216,16 @@ def stepDistributed {σ : StaticSpec} [DType.RealFloating σ.dtype] (param : Ten
   let localShape := firstDimShardShape σ.shape worldSize
 
   -- 1) materialize local parameter/state slices on the parameter device
-  let paramLocal ← sliceFirstDim param start localRows localShape
+  let paramLocal := sliceFirstDim param start localRows localShape
   let expAvgBase := state.expAvg
   let expAvgSqBase := state.expAvgSq
-  let expAvgLocal ← sliceFirstDim expAvgBase start localRows localShape
-  let expAvgSqLocal ← sliceFirstDim expAvgSqBase start localRows localShape
+  let expAvgLocal := sliceFirstDim expAvgBase start localRows localShape
+  let expAvgSqLocal := sliceFirstDim expAvgSqBase start localRows localShape
 
   -- 2) reduce-scatter averaged gradient shard
   let gradLocal := (← dist.reduceScatter worldSize grad .avg)
   let gradLocal : Tensor (σ.withShape localShape) ←
-    match Tensor.ofRaw gradLocal.raw with
-    | .ok t => pure t
-    | .error message => throw (IO.userError s!"DistAdam.stepDistributed gradient shard: {message}")
+    pure (Tensor.ofRaw! gradLocal.raw)
   let g := Tensor.detach gradLocal
 
   -- 3) local Adam update on shard
@@ -257,9 +253,7 @@ def stepDistributed {σ : StaticSpec} [DType.RealFloating σ.dtype] (param : Ten
   -- 4) all-gather updated local shard and optimizer shards back to replicated form
   let gatherAs (label : String) (shard : Tensor (σ.withShape localShape)) : IO (Tensor σ) := do
     let gathered ← dist.allGather worldSize shard
-    match Tensor.ofRaw (σ := σ) gathered.raw with
-    | .ok t => pure t
-    | .error message => throw (IO.userError s!"DistAdam.stepDistributed {label}: {message}")
+    pure (Tensor.ofRaw! (σ := σ) gathered.raw)
   let gatheredParam ← gatherAs "parameter" newLocalParam
   let gatheredExpAvg ← gatherAs "first moment" newExpAvg
   let gatheredExpAvgSq ← gatherAs "second moment" newExpAvgSq

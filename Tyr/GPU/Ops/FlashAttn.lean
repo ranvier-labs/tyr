@@ -89,7 +89,7 @@ def dispatchRoute
     This routes through a torch-registered op (`tyr::flash_attn`) so autograd remains native.
     The indexed adapter checks that native output metadata matches the query. -/
 @[inline] def flashAttn
-    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType}
+    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType} [DType.RealFloating d]
     (query : Query (device := device) batch nHead qSeq headDim d)
     (key : KeyValue (device := device) batch nKvHead kvSeq headDim d)
     (value : KeyValue (device := device) batch nKvHead kvSeq headDim d)
@@ -97,8 +97,9 @@ def dispatchRoute
     (isCausal : Bool := false)
     (scale : Option Float := none)
     (enableGqa : Bool := false)
+    (_heads : Tensor.AttentionHeads nHead nKvHead enableGqa := by attention_heads)
     : Query (device := device) batch nHead qSeq headDim d :=
-  Tensor.flashAttention query key value enableGqa attnMask isCausal scale
+  Tensor.flashAttention query key value enableGqa attnMask isCausal scale (_heads := _heads)
 
 /-- Effectful FlashAttention/SDPA. Training uses the configured dropout;
 evaluation passes zero dropout to the native IO operation. -/
@@ -117,7 +118,7 @@ evaluation passes zero dropout to the native IO operation. -/
 
 /-- Alias matching PyTorch naming. -/
 @[inline] def scaledDotProductAttention
-    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType}
+    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType} [DType.RealFloating d]
     (query : Query (device := device) batch nHead qSeq headDim d)
     (key : KeyValue (device := device) batch nKvHead kvSeq headDim d)
     (value : KeyValue (device := device) batch nKvHead kvSeq headDim d)
@@ -125,8 +126,9 @@ evaluation passes zero dropout to the native IO operation. -/
     (isCausal : Bool := false)
     (scale : Option Float := none)
     (enableGqa : Bool := false)
+    (_heads : Tensor.AttentionHeads nHead nKvHead enableGqa := by attention_heads)
     : Query (device := device) batch nHead qSeq headDim d :=
-  flashAttn query key value attnMask isCausal scale enableGqa
+  flashAttn query key value attnMask isCausal scale enableGqa (_heads := _heads)
 
 /-- Effectful alias matching PyTorch naming, with explicit training mode. -/
 @[inline] def scaledDotProductAttentionIO
@@ -144,7 +146,7 @@ evaluation passes zero dropout to the native IO operation. -/
 
 /-- Typed API returning both the dispatch route and the output. -/
 def flashAttnWithRoute
-    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType}
+    {batch nHead nKvHead qSeq kvSeq headDim : Nat} {d : DType} [DType.RealFloating d]
     (query : Query (device := device) batch nHead qSeq headDim d)
     (key : KeyValue (device := device) batch nKvHead kvSeq headDim d)
     (value : KeyValue (device := device) batch nKvHead kvSeq headDim d)
@@ -152,9 +154,10 @@ def flashAttnWithRoute
     (isCausal : Bool := false)
     (scale : Option Float := none)
     (enableGqa : Bool := false)
+    (_heads : Tensor.AttentionHeads nHead nKvHead enableGqa := by attention_heads)
     : DispatchRoute × Query (device := device) batch nHead qSeq headDim d :=
   let route := dispatchRoute query key value attnMask 0.0 isCausal scale enableGqa
-  let out := flashAttn query key value attnMask isCausal scale enableGqa
+  let out := flashAttn query key value attnMask isCausal scale enableGqa (_heads := _heads)
   (route, out)
 
 /-- Effectful attention and its route. The descriptor uses the same effective
@@ -194,11 +197,6 @@ abbrev DynOut :=
         Sigma (fun headDim =>
           SomeDTypeTensor #[batch, nHead, qSeq, headDim] device))))
 
-private def checkedRaw {σ : StaticSpec} (label : String) (raw : RawTensor) : IO (Tensor σ) :=
-  match Tensor.ofRaw raw with
-  | .ok tensor => pure tensor
-  | .error message => throw <| IO.userError s!"flashAttnDyn: {label}: {message}"
-
 private def parseQKVDyn (qDyn kDyn vDyn : RawTensor) : IO (PackedQKV (device := qDyn.device)) := do
   let device := qDyn.device
   let qShape := qDyn.runtimeShape
@@ -234,9 +232,16 @@ private def parseQKVDyn (qDyn kDyn vDyn : RawTensor) : IO (PackedQKV (device := 
     throw <| IO.userError s!"flashAttnDyn: head_dim mismatch q={headDim} k={kHeadDim} v={vHeadDim}"
 
   let dtype := qDyn.dtype
-  let q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype, device := device } ← checkedRaw "query" qDyn
-  let k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } ← checkedRaw "key" kDyn
-  let v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } ← checkedRaw "value" vDyn
+  if !(kDyn.dtype == dtype && vDyn.dtype == dtype) then
+    throw <| IO.userError s!"flashAttnDyn: dtype mismatch q={dtype} k={kDyn.dtype} v={vDyn.dtype}"
+  if !(kDyn.device == device && vDyn.device == device) then
+    throw <| IO.userError "flashAttnDyn: query, key and value must share a device"
+  let q : Tensor { shape := #[batch, nHead, qSeq, headDim], dtype := dtype, device := device } :=
+    Tensor.ofRaw! qDyn
+  let k : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } :=
+    Tensor.ofRaw! kDyn
+  let v : Tensor { shape := #[batch, nKvHead, kvSeq, headDim], dtype := dtype, device := device } :=
+    Tensor.ofRaw! vDyn
   pure {
     batch := batch
     nHead := nHead
@@ -265,8 +270,9 @@ private def parseMaskDyn
       if !(gotBatch == batch && gotKvSeq == kvSeq) then
         throw <| IO.userError
           s!"flashAttnDyn: attn_mask shape mismatch expected=[{batch},{kvSeq}] got=[{gotBatch},{gotKvSeq}]"
-      let mask : PaddingMask (device := device) batch kvSeq ← IO.ofExcept (SomeDTypeTensor.ofRaw maskDyn)
-      pure (some mask)
+      if maskDyn.device != device then
+        throw <| IO.userError "flashAttnDyn: attn_mask must share the query's device"
+      pure (some (SomeDTypeTensor.ofRaw! maskDyn))
 
 /-- Fully general existential adapter:
     accepts shape-erased 4D raw tensors, validates runtime shapes, dispatches through the

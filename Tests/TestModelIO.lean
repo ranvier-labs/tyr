@@ -27,8 +27,7 @@ def testModdedGPTStructure : IO Unit := do
     vocabSize := 128
     nLayer := 2
     nHead := 2
-    headDim := 16
-    modelDim := 32
+    halfHeadDim := 8
     maxSeqLen := 64
     blockSize := 32
     numValueEmbeds := 1
@@ -66,8 +65,7 @@ def testParameterUpdate : IO Unit := do
     vocabSize := 10
     nLayer := 1
     nHead := 1
-    headDim := 4
-    modelDim := 4
+    halfHeadDim := 2
     maxSeqLen := 10
     blockSize := 10
     numValueEmbeds := 1
@@ -94,8 +92,7 @@ def testStateDictSimulation : IO Unit := do
     vocabSize := 10
     nLayer := 1
     nHead := 1
-    headDim := 4
-    modelDim := 4
+    halfHeadDim := 2
     maxSeqLen := 10
     blockSize := 10
     numValueEmbeds := 1
@@ -115,12 +112,11 @@ def testStateDictSimulation : IO Unit := do
       let remaining ← ref.get
       match remaining with
       | [] => throw $ IO.userError "Not enough tensors in state list"
-      | ⟨_s', t⟩ :: rest => 
-        let tensor ← match Tensor.ofRaw (σ := σ) t.raw with
-          | .ok tensor => pure tensor
-          | .error message => throw (IO.userError message)
+      | ⟨s', t⟩ :: rest =>
+        if s' != σ then
+          throw $ IO.userError s!"State tensor spec {reprStr s'} does not match the model's {reprStr σ}"
         ref.set rest
-        pure tensor
+        pure (Tensor.ofRaw! t.raw)
     ) model
 
   let loadedParams ← loadFromList stateList params
@@ -129,6 +125,6 @@ def testStateDictSimulation : IO Unit := do
   
   -- Verify loaded matches original
   let diff := FloatingTensorStruct.zipWith Tensor.sub params loadedParams
-  let totalDiff := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item (Tensor.sumAll (Tensor.abs t))) 0.0 diff
+  let totalDiff := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item! (Tensor.sumAll (Tensor.abs t))) 0.0 diff
   
   LeanTest.assertTrue (totalDiff < 1e-6) "Loaded parameters should match saved ones"

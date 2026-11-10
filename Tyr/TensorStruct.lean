@@ -232,6 +232,9 @@ def foldl {n : Nat} (f : β → α → β) (init : β) (v : Vector n α) : β :=
   v.data.foldl f init
 
 /-- Create vector by replicating a value -/
+def set {n : Nat} (v : Vector n α) (i : Fin n) (a : α) : Vector n α :=
+  ⟨v.data.set i.val a (by rw [v.size_eq]; exact i.isLt), by rw [Array.size_set]; exact v.size_eq⟩
+
 def replicate (n : Nat) (a : α) : Vector n α :=
   ⟨Array.replicate n a, Array.size_replicate ..⟩
 
@@ -431,7 +434,7 @@ instance {α : Type} [TensorStruct α] : TensorStruct (Option α) where
     | none => init
 
 /-- Static values are completely skipped during TensorStruct traversal -/
-instance {α : Type} [Inhabited α] : TensorStruct (Static α) where
+instance {α : Type} : TensorStruct (Static α) where
   map _ s := s
   mapM _ s := pure s
   zipWith _ s _ := s
@@ -640,10 +643,8 @@ private def withRawLeaves [TensorStruct α] (template : α) (leaves : Array RawT
     let index ← get
     set (index + 1)
     pure (match leaves[index]? with
-      | none => nativeInvariantFailure "functionalGrad: missing leaf"
-      | some raw => match Tensor.ofRaw (σ := σ) raw with
-        | .ok tensor => tensor
-        | .error message => nativeInvariantFailure s!"functionalGrad: {message}"))
+      | none => nativeInvariantFailure s!"{decl_name%}: missing leaf"
+      | some raw => Tensor.ofRaw! (σ := σ) raw))
     template).run 0).1
 
 /-- Differentiate an existing output with respect to every tensor leaf in one
@@ -661,9 +662,7 @@ def grad {σ : StaticSpec} [TensorStruct α]
     match gradients[index]? with
     | none => throw (IO.userError "TensorStruct.grad: missing gradient leaf")
     | some raw =>
-      match Tensor.ofRaw (σ := τ) raw with
-      | .ok tensor => pure tensor
-      | .error message => throw (IO.userError s!"TensorStruct.grad: {message}")) inputs).run 0)
+      pure (Tensor.ofRaw! (σ := τ) raw)) inputs).run 0)
   if count != gradients.size then
     throw (IO.userError "TensorStruct.grad: unexpected gradient leaves")
   pure result
@@ -672,14 +671,17 @@ def grad {σ : StaticSpec} [TensorStruct α]
     Fresh differentiation variables live entirely inside the native callback;
     only detached gradients escape. Identical input values in different leaves
     remain independent variables. No parameter gradient buffers are mutated. -/
-def functionalGrad {device : Device} [TensorStruct α]
+def functionalGrad! {device : Device} [TensorStruct α]
     (f : α → Tensor { shape := #[], dtype := .Float32, device })
     (inputs : α) : α :=
-  let gradients := match RawTensor.functionalGrad (rawLeaves inputs)
-      (fun leaves => (f (withRawLeaves inputs leaves)).raw) with
-    | .ok gradients => gradients
-    | .error message => panic! message
-  withRawLeaves inputs gradients
+  withRawLeaves inputs (RawTensor.functionalGrad! (rawLeaves inputs)
+    (fun leaves => (f (withRawLeaves inputs leaves)).raw))
+
+/-- `functionalGrad!` over floating leaves, the only dtypes that take gradients. -/
+def functionalGrad {device : Device} [TensorStruct α] [FloatingTensorStruct α]
+    (f : α → Tensor { shape := #[], dtype := .Float32, device })
+    (inputs : α) : α :=
+  functionalGrad! f inputs
 
 /-- Apply a scalar multiplication to all tensors -/
 def scale [FloatingTensorStruct α] (model : α) (s : Float) : α :=

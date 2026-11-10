@@ -19,17 +19,17 @@ structure StreamingOptions (cfg : Qwen3TTSConfig) (dtype : RealFloatingDType := 
   maxFrames : Nat := 256
   minNewTokens : Nat := 2
   temperature : Float := 0.9
-  topK : Nat := 50
+  topK : TopK := none
   topP : Float := 1.0
   subtalkerTemperature : Float := 0.9
-  subtalkerTopK : Nat := 50
+  subtalkerTopK : TopK := none
   subtalkerTopP : Float := 1.0
   repetitionPenalty : Float := 1.05
   suppressTail : Nat := 1024
   trailingTextHidden : Option (Sigma fun trailingSeq => Tensor { shape := #[1, trailingSeq, cfg.talkerConfig.hiddenSize], dtype := dtype.val, device := device }) := none
   ttsPadEmbed : Option (Tensor { shape := #[1, 1, cfg.talkerConfig.hiddenSize], dtype := dtype.val, device := device }) := none
   subtalkerTemperaturesByGroup : Option (Array Float) := none
-  subtalkerTopKsByGroup : Option (Array Nat) := none
+  subtalkerTopKsByGroup : Option (Array TopK) := none
   subtalkerTopPsByGroup : Option (Array Float) := none
   decodeChunkSize : Nat := 1
   decodeLeftContext : Nat := 25
@@ -78,8 +78,8 @@ def streamFromTalkerInputs {seq : Nat}
   let onFrame : Nat → Tensor { shape := #[1, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := device } → IO Unit := fun step frame => do
     let frameRow : Tensor { shape := #[cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := device } := Tensor.reshape frame #[cfg.talkerConfig.numCodeGroups]
     let rowVals ← Tensor.toUInt64Array frameRow
-    let firstTok := rowVals.getD 0 cfg.talkerConfig.codecEosTokenId
-    let keepRow := opts.emitEosFrame || firstTok != cfg.talkerConfig.codecEosTokenId
+    let firstTok := rowVals.getD 0 cfg.talkerConfig.codecEosTokenId.toUInt64
+    let keepRow := opts.emitEosFrame || firstTok != cfg.talkerConfig.codecEosTokenId.toUInt64
     if keepRow then
       codeRowsRef.modify (fun rows => rows.push rowVals)
       callbacks.onCodeFrame step rowVals

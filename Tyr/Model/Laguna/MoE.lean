@@ -69,10 +69,10 @@ namespace LagunaTopKRouter
     Returns `(selectedExperts, routingWeights)`, both `[tokens, num_experts_per_tok]`;
     `selectedExperts` is int64, `routingWeights` has `x`'s dtype. -/
 def route {tokens : Nat}
-    (cfg : Config) (r : LagunaTopKRouter (device := device) cfg) (x : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] })
+    (cfg : Config) (hMoE : cfg.isMoE) (r : LagunaTopKRouter (device := device) cfg) (x : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] })
     : IO (Tensor { device := device, shape := #[tokens, cfg.num_experts_per_tok], dtype := .Int64 } × Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.num_experts_per_tok] }) := do
   let logits0 : Tensor { dtype := .Float32, device := device, shape := #[tokens, cfg.num_experts] } :=
-    einsumChecked "eh,th->te" (floatDynamic r.weight.2) (floatDynamic x)
+    Tensor.linear (floatDynamic x) (floatDynamic r.weight.2)
   let logits :=
     if cfg.moe_router_logit_softcapping > 0.0 then
       let c := cfg.moe_router_logit_softcapping
@@ -80,12 +80,12 @@ def route {tokens : Nat}
     else logits0
   let scores := Tensor.sigmoid logits
   let selectionScores := match r.eScoreCorrectionBias with
-    | some bias => Tensor.add scores (Tensor.expand (floatDynamic bias.2) #[tokens, cfg.num_experts])
+    | some bias => Tensor.add scores (Tensor.broadcastTo (floatDynamic bias.2) #[tokens, cfg.num_experts])
     | none => scores
-  let (_, topIdx) := topK2d selectionScores cfg.num_experts_per_tok 1
+  let (_, topIdx) := Tensor.topKLast2d selectionScores cfg.num_experts_per_tok (cfg.expertsValid (of_decide_eq_true hMoE)).2
   let weights := Tensor.gather scores 1 topIdx
   let weights := if cfg.norm_topk_prob then
-      Tensor.div weights (Tensor.expand (Tensor.sumDim weights 1 true) #[tokens, cfg.num_experts_per_tok])
+      Tensor.div weights (Tensor.broadcastTo (Tensor.sumDim weights 1 true) #[tokens, cfg.num_experts_per_tok])
     else weights
   pure (topIdx, Tensor.castLike x weights)
 
@@ -143,12 +143,12 @@ namespace LagunaSparseMoeBlock
 private def dequantExpertSlice {numExperts outFeatures inFeatures : Nat} {pd sd gd : DType}
     (bankPacked : Tensor { dtype := pd, device := device, shape := #[numExperts, outFeatures, inFeatures / 2] })
     (bankScales : Tensor { dtype := sd, device := device, shape := #[numExperts, outFeatures, inFeatures / 16] })
-    (bankGlobal : Tensor { dtype := gd, device := device, shape := #[numExperts] }) (e : Nat)
+    (bankGlobal : Tensor { dtype := gd, device := device, shape := #[numExperts] }) (e : Fin numExperts)
     : IO (Tensor { dtype := .BFloat16, device := device, shape := #[outFeatures, inFeatures] }) := do
   let out ← nvfp4.dequantMatrix
-    ((bankPacked.sliceChecked 0 e 1 #[1, outFeatures, inFeatures / 2]).reshape #[outFeatures, inFeatures / 2])
-    ((bankScales.sliceChecked 0 e 1 #[1, outFeatures, inFeatures / 16]).reshape #[outFeatures, inFeatures / 16])
-    (bankGlobal.sliceChecked 0 e 1 #[1]) outFeatures inFeatures
+    ((bankPacked.slice 0 e 1).reshape #[outFeatures, inFeatures / 2])
+    ((bankScales.slice 0 e 1).reshape #[outFeatures, inFeatures / 16])
+    (bankGlobal.slice 0 e 1) outFeatures inFeatures
   pure out
 
 /-- Fetch one expert's three SwiGLU matrices in BF16: slices of the dense
@@ -157,7 +157,7 @@ private def dequantExpertSlice {numExperts outFeatures inFeatures : Nat} {pd sd 
 private def expertWeights
     (cfg : Config)
     (m : LagunaSparseMoeBlock (device := device) (dtype := dtype) cfg)
-    (e : Nat)
+    (e : Fin cfg.num_experts)
     : IO (Tensor { dtype := dtype, device := device, shape := #[cfg.moe_intermediate_size, cfg.hidden_size] }
         × Tensor { dtype := dtype, device := device, shape := #[cfg.moe_intermediate_size, cfg.hidden_size] }
         × Tensor { dtype := dtype, device := device, shape := #[cfg.hidden_size, cfg.moe_intermediate_size] }) := do
@@ -167,9 +167,9 @@ private def expertWeights
     let up3 := de.upProj
     let down3 := de.downProj
     pure (
-      Tensor.reshape (sliceTyped gate3 0 e 1) #[cfg.moe_intermediate_size, cfg.hidden_size],
-      Tensor.reshape (sliceTyped up3 0 e 1) #[cfg.moe_intermediate_size, cfg.hidden_size],
-      Tensor.reshape (sliceTyped down3 0 e 1) #[cfg.hidden_size, cfg.moe_intermediate_size])
+      Tensor.reshape (Tensor.slice gate3 0 e 1) #[cfg.moe_intermediate_size, cfg.hidden_size],
+      Tensor.reshape (Tensor.slice up3 0 e 1) #[cfg.moe_intermediate_size, cfg.hidden_size],
+      Tensor.reshape (Tensor.slice down3 0 e 1) #[cfg.hidden_size, cfg.moe_intermediate_size])
   | none =>
     let gateW : Tensor { dtype := .BFloat16, device := device, shape := #[cfg.moe_intermediate_size, cfg.hidden_size] } :=
       Tensor.reshape (← dequantExpertSlice (inFeatures := cfg.hidden_size) m.experts.gatePacked.2 m.experts.gateScale.2 m.experts.gateGlobal.2
@@ -180,7 +180,7 @@ private def expertWeights
     let downW : Tensor { dtype := .BFloat16, device := device, shape := #[cfg.hidden_size, cfg.moe_intermediate_size] } :=
       Tensor.reshape (← dequantExpertSlice (inFeatures := cfg.moe_intermediate_size) m.experts.downPacked.2 m.experts.downScale.2 m.experts.downGlobal.2
         e) #[cfg.hidden_size, cfg.moe_intermediate_size]
-    pure (← IO.ofExcept (Tensor.ofRaw gateW.raw), ← IO.ofExcept (Tensor.ofRaw upW.raw), ← IO.ofExcept (Tensor.ofRaw downW.raw))
+    pure (gateW.castDType dtype, upW.castDType dtype, downW.castDType dtype)
 
 /-- Batched single-token decode path. For one token the k router-selected
     experts are distinct, so the k expert triples can be gathered and
@@ -209,7 +209,7 @@ private def forwardDecode1
   let useFusedKernel : Bool :=
     useFused && m.denseExperts.isNone && h % 32 == 0 && mi % 32 == 0 &&
     (match x.device.kind with | .CUDA _ => true | _ => false) &&
-    x.actualSpec.dtype == .BFloat16 &&
+    dtype == .BFloat16 &&
     -- Only real NVFP4 storage uses the fused path. Random-init stand-ins
     -- retain their independent Int64 bytes and Float32 scale indices.
     m.experts.gatePacked.2.actualSpec.dtype == .UInt8 && m.experts.upPacked.2.actualSpec.dtype == .UInt8 &&
@@ -225,7 +225,7 @@ private def forwardDecode1
         m.experts.upPacked.2 m.experts.upScale.2 m.experts.upGlobal.2
         m.experts.downPacked.2 m.experts.downScale.2 m.experts.downGlobal.2
         E mi h
-      IO.ofExcept (Tensor.ofRaw fused.raw)
+      pure (fused.castDType dtype)
     else do
       let hitT : Tensor { device := device, shape := #[k], dtype := .Int64 } := Tensor.reshape flatIdx #[k]
       let (gateW, upW, downW) ← do
@@ -248,14 +248,14 @@ private def forwardDecode1
           let g ← nvfp4.dequantBank gp gs gg k mi h
           let u ← nvfp4.dequantBank up us ug k mi h
           let d ← nvfp4.dequantBank dp ds dg k h mi
-          pure (← IO.ofExcept (Tensor.ofRaw g.raw), ← IO.ofExcept (Tensor.ofRaw u.raw), ← IO.ofExcept (Tensor.ofRaw d.raw))
+          pure (g.castDType dtype, u.castDType dtype, d.castDType dtype)
       -- Batched SwiGLU: [k,1,h] @ Wᵀ per projection.
-      let x3 : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := Tensor.reshape (Tensor.expand (Tensor.reshape x #[1, 1, h]) #[k, 1, h]) #[k, 1, h]
-      let g : Tensor { dtype := dtype, device := device, shape := #[k, 1, mi] } := bmm x3 (transposeMatrixBatch gateW)
-      let u : Tensor { dtype := dtype, device := device, shape := #[k, 1, mi] } := bmm x3 (transposeMatrixBatch upW)
+      let x3 : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := Tensor.reshape (Tensor.broadcastTo (Tensor.reshape x #[1, 1, h]) #[k, 1, h]) #[k, 1, h]
+      let g : Tensor { dtype := dtype, device := device, shape := #[k, 1, mi] } := Tensor.bmm x3 (transposeMatrixBatch gateW)
+      let u : Tensor { dtype := dtype, device := device, shape := #[k, 1, mi] } := Tensor.bmm x3 (transposeMatrixBatch upW)
       let hid : Tensor { dtype := dtype, device := device, shape := #[k, 1, mi] } := mulSame (Tensor.silu g) u
-      let o : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := bmm hid (transposeMatrixBatch downW)
-      let ow : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := mulBroadcast (Tensor.reshape flatW #[k, 1, 1]) o
+      let o : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := Tensor.bmm hid (transposeMatrixBatch downW)
+      let ow : Tensor { dtype := dtype, device := device, shape := #[k, 1, h] } := Tensor.mul (Tensor.broadcastTo (Tensor.reshape flatW #[k, 1, 1]) #[k, 1, h]) o
       pure (show Tensor ⟨#[1, h], dtype, device⟩ from by
         simpa using (Tensor.reshape (Tensor.sumDim ow 0 false) #[1, h]))
   -- Dense shared expert (SwiGLU MLP, no gating score).
@@ -269,13 +269,13 @@ private def forwardDecode1
     in `x`'s dtype. Single-token decode on CUDA uses the fused NVFP4 kernel
     for the packed-bank path unless `useFused` is false. -/
 def forward2d {tokens : Nat}
-    (cfg : Config)
+    (cfg : Config) (hMoE : cfg.isMoE)
     (m : LagunaSparseMoeBlock (device := device) (dtype := dtype) cfg)
     (x : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] })
     (useFused : Bool := true)
     : IO (Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] }) := do
   let k := cfg.num_experts_per_tok
-  let (topIdx, weights) ← m.router.route cfg x
+  let (topIdx, weights) ← m.router.route cfg hMoE x
   -- Flattened dispatch views: pair p = token * k + slot.
   let flatIdx : Tensor { device := device, shape := #[tokens * k], dtype := .Int64 } := Tensor.reshape topIdx #[tokens * k]
   let flatW : Tensor { dtype := dtype, device := device, shape := #[tokens * k] } := Tensor.reshape weights #[tokens * k]
@@ -291,7 +291,7 @@ def forward2d {tokens : Nat}
     let fusedAvailable : Bool :=
       useFused && m.denseExperts.isNone && h % 32 == 0 && mi % 32 == 0 &&
       (match device.kind with | .CUDA _ => true | _ => false) &&
-      x.actualSpec.dtype == .BFloat16 &&
+      dtype == .BFloat16 &&
       m.experts.gatePacked.2.actualSpec.dtype == .UInt8 && m.experts.upPacked.2.actualSpec.dtype == .UInt8 &&
       m.experts.downPacked.2.actualSpec.dtype == .UInt8
     if fusedAvailable then do
@@ -304,7 +304,7 @@ def forward2d {tokens : Nat}
         m.experts.upPacked.2 m.experts.upScale.2 m.experts.upGlobal.2
         m.experts.downPacked.2 m.experts.downScale.2 m.experts.downGlobal.2
         cfg.num_experts mi h
-      let routed : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] } ← IO.ofExcept (Tensor.ofRaw routedBF16.raw)
+      let routed : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] } := routedBF16.castDType dtype
       -- Dense shared expert (SwiGLU MLP, no gating score).
       let sharedH : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.shared_expert_intermediate_size] } :=
         mulSame (Tensor.silu (Tensor.linear x m.sharedGateProj)) (Tensor.linear x m.sharedUpProj)
@@ -315,7 +315,8 @@ def forward2d {tokens : Nat}
       -- NOTE: `arange` always allocates on CPU; move to the model device so
       -- `masked_select`/`embedding1d` see input and mask/index on one device.
       let tokIdsFlat :=
-        Tensor.reshape (Tensor.expand (Tensor.reshape ((Tensor.arange tokens).to device) #[tokens, 1]) #[tokens, k]) #[tokens * k]
+        Tensor.reshape (Tensor.broadcastTo (Tensor.reshape ((Tensor.arange tokens).to device) #[tokens, 1]) #[tokens, k]) #[tokens * k]
+      let pairIds := (Tensor.arange (tokens * k)).to device
       -- Accumulator in the model dtype (HF: torch.zeros_like(hidden_states)).
       let mut acc : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.hidden_size] } := Tensor.castLike x (zerosDynamic #[tokens, cfg.hidden_size] false device)
       -- Per-unique-expert dispatch: materialize each hit expert once per forward.
@@ -323,31 +324,28 @@ def forward2d {tokens : Nat}
       -- instead of scanning all num_experts with a GPU mask + host sync per
       -- expert (that is ~256 syncs/layer, fatal at decode). Iteration stays in
       -- ascending expert order, matching the HF `expert_hit` accumulation order.
-      let flatIdxHost ← Tensor.toUInt64Array (Tensor.reshape (Tensor.toInt64 flatIdx) #[tokens * k])
-      let hitExperts : Array Nat := Id.run do
-        let mut seen : Array Nat := #[]
+      let flatIdxHost ← Tensor.toFinArray cfg.num_experts (Tensor.reshape (Tensor.toInt64 flatIdx) #[tokens * k])
+      let hitExperts : Array (Fin cfg.num_experts) := Id.run do
+        let mut seen : Array (Fin cfg.num_experts) := #[]
         for id in flatIdxHost do
-          if !(seen.contains id.toNat) then
-            seen := seen.push id.toNat
+          if !(seen.contains id) then
+            seen := seen.push id
         pure (seen.qsort (· < ·))
-      for eU in hitExperts do
-        let maskE := Tensor.eqScalar flatIdx eU.toInt64
-        let tokEr := Tensor.maskedSelect tokIdsFlat maskE
-        let wE := Tensor.maskedSelect flatW maskE
-        let nE := tokEr.1
-        let tokE := tokEr.2
-        let (gateW, upW, downW) ← expertWeights cfg m eU
+      for e in hitExperts do
+        let ⟨nE, pairsE⟩ := Tensor.maskedSelect pairIds (Tensor.eqScalar flatIdx e.val.toInt64)
+        let tokE := Tensor.indexSelect! tokIdsFlat pairsE
+        let wE := Tensor.indexSelect! flatW pairsE
+        let (gateW, upW, downW) ← expertWeights cfg m e
         -- SwiGLU expert MLP in BF16.
         let xE : Tensor { dtype := dtype, device := device, shape := #[nE, cfg.hidden_size] } := Tensor.embedding1d tokE x
         let hid : Tensor { dtype := dtype, device := device, shape := #[nE, cfg.moe_intermediate_size] } :=
           mulSame (Tensor.silu (Tensor.linear xE gateW)) (Tensor.linear xE upW)
         let outE : Tensor { dtype := dtype, device := device, shape := #[nE, cfg.hidden_size] } := Tensor.linear hid downW
         -- Routing weights multiply the expert OUTPUT (moe_apply_router_weight_on_input=false).
-        -- Both selections use `maskE`, so their counts agree at runtime.
-        let wCol ← IO.ofExcept (wE.2.reshapeChecked? #[nE, 1])
-        let outEW : Tensor { dtype := dtype, device := device, shape := #[nE, cfg.hidden_size] } := mulBroadcast wCol outE
+        let wCol := wE.reshape #[nE, 1]
+        let outEW : Tensor { dtype := dtype, device := device, shape := #[nE, cfg.hidden_size] } := Tensor.mul (Tensor.broadcastTo wCol #[nE, cfg.hidden_size]) outE
         let idxRows : Tensor { device := device, shape := #[nE, cfg.hidden_size], dtype := .Int64 } :=
-          Tensor.reshape (Tensor.expand (Tensor.reshape tokE #[nE, 1]) #[nE, cfg.hidden_size]) #[nE, cfg.hidden_size]
+          Tensor.reshape (Tensor.broadcastTo (Tensor.reshape tokE #[nE, 1]) #[nE, cfg.hidden_size]) #[nE, cfg.hidden_size]
         acc := scatterAdd acc 0 idxRows outEW
       -- Dense shared expert (SwiGLU MLP, no gating score).
       let sharedH : Tensor { dtype := dtype, device := device, shape := #[tokens, cfg.shared_expert_intermediate_size] } :=

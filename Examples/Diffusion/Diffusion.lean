@@ -31,25 +31,34 @@ structure Config where
   mask_token_id : UInt64 := 0     -- NUL character as mask token
   n_layer : Nat := 4           -- transformer blocks (smaller for testing)
   n_head : Nat := 4            -- attention heads
-  n_embd : Nat := 256          -- embedding dimension (smaller for testing)
+  half_head_dim : Nat := 32    -- half the per-head dimension (smaller for testing)
   diffusion_steps : Nat := 64  -- timesteps for diffusion (smaller for testing)
   context_len : Nat := 16      -- prefix tokens never masked
-  deriving Repr, Inhabited
+  /-- Sampling reads a maximum over `vocab_size` and decodes at least one of
+      `seq_len` positions per step; the context prefix fits the sequence. -/
+  vocabPos : 0 < vocab_size := by decide
+  seqPos : 0 < seq_len := by decide
+  stepsPos : 0 < diffusion_steps := by decide
+  contextFits : context_len ≤ seq_len := by decide
+  deriving Repr
 
-/-- Compute head dimension from config -/
-def Config.headDim (cfg : Config) : Nat := cfg.n_embd / cfg.n_head
+/-- Head dimension -/
+def Config.headDim (cfg : Config) : Nat := 2 * cfg.half_head_dim
+
+/-- Embedding dimension: `n_head` heads of `headDim` channels -/
+def Config.n_embd (cfg : Config) : Nat := cfg.n_head * (2 * cfg.half_head_dim)
 
 /-- Tiny config for unit tests -/
 def Config.tiny : Config :=
-  { seq_len := 64, vocab_size := 128, n_layer := 2, n_head := 2, n_embd := 64, diffusion_steps := 16 }
+  { seq_len := 64, vocab_size := 128, n_layer := 2, n_head := 2, half_head_dim := 16, diffusion_steps := 16 }
 
 /-- Small config for testing (no context for simpler sampling) -/
 def Config.small : Config :=
-  { seq_len := 128, vocab_size := 128, n_layer := 4, n_head := 4, n_embd := 256, diffusion_steps := 64, context_len := 0 }
+  { seq_len := 128, vocab_size := 128, n_layer := 4, n_head := 4, half_head_dim := 32, diffusion_steps := 64, context_len := 0 }
 
 /-- Full config matching tiny-diffusion paper -/
 def Config.full : Config :=
-  { seq_len := 256, vocab_size := 128, n_layer := 6, n_head := 6, n_embd := 384, diffusion_steps := 128 }
+  { seq_len := 256, vocab_size := 128, n_layer := 6, n_head := 6, half_head_dim := 32, diffusion_steps := 128 }
 
 /-- Full diffusion model parameters -/
 structure DiffusionParams (cfg : Config) where
@@ -58,7 +67,7 @@ structure DiffusionParams (cfg : Config) where
   -- Time embedding for timesteps
   time_emb : Activation #[cfg.diffusion_steps, cfg.n_embd]
   -- Transformer blocks with equal query and KV head counts.
-  blocks : Array (BlockParams cfg.n_embd cfg.n_head cfg.n_head)
+  blocks : Array (BlockParams cfg.n_head cfg.half_head_dim cfg.n_head)
   -- Output head (NOT tied to token_emb)
   output_head : Activation #[cfg.vocab_size, cfg.n_embd]
 
@@ -66,8 +75,7 @@ structure DiffusionParams (cfg : Config) where
 
 /-- Initialize diffusion model parameters -/
 def DiffusionParams.init (cfg : Config) : IO (DiffusionParams cfg) := do
-  if cfg.n_head == 0 || cfg.n_embd == 0 || cfg.n_embd % cfg.n_head != 0 ||
-      cfg.headDim % 2 != 0 || cfg.seq_len == 0 || cfg.diffusion_steps == 0 ||
+  if cfg.n_head == 0 || cfg.half_head_dim == 0 || cfg.seq_len == 0 || cfg.diffusion_steps == 0 ||
       cfg.context_len > cfg.seq_len || cfg.mask_token_id.toNat >= cfg.vocab_size then
     throw <| IO.userError "Invalid diffusion dimensions, rotary head width, context, or mask token"
   let scale := 1.0 / Float.sqrt cfg.n_embd.toFloat
@@ -79,7 +87,7 @@ def DiffusionParams.init (cfg : Config) : IO (DiffusionParams cfg) := do
   -- Transformer blocks
   let mut blocks := #[]
   for _ in [:cfg.n_layer] do
-    let block ← BlockParams.init cfg.n_embd cfg.n_head cfg.n_head
+    let block ← BlockParams.init cfg.n_head cfg.half_head_dim cfg.n_head
     blocks := blocks.push block
 
   -- Output head (zero-initialized like tiny-diffusion)
@@ -93,12 +101,12 @@ def DiffusionParams.init (cfg : Config) : IO (DiffusionParams cfg) := do
   }
 
 /-- Bidirectional attention forward pass (is_causal=false) -/
-def bidirectionalAttentionForward {batch seq n_embd n_head : Nat}
-    (params : AttentionParams n_embd n_head n_head)
-    (x : Activation #[batch, seq, n_embd])
-    (rotaryCache : RotaryCache rotaryLen (n_embd / n_head))
-    : Activation #[batch, seq, n_embd] :=
-  let head_dim := n_embd / n_head
+def bidirectionalAttentionForward {batch seq n_head half : Nat}
+    (params : AttentionParams n_head half n_head)
+    (x : Activation #[batch, seq, n_head * (2 * half)])
+    (rotaryCache : RotaryCache seq half)
+    : Activation #[batch, seq, n_head * (2 * half)] :=
+  let head_dim := 2 * half
 
   -- Project to Q, K, V (no bias)
   let q := Tensor.linear3d x params.c_q
@@ -110,9 +118,8 @@ def bidirectionalAttentionForward {batch seq n_embd n_head : Nat}
   let k := Tensor.reshape k #[batch, seq, n_head, head_dim]
   let v := Tensor.reshape v #[batch, seq, n_head, head_dim]
 
-  -- Apply rotary embeddings (use full cache - no slicing needed when rotaryLen == seq)
-  let cos := rotaryCache.cos.sliceChecked 0 0 seq #[seq, head_dim / 2]
-  let sin := rotaryCache.sin.sliceChecked 0 0 seq #[seq, head_dim / 2]
+  let cos := rotaryCache.cos
+  let sin := rotaryCache.sin
   let q := Tensor.applyRotary q cos sin
   let k := Tensor.applyRotary k cos sin
 
@@ -145,11 +152,11 @@ def mlpForward {batch seq n_embd : Nat}
   Tensor.linear3d h params.c_proj             -- Project back
 
 /-- Block forward pass (pre-norm with bidirectional attention) -/
-def blockForward {batch seq n_embd n_head : Nat}
-    (params : BlockParams n_embd n_head n_head)
-    (x : Activation #[batch, seq, n_embd])
-    (rotaryCache : RotaryCache rotaryLen (n_embd / n_head))
-    : Activation #[batch, seq, n_embd] :=
+def blockForward {batch seq n_head half : Nat}
+    (params : BlockParams n_head half n_head)
+    (x : Activation #[batch, seq, n_head * (2 * half)])
+    (rotaryCache : RotaryCache seq half)
+    : Activation #[batch, seq, n_head * (2 * half)] :=
   -- Attention with residual (pre-norm)
   let x := x + bidirectionalAttentionForward params.attn (norm x) rotaryCache
   -- MLP with residual (pre-norm)
@@ -160,7 +167,7 @@ def forward {cfg : Config} {batch seq : Nat}
     (params : DiffusionParams cfg)
     (x_t : Tokens #[batch, seq])              -- Noisy tokens (with masks)
     (t : Tokens #[batch])                     -- Timestep indices
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache seq cfg.half_head_dim)
     : Activation #[batch, seq, cfg.vocab_size] :=
   -- Token embedding
   let x := Tensor.embedding x_t params.token_emb  -- [batch, seq, n_embd]
@@ -168,7 +175,7 @@ def forward {cfg : Config} {batch seq : Nat}
   -- Time embedding: lookup and broadcast to all positions
   let t_emb := Tensor.embedding1d t params.time_emb  -- [batch, n_embd]
   let t_emb := Tensor.unsqueeze t_emb 1              -- [batch, 1, n_embd]
-  let t_emb := Tensor.expand t_emb #[batch, seq, cfg.n_embd]  -- [batch, seq, n_embd]
+  let t_emb := Tensor.broadcastTo t_emb #[batch, seq, cfg.n_embd]  -- [batch, seq, n_embd]
   let x := x + t_emb
   -- Norm after combining embeddings (matching tiny-diffusion)
   let x := norm x
@@ -189,7 +196,7 @@ def loss {cfg : Config} {batch seq : Nat}
     : Activation #[] :=
   let logitsFlat := Tensor.reshape logits #[batch * seq, cfg.vocab_size]
   let targetsFlat := Tensor.reshape targets #[batch * seq]
-  Tensor.crossEntropy logitsFlat targetsFlat
+  Tensor.crossEntropy! logitsFlat targetsFlat
 
 /-- Helper to get mask of positions that are still masked -/
 def getMaskedPositions' {batch seq : Nat}
@@ -201,16 +208,12 @@ def getMaskedPositions' {batch seq : Nat}
 private def samplingMask {batch seq : Nat} (x : Tokens #[batch, seq])
     (maskToken : UInt64) (protectedPrefix : Nat) : Mask #[batch, seq] :=
   let protectedMask := ((Tensor.arange seq).to x.device).ltScalar protectedPrefix.toFloat
-    |>.reshape #[1, seq] |>.expand #[batch, seq]
+    |>.reshape #[1, seq] |>.broadcastTo #[batch, seq]
   Tensor.logicalAnd (getMaskedPositions' x maskToken) protectedMask.logicalNot
 
-private def validateSampling (cfg : Config) (batch : Nat) (temperature : Float) :
-    IO (PLift (cfg.context_len ≤ cfg.seq_len)) := do
-  if batch == 0 || cfg.seq_len == 0 || cfg.diffusion_steps == 0 || cfg.context_len > cfg.seq_len ||
-      temperature <= 0 || !temperature.isFinite then
-    throw <| IO.userError "Diffusion sampling requires valid dimensions and finite positive temperature"
-  if h : cfg.context_len ≤ cfg.seq_len then pure ⟨h⟩ else
-    throw <| IO.userError "Diffusion sampling requires valid dimensions and finite positive temperature"
+private def validateSampling (batch : Nat) (temperature : Float) : IO Unit := do
+  if batch == 0 || temperature <= 0 || !temperature.isFinite then
+    throw <| IO.userError "Diffusion sampling requires a nonempty batch and finite positive temperature"
 
 /-- Sample using confidence-aware parallel decoding.
     At each step, decode all tokens whose confidence exceeds a threshold.
@@ -218,13 +221,14 @@ private def validateSampling (cfg : Config) (batch : Nat) (temperature : Float) 
 -/
 def sampleConfidence {cfg : Config} {batch : Nat}
     (params : DiffusionParams cfg)
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache cfg.seq_len cfg.half_head_dim)
     (confidenceThreshold : Float := 0.5)
     (temperature : Float := 1.0)
     (maxSteps : Nat := 256)
     (contextTokens : Option (Tokens #[batch, cfg.context_len]) := none)
     : IO (Tokens #[batch, cfg.seq_len]) := do
-  let ⟨hCtx⟩ ← validateSampling cfg batch temperature
+  validateSampling batch temperature
+  have hCtx := cfg.contextFits
   -- Start with all mask tokens
   let mut x := Tensor.fullInt #[batch, cfg.seq_len] cfg.mask_token_id.toInt64
 
@@ -233,7 +237,7 @@ def sampleConfidence {cfg : Config} {batch : Nat}
     -- Create position mask: true for positions < context_len
     let positions := Tensor.arange cfg.seq_len
     let contextMask := Tensor.ltScalar positions cfg.context_len.toFloat
-    let contextMaskBatch := Tensor.expand (Tensor.unsqueeze contextMask 0) #[batch, cfg.seq_len]
+    let contextMaskBatch := Tensor.broadcastTo (Tensor.unsqueeze contextMask 0) #[batch, cfg.seq_len]
     -- Pad ctx to full seq_len with mask tokens
     let padding := Tensor.fullInt #[batch, cfg.seq_len - cfg.context_len] cfg.mask_token_id.toInt64
     let ctxPadded := (Tensor.cat ctx padding 1).reshape #[batch, cfg.seq_len]
@@ -266,12 +270,12 @@ def sampleConfidence {cfg : Config} {batch : Nat}
     let probs := Tensor.softmax scaledLogits  -- [batch, seq, vocab]
 
     -- Get max probability and predicted token per position
-    let (confidences, predictedTokens) ← IO.ofExcept (Tensor.maxLast3d? probs)  -- along vocab dim
+    let (confidences, predictedTokens) := Tensor.maxLast3d probs cfg.vocabPos  -- along vocab dim
 
-    if step < 3 then
+    if h : step < 3 ∧ 0 < batch * cfg.seq_len then
       -- Debug: show first few predicted tokens and their confidences
-      let conf0 := (confidences.reshape #[batch * cfg.seq_len]).sliceChecked 0 0 1 #[1] |>.reshape #[]
-      let tok0 := (predictedTokens.reshape #[batch * cfg.seq_len]).sliceChecked 0 0 1 #[1] |>.reshape #[]
+      let conf0 := (confidences.reshape #[batch * cfg.seq_len]).slice 0 0 1 |>.reshape #[]
+      let tok0 := (predictedTokens.reshape #[batch * cfg.seq_len]).slice 0 0 1 |>.reshape #[]
       IO.println s!"  step {step}: conf[0]={Tensor.item conf0}, tok[0]={Tensor.itemInt tok0}"
 
     -- Select positions above threshold AND still masked
@@ -287,7 +291,7 @@ def sampleConfidence {cfg : Config} {batch : Nat}
       -- Fallback: decode top-1 most confident masked position using scatter
       let negInf := Tensor.full #[batch, cfg.seq_len] (-1e10 : Float)
       let maskedConf := Tensor.whereSelect maskedPositions confidences negInf
-      let (_, topkIdx) ← IO.ofExcept (Tensor.topKLast2d? maskedConf 1)  -- [batch, 1]
+      let (_, topkIdx) := Tensor.topKLast2d maskedConf 1 cfg.seqPos  -- [batch, 1]
       let topkIdxLong := topkIdx
       let oneHot := Tensor.zeros #[batch, cfg.seq_len]
       let onesK := Tensor.ones #[batch, 1]
@@ -308,14 +312,15 @@ def sampleConfidence {cfg : Config} {batch : Nat}
 -/
 def sampleTopK {cfg : Config} {batch : Nat}
     (params : DiffusionParams cfg)
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache cfg.seq_len cfg.half_head_dim)
     (k : Nat)
     (temperature : Float := 1.0)
     (maxSteps : Nat := 256)
     (contextTokens : Option (Tokens #[batch, cfg.context_len]) := none)
     : IO (Tokens #[batch, cfg.seq_len]) := do
-  let ⟨hCtx⟩ ← validateSampling cfg batch temperature
-  if k == 0 || k > cfg.seq_len then
+  validateSampling batch temperature
+  have hCtx := cfg.contextFits
+  let ⟨hk⟩ ← if h : 0 < k ∧ k ≤ cfg.seq_len then pure (PLift.up h) else
     throw <| IO.userError "Diffusion top-k must lie between 1 and sequence length"
   -- Start with all mask tokens
   let mut x := Tensor.fullInt #[batch, cfg.seq_len] cfg.mask_token_id.toInt64
@@ -324,7 +329,7 @@ def sampleTopK {cfg : Config} {batch : Nat}
   if let some ctx := contextTokens then
     let positions := Tensor.arange cfg.seq_len
     let contextMask := Tensor.ltScalar positions cfg.context_len.toFloat
-    let contextMaskBatch := Tensor.expand (Tensor.unsqueeze contextMask 0) #[batch, cfg.seq_len]
+    let contextMaskBatch := Tensor.broadcastTo (Tensor.unsqueeze contextMask 0) #[batch, cfg.seq_len]
     let padding := Tensor.fullInt #[batch, cfg.seq_len - cfg.context_len] cfg.mask_token_id.toInt64
     let ctxPadded := (Tensor.cat ctx padding 1).reshape #[batch, cfg.seq_len]
       (by simp [Nat.add_sub_cancel' hCtx])
@@ -350,14 +355,14 @@ def sampleTopK {cfg : Config} {batch : Nat}
     let probs := Tensor.softmax scaledLogits
 
     -- Get max probability and predicted token per position
-    let (confidences, predictedTokens) ← IO.ofExcept (Tensor.maxLast3d? probs)
+    let (confidences, predictedTokens) := Tensor.maxLast3d probs cfg.vocabPos
 
     -- Mask out already-decoded positions (set confidence to -inf)
     let negInf := Tensor.full #[batch, cfg.seq_len] (-1e10)
     let maskedConfidences := Tensor.whereSelect maskedPositions confidences negInf
 
     -- Get top-k positions per batch (properly typed)
-    let (_, topkIndices) ← IO.ofExcept (Tensor.topKLast2d? maskedConfidences k)  -- [batch, k]
+    let (_, topkIndices) := Tensor.topKLast2d maskedConfidences k hk.2  -- [batch, k]
 
     -- Create selection mask using scatter: scatter 1s at topk positions
     let selectMask := Tensor.zeros #[batch, cfg.seq_len]
@@ -384,7 +389,7 @@ def sampleTopK {cfg : Config} {batch : Nat}
 -/
 def sampleMultiple {cfg : Config} (numBlocks : Nat)
     (params : DiffusionParams cfg)
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache cfg.seq_len cfg.half_head_dim)
     (k : Nat)
     (temperature : Float := 1.0)
     (maxSteps : Nat := 256)
@@ -398,7 +403,7 @@ def sampleMultiple {cfg : Config} (numBlocks : Nat)
 -/
 def sampleMultipleWithContext {cfg : Config} (numBlocks : Nat)
     (params : DiffusionParams cfg)
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache cfg.seq_len cfg.half_head_dim)
     (contextTokens : Tokens #[numBlocks, cfg.context_len])
     (k : Nat)
     (temperature : Float := 1.0)
@@ -412,14 +417,14 @@ def sampleMultipleWithContext {cfg : Config} (numBlocks : Nat)
 -/
 def sampleMultipleWithPrompt {cfg : Config} (numBlocks : Nat)
     (params : DiffusionParams cfg)
-    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (rotaryCache : RotaryCache cfg.seq_len cfg.half_head_dim)
     (prompt : Tokens #[cfg.context_len])
     (k : Nat)
     (temperature : Float := 1.0)
     (maxSteps : Nat := 256)
     : IO (Tokens #[numBlocks, cfg.seq_len]) := do
   -- Replicate prompt across all blocks: [context_len] -> [numBlocks, context_len]
-  let promptExpanded := Tensor.expand (Tensor.unsqueeze prompt 0) #[numBlocks, cfg.context_len]
+  let promptExpanded := Tensor.broadcastTo (Tensor.unsqueeze prompt 0) #[numBlocks, cfg.context_len]
   sampleTopK (batch := numBlocks) params rotaryCache k temperature maxSteps (some promptExpanded)
 
 end torch.diffusion

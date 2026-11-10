@@ -27,19 +27,17 @@ private def addBias2d {n d : Nat}
     (x : Tensor { device := device, shape := #[n, d], dtype := dtype })
     (b : Tensor { device := device, shape := #[d], dtype := dtype })
     : Tensor { device := device, shape := #[n, d], dtype := dtype } :=
-  Tensor.add x (Tensor.expand (Tensor.reshape b #[1, d]) #[n, d])
+  Tensor.add x (Tensor.broadcastTo (Tensor.reshape b #[1, d]) #[n, d])
 
 private def linear2d {tokens in_dim out_dim : Nat}
     (x : Tensor { device := device, shape := #[tokens, in_dim], dtype := dtype })
     (w : Tensor { device := device, shape := #[out_dim, in_dim], dtype := dtype })
     (b : Tensor { device := device, shape := #[out_dim], dtype := dtype })
     : Tensor { device := device, shape := #[tokens, out_dim], dtype := dtype } :=
-  let yDyn : Tensor { device := device, shape := #[tokens, out_dim], dtype := dtype } := einsumChecked "oh,th->to" w x
-  let y : Tensor { device := device, shape := #[tokens, out_dim], dtype := dtype } := Tensor.reshape yDyn #[tokens, out_dim]
-  addBias2d y b
+  addBias2d (Tensor.linear x w) b
 
-private def allInSet (xs : Array UInt64) (allow : Array UInt64) : Bool :=
-  xs.all (fun x => allow.contains x)
+private def allInSet (xs : Array UInt64) (allow : Array tokenizer.TokenId) : Bool :=
+  xs.all (fun x => allow.any (·.toUInt64 == x))
 
 private def countMask2d {batch seq : Nat} (mask : Tensor { device := device, shape := #[batch, seq], dtype := .Bool }) : IO Nat := do
   let row : Tensor { device := device, shape := #[batch], dtype := .Int64 } := Tensor.reshape (Tensor.sumDim (mask.toInt64) 1 false) #[batch]
@@ -68,7 +66,7 @@ def forward2d {tokens dim : Nat}
     (x : Tensor { device := device, shape := #[tokens, dim], dtype := dtype })
     : Tensor { device := device, shape := #[tokens, dim], dtype := dtype } :=
   let x3 : Tensor { device := device, shape := #[1, tokens, dim], dtype := dtype } := Tensor.reshape x #[1, tokens, dim]
-  let y3 : Tensor { device := device, shape := #[1, tokens, dim], dtype := dtype } := x3.checkedReplacement (RawTensor.layerNorm x3.raw m.weight.2.raw m.bias.2.raw m.eps)
+  let y3 : Tensor { device := device, shape := #[1, tokens, dim], dtype := dtype } := Tensor.ofRaw! (RawTensor.layerNorm x3.raw m.weight.2.raw m.bias.2.raw m.eps)
   Tensor.reshape y3 #[tokens, dim]
 
 end Qwen35VisionLayerNorm
@@ -158,9 +156,9 @@ def forward {tokens : Nat}
     (x : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype })
     : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } :=
   let qkv : Tensor { device := device, shape := #[tokens, cfg.hidden_size * 3], dtype := dtype } := linear2d x m.qkv_weight m.qkv_bias
-  let q : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := typedSlice qkv 1 0 cfg.hidden_size
-  let k : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := typedSlice qkv 1 cfg.hidden_size cfg.hidden_size
-  let v : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := typedSlice qkv 1 (cfg.hidden_size * 2) cfg.hidden_size
+  let q : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := Tensor.slice qkv 1 0 cfg.hidden_size
+  let k : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := Tensor.slice qkv 1 cfg.hidden_size cfg.hidden_size
+  let v : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := Tensor.slice qkv 1 (cfg.hidden_size * 2) cfg.hidden_size
 
   let q : Tensor { device := device, shape := #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg], dtype := dtype } :=
     Tensor.reshape q #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg]
@@ -173,7 +171,7 @@ def forward {tokens : Nat}
       (by simp [Nat.mul_assoc, VisionConfig.heads_mul_headDim cfg])
 
   -- Qwen3.5-VL uses 2D rotary; this keeps a deterministic 1D rotary signal for now.
-  let (cos, sin) := Tensor.rotaryFreqs tokens (VisionConfig.headDim cfg) 10000.0 x.device
+  let (cos, sin) := Tensor.rotaryFreqs tokens cfg.half_head_dim 10000.0 x.device
   let q : Tensor { device := device, shape := #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg], dtype := dtype } := Tensor.applyRotary q cos sin
   let k : Tensor { device := device, shape := #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg], dtype := dtype } := Tensor.applyRotary k cos sin
 
@@ -250,8 +248,6 @@ def forward {tokens : Nat}
     (x : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype })
     : IO (Tensor { device := device, shape := #[VisionConfig.mergedTokenCount cfg tokens, cfg.out_hidden_size], dtype := dtype }) := do
   let mergeUnit := VisionConfig.mergeUnit cfg
-  if mergeUnit == 0 then
-    throw <| IO.userError "vision spatial_merge_size must be > 0"
   let ⟨hDiv⟩ ← if hDiv : mergeUnit ∣ tokens then pure (PLift.up hDiv) else
     throw <| IO.userError
       s!"vision token count ({tokens}) must be divisible by merge unit ({mergeUnit})"
@@ -281,7 +277,7 @@ namespace Qwen35VisionModel
 def init (cfg : VisionConfig) (device : Device := .CPU) (dtype : DType := .Float32) : IO (Qwen35VisionModel (dtype := dtype) (device := device) cfg) := do
   let patchEmbed ← Qwen35VisionPatchEmbed.init (dtype := dtype) (device := device) cfg
   let posRaw ← Tensor.randn (device := device) #[cfg.num_position_embeddings, cfg.hidden_size]
-  let posEmbed ← Tensor.parameter (← IO.ofExcept ((Tensor.mulScalar posRaw 0.02).castDType? dtype))
+  let posEmbed ← Tensor.parameter ((Tensor.mulScalar posRaw 0.02).castDType dtype)
 
   let mut blocks : Array (Qwen35VisionBlock (dtype := dtype) (device := device) cfg) := #[]
   for _ in [:cfg.depth] do
@@ -330,9 +326,6 @@ structure Qwen35ForConditionalGeneration (cfg : VLConfig) (dtype : DType := .Flo
 namespace Qwen35ForConditionalGeneration
 
 def init (cfg : VLConfig) (device : Device := .CPU) (dtype : DType := .Float32) (visionDType : DType := .Float32) : IO (Qwen35ForConditionalGeneration (visionDType := visionDType) (dtype := dtype) (device := device) cfg) := do
-  if cfg.vision_config.out_hidden_size != cfg.text_config.hidden_size then
-    throw <| IO.userError
-      s!"vision out_hidden_size ({cfg.vision_config.out_hidden_size}) must match text hidden_size ({cfg.text_config.hidden_size})"
   let visual ← Qwen35VisionModel.init (dtype := visionDType) (device := device) cfg.vision_config
   let lm ← Qwen35ForCausalLM.init (dtype := dtype) (device := device) cfg.text_config cfg.tie_word_embeddings
   pure { visual := visual, language_model := lm }
@@ -355,12 +348,10 @@ def getVideoFeatures {nPatches : Nat}
 private def scatterFeaturesIntoToken {batch seq hidden featTokens featDim : Nat} {featureDType : DType}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (inputsEmbeds : Tensor { device := device, shape := #[batch, seq, hidden], dtype := dtype })
-    (tokenId : UInt64)
+    (tokenId : tokenizer.TokenId)
     (features : Tensor { device := device, shape := #[featTokens, featDim], dtype := featureDType })
+    (_hDim : featDim = hidden)
     : IO (Tensor { device := device, shape := #[batch, seq, hidden], dtype := dtype }) := do
-  if featDim != hidden then
-    throw <| IO.userError
-      s!"feature hidden size ({featDim}) does not match text hidden size ({hidden})"
 
   let tokenMask2d : Tensor { device := device, shape := #[batch, seq], dtype := .Bool } := Tensor.eqScalar inputIds (Int64.ofNat tokenId.toNat)
   let nTokens ← countMask2d tokenMask2d
@@ -369,10 +360,12 @@ private def scatterFeaturesIntoToken {batch seq hidden featTokens featDim : Nat}
       s!"placeholder token count mismatch for token={tokenId}: ids={nTokens} features={featTokens}"
 
   let tokenMask : Tensor { device := device, shape := #[batch, seq, hidden], dtype := .Bool } :=
-    Tensor.expand (Tensor.reshape tokenMask2d #[batch, seq, 1]) #[batch, seq, hidden]
-  let src ← IO.ofExcept (Tensor.ofRaw (σ := ⟨#[featTokens * featDim], dtype, device⟩)
-    (Tensor.reshape features #[featTokens * featDim]).raw)
-  pure (Tensor.maskedScatter inputsEmbeds tokenMask src)
+    Tensor.broadcastTo (Tensor.reshape tokenMask2d #[batch, seq, 1]) #[batch, seq, hidden]
+  let flat := Tensor.reshape features #[featTokens * featDim]
+  if h : featureDType = dtype then
+    pure (Tensor.maskedScatter inputsEmbeds tokenMask (h ▸ flat))
+  else
+    throw <| IO.userError s!"Qwen35 feature dtype {featureDType} differs from text dtype {dtype}"
 
 def forwardText {batch seq : Nat}
     (cfg : VLConfig)
@@ -397,6 +390,7 @@ def forwardWithImageFeatures {batch seq featTokens : Nat}
     (inputsEmbeds := embeds0)
     cfg.image_token_id
     imageFeatures
+    cfg.visionMatchesText
   pure (m.language_model.forwardEmbeds cfg.text_config embeds attnMask)
 
 def forwardWithImageAndVideoFeatures {batch seq imageTokens videoTokens : Nat}
@@ -415,11 +409,13 @@ def forwardWithImageAndVideoFeatures {batch seq imageTokens videoTokens : Nat}
     (inputsEmbeds := embeds0)
     cfg.image_token_id
     imageFeatures
+    cfg.visionMatchesText
   let embeds2 ← scatterFeaturesIntoToken
     (inputIds := inputIds)
     (inputsEmbeds := embeds1)
     cfg.video_token_id
     videoFeatures
+    cfg.visionMatchesText
   pure (m.language_model.forwardEmbeds cfg.text_config embeds2 attnMask)
 
 def forwardWithImagePatches {batch seq nPatches : Nat}
@@ -460,6 +456,7 @@ private def buildInputEmbedsWithFeatures {batch seq : Nat}
         (inputsEmbeds := embeds0)
         cfg.image_token_id
         ifeat
+        cfg.visionMatchesText
     | none => pure embeds0
   let embeds2 ←
     match videoFeatures with
@@ -469,6 +466,7 @@ private def buildInputEmbedsWithFeatures {batch seq : Nat}
         (inputsEmbeds := embeds1)
         cfg.video_token_id
         vfeat
+        cfg.visionMatchesText
     | none => pure embeds1
   pure embeds2
 
@@ -479,7 +477,7 @@ def generate {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (maxNewTokens : Nat := 256)
     (strategy : SamplingStrategy := .greedy)
-    (eosTokenIds : Array UInt64 := #[])
+    (eosTokenIds : Array tokenizer.TokenId := #[])
     (imageFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     (videoFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
@@ -500,7 +498,7 @@ def generateStream {batch seq : Nat}
     (onStep : StreamCallback (device := device) batch)
     (maxNewTokens : Nat := 256)
     (strategy : SamplingStrategy := .greedy)
-    (eosTokenIds : Array UInt64 := #[])
+    (eosTokenIds : Array tokenizer.TokenId := #[])
     (imageFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     (videoFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
@@ -522,7 +520,7 @@ partial def generateUncached {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (maxNewTokens : Nat := 256)
     (strategy : SamplingStrategy := .greedy)
-    (eosTokenIds : Array UInt64 := #[])
+    (eosTokenIds : Array tokenizer.TokenId := #[])
     (imageFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     (videoFeatures : Option (Sigma (fun n => Tensor { device := device, shape := #[n, cfg.vision_config.out_hidden_size], dtype := visionDType })) := none)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
@@ -550,22 +548,23 @@ partial def generateUncached {batch seq : Nat}
           (inputsEmbeds := embeds0)
           cfg.video_token_id
           vfeat
+          cfg.visionMatchesText
         pure (m.language_model.forwardEmbeds cfg.text_config embeds none)
       | none, none =>
         pure (m.language_model.forward cfg.text_config cur none)
 
-    if curSeq == 0 then
+    let ⟨hSeq⟩ ← if h : 0 < curSeq then pure (PLift.up h) else
       throw <| IO.userError "generateUncached requires non-empty prompt sequence"
 
     let lastPos := curSeq - 1
     let last3 : Tensor { device := device, shape := #[batch, 1, cfg.text_config.vocab_size], dtype := dtype } :=
-      typedSlice logits 1 lastPos 1
+      Tensor.slice logits 1 lastPos 1
     let last2 : Tensor { device := device, shape := #[batch, cfg.text_config.vocab_size], dtype := dtype } := Tensor.reshape last3 #[batch, cfg.text_config.vocab_size]
     let nextTok ← sampleFromLogits last2.toFloat32 strategy
 
     let nextVals ← Tensor.toUInt64Array nextTok
     let nextCol : Tensor { device := device, shape := #[batch, 1], dtype := .Int64 } := Tensor.reshape nextTok #[batch, 1]
-    let appended : Tensor { device := device, shape := #[batch, curSeq + 1], dtype := .Int64 } := typedCat cur nextCol 1
+    let appended : Tensor { device := device, shape := #[batch, curSeq + 1], dtype := .Int64 } := Tensor.cat cur nextCol 1
     let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
     if stop then
       pure ⟨curSeq + 1, appended⟩

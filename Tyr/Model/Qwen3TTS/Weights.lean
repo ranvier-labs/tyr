@@ -8,7 +8,7 @@
 import Tyr.Typed.Neural
 import Tyr.TensorStruct
 import Tyr.Log
-import Tyr.SafeTensors.Exact
+import Tyr.SafeTensors.Source
 import Tyr.Module.RMSNorm
 import Tyr.Model.Utils
 import Tyr.Model.Qwen3TTS.Model
@@ -25,7 +25,7 @@ open torch.Model (reqGradFalse)
 /-- Load a stored exact dtype and check the shared component index without casting. -/
 private def loadTensorShardedTarget (modelDir : String) (name : String) (s : Shape) :
     IO (Tensor { shape := s, dtype := dtype.val, device }) := do
-  let packed ← safetensors.loadTensorShardedExact modelDir name s device
+  let packed ← (← safetensors.Source.open modelDir).load name s device
   match packed.atDType? dtype.val with
   | .ok tensor => pure tensor
   | .error message => throw <| IO.userError s!"Qwen3TTS tensor '{name}': {message}"
@@ -33,7 +33,7 @@ private def loadTensorShardedTarget (modelDir : String) (name : String) (s : Sha
 /-- Only absent optional entries are suppressed; every present tensor must match. -/
 private def loadOptionalTensorShardedTarget (modelDir : String) (name : String) (s : Shape) :
     IO (Option (Tensor { shape := s, dtype := dtype.val, device })) := do
-  match ← safetensors.loadOptionalTensorShardedExact modelDir name s device with
+  match ← (← safetensors.Source.open modelDir).load? name s device with
   | none => pure none
   | some packed =>
     match packed.atDType? dtype.val with
@@ -190,14 +190,14 @@ private def loadTalkerModelSharded (modelDir : String) (cfg : TalkerConfig)
 private def loadCodePredictorSharded (modelDir : String) (cfg : TalkerConfig)
     : IO (TalkerCodePredictor (device := device) (dtype := dtype) cfg) := do
   let cp := cfg.codePredictorConfig
-  let nCodebooks := if cfg.numCodeGroups == 0 then 0 else cfg.numCodeGroups - 1
+  let nCodebooks := cfg.numCodeGroups - 1
 
-  let mut inputEmbeddings : Array (Tensor { shape := #[cp.vocabSize, cfg.hiddenSize], dtype := dtype.val, device := device }) := #[]
-  for i in [:nCodebooks] do
+  let codebooks : Vector nCodebooks Nat := ⟨Array.range nCodebooks, Array.size_range⟩
+  let inputEmbeddings ← codebooks.mapM fun i => do
     let emb ← loadTensorShardedTarget modelDir
       s!"talker.code_predictor.model.codec_embedding.{i}.weight"
       #[cp.vocabSize, cfg.hiddenSize]
-    inputEmbeddings := inputEmbeddings.push (reqGradFalse emb)
+    pure (reqGradFalse emb)
 
   let (inputProjection, inputProjectionBias) ← loadCodePredictorProjectionSharded modelDir cfg
 
@@ -208,12 +208,11 @@ private def loadCodePredictorSharded (modelDir : String) (cfg : TalkerConfig)
 
   let norm ← loadRMSNormSharded modelDir "talker.code_predictor.model.norm" cp.hiddenSize cp.rmsNormEps
 
-  let mut lmHeads : Array (Tensor { shape := #[cp.vocabSize, cp.hiddenSize], dtype := dtype.val, device := device }) := #[]
-  for i in [:nCodebooks] do
+  let lmHeads ← codebooks.mapM fun i => do
     let head ← loadTensorShardedTarget modelDir
       s!"talker.code_predictor.lm_head.{i}.weight"
       #[cp.vocabSize, cp.hiddenSize]
-    lmHeads := lmHeads.push (reqGradFalse head)
+    pure (reqGradFalse head)
 
   pure { inputEmbeddings, inputProjection, inputProjectionBias, layers, norm, lmHeads }
 
@@ -259,13 +258,11 @@ private def loadSqueezeExcitationBlockSharded (modelDir : String) (namePrefix : 
 private def loadRes2NetBlockSharded (modelDir : String) (namePrefix : String)
     (channels scale kernelSize dilation : Nat)
     : IO (Res2NetBlock (device := device) (dtype := dtype) channels scale kernelSize dilation) := do
-  let nBlocks := if scale <= 1 then 0 else scale - 1
-  let mut blocks : Array (TimeDelayNetBlock (device := device) (dtype := dtype) (channels / scale) (channels / scale) kernelSize dilation) := #[]
-  for i in [:nBlocks] do
-    let block ← loadTimeDelayNetBlockSharded modelDir
+  let indices : Vector (scale - 1) Nat := ⟨Array.range (scale - 1), Array.size_range⟩
+  let blocks ← indices.mapM fun i =>
+    loadTimeDelayNetBlockSharded modelDir
       s!"{namePrefix}.blocks.{i}"
       (channels / scale) (channels / scale) kernelSize dilation
-    blocks := blocks.push block
   pure { blocks }
 
 private def loadSqueezeExcitationRes2NetBlockSharded (modelDir : String) (namePrefix : String)
@@ -299,15 +296,6 @@ private def loadAttentiveStatisticsPoolingSharded (modelDir : String) (namePrefi
 
 private def loadSpeakerEncoderSharded (modelDir : String) (cfg : SpeakerEncoderConfig)
     : IO (SpeakerEncoder (device := device) (dtype := dtype) cfg) := do
-  if cfg.encChannels.size < 5 then
-    throw <| IO.userError "speaker encoder requires at least 5 enc_channels entries"
-  if cfg.encKernelSizes.size < 5 then
-    throw <| IO.userError "speaker encoder requires at least 5 enc_kernel_sizes entries"
-  if cfg.encDilations.size < 5 then
-    throw <| IO.userError "speaker encoder requires at least 5 enc_dilations entries"
-  if cfg.encRes2NetScale < 2 then
-    throw <| IO.userError "speaker encoder requires enc_res2net_scale >= 2"
-
   let c0 := cfg.encChannels.getD 0 512
   let c1 := cfg.encChannels.getD 1 512
   let c2 := cfg.encChannels.getD 2 512
@@ -325,10 +313,6 @@ private def loadSpeakerEncoderSharded (modelDir : String) (cfg : SpeakerEncoderC
   let d4 := cfg.encDilations.getD 4 1
   let mfaIn := c1 + c2 + c3
 
-  if c0 != c1 || c1 != c2 || c2 != c3 then
-    throw <| IO.userError "speaker encoder expects enc_channels[0..3] to match for residual SE-Res2Net blocks"
-  if c4 != mfaIn then
-    throw <| IO.userError "speaker encoder expects enc_channels[4] = enc_channels[1] + enc_channels[2] + enc_channels[3]"
 
   let tdnn0 ← loadTimeDelayNetBlockSharded modelDir
     "speaker_encoder.blocks.0" cfg.melDim c0 k0 d0
@@ -371,7 +355,7 @@ def loadSharded
     : IO (Σ dtypes : DTypeLayout, Qwen3TTSForConditionalGeneration (device := targetDevice) cfg dtypes) := do
   log.onInfo s!"Loading Qwen3TTS weights from {modelDir}..."
   log.onInfo s!"Qwen3-TTS target device: {repr targetDevice}"
-  let codecEmbedding ← safetensors.loadTensorShardedExact modelDir
+  let codecEmbedding ← (← safetensors.Source.open modelDir).load
     "talker.model.codec_embedding.weight"
     #[cfg.talkerConfig.vocabSize, cfg.talkerConfig.hiddenSize] targetDevice
   let talkerFloating ← IO.ofExcept (DType.realFloating? codecEmbedding.1)
@@ -382,7 +366,7 @@ def loadSharded
 
   if cfg.ttsModelType == "base" then
     let scfg := cfg.speakerEncoderConfig
-    let firstWeight ← safetensors.loadTensorShardedExact modelDir
+    let firstWeight ← (← safetensors.Source.open modelDir).load
       "speaker_encoder.blocks.0.conv.weight"
       #[scfg.encChannels.getD 0 512, scfg.melDim, scfg.encKernelSizes.getD 0 5] targetDevice
     let speakerFloating ← IO.ofExcept (DType.realFloating? firstWeight.1)

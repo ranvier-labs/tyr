@@ -80,26 +80,23 @@ def zeros (batch maxLen : Nat) (device : Device) (dtype : DType := .Float32) :
   pure b
 
 /-- Return a buffer batch containing the freshly packed batch. Retained
-destination aliases preserve their values. The batch
-    and maxLen indices may differ at the type level (the packed batch carries
-    existentials / structure projections); runtime shapes must match. Float
-    fields are explicitly cast to the buffer dtype for BF16 staging; integral
-    fields must already match the destination dtype. -/
-def copyInto {source : DType} {b1 b2 m1 m2 : Nat}
-    (dst : BranchingMoleculeBatch (dtype := dtype) (device := device) b1 m1)
-    (src : BranchingMoleculeBatch (dtype := source) (device := device) b2 m2) :
-    IO (BranchingMoleculeBatch (dtype := dtype) (device := device) b1 m1) := do
+destination aliases preserve their values. Float fields are explicitly cast to
+the buffer dtype for BF16 staging; integral fields already match. -/
+def copyInto {source : DType} {batch maxLen : Nat}
+    (dst : BranchingMoleculeBatch (dtype := dtype) (device := device) batch maxLen)
+    (src : BranchingMoleculeBatch (dtype := source) (device := device) batch maxLen) :
+    IO (BranchingMoleculeBatch (dtype := dtype) (device := device) batch maxLen) := do
   return {
-    t := ← copyIntoChecked dst.t (Tensor.castLike dst.t src.t)
-    coord := ← copyIntoChecked dst.coord (Tensor.castLike dst.coord src.coord)
-    coordAnchor := ← copyIntoChecked dst.coordAnchor (Tensor.castLike dst.coordAnchor src.coordAnchor)
-    label := ← copyIntoChecked dst.label src.label
-    labelAnchor := ← copyIntoChecked dst.labelAnchor src.labelAnchor
-    labelLossScale := ← copyIntoChecked dst.labelLossScale (Tensor.castLike dst.labelLossScale src.labelLossScale)
-    padmask := ← copyIntoChecked dst.padmask src.padmask
-    flowmask := ← copyIntoChecked dst.flowmask src.flowmask
-    splitsTarget := ← copyIntoChecked dst.splitsTarget (Tensor.castLike dst.splitsTarget src.splitsTarget)
-    delTarget := ← copyIntoChecked dst.delTarget (Tensor.castLike dst.delTarget src.delTarget) }
+    t := ← Tensor.copyInto dst.t (Tensor.castDType src.t dtype)
+    coord := ← Tensor.copyInto dst.coord (Tensor.castDType src.coord dtype)
+    coordAnchor := ← Tensor.copyInto dst.coordAnchor (Tensor.castDType src.coordAnchor dtype)
+    label := ← Tensor.copyInto dst.label src.label
+    labelAnchor := ← Tensor.copyInto dst.labelAnchor src.labelAnchor
+    labelLossScale := ← Tensor.copyInto dst.labelLossScale (Tensor.castDType src.labelLossScale dtype)
+    padmask := ← Tensor.copyInto dst.padmask src.padmask
+    flowmask := ← Tensor.copyInto dst.flowmask src.flowmask
+    splitsTarget := ← Tensor.copyInto dst.splitsTarget (Tensor.castDType src.splitsTarget dtype)
+    delTarget := ← Tensor.copyInto dst.delTarget (Tensor.castDType src.delTarget dtype) }
 
 /-- Force every constructed field eagerly (see `touchTensor`). -/
 def eval {batch maxLen : Nat}
@@ -245,7 +242,7 @@ private def moleculeMaskedWeightedCrossEntropy {batch maxLen vocab : Nat}
   let targets2 := Tensor.reshape targets #[n]
   let mask2 := Tensor.reshape mask #[n]
   let weights2 := Tensor.reshape weights #[n]
-  let per := Tensor.crossEntropyNoneChecked logits2 targets2
+  let per := Tensor.crossEntropyNone! logits2 targets2
   let masked := Tensor.mul (Tensor.mul per mask2) weights2
   let denom := Tensor.sumAll mask2
   Tensor.div (Tensor.sumAll masked) (Tensor.addScalar denom 1.0e-8)
@@ -254,14 +251,14 @@ private def moleculeFlowLossScale {batch maxLen : Nat}
     (t : Tensor { dtype := dtype, device := device, shape := #[batch] }) : Tensor { dtype := dtype, device := device, shape := #[batch, maxLen] } :=
   let remaining : Tensor { dtype := dtype, device := device, shape := #[batch] } := Tensor.addScalar (Tensor.mulScalar t (-1.0)) 1.2
   let scale : Tensor { dtype := dtype, device := device, shape := #[batch] } := powDynamic remaining (-1.0)
-  Tensor.expand (Tensor.unsqueeze scale 1) #[batch, maxLen]
+  Tensor.broadcastTo (Tensor.unsqueeze scale 1) #[batch, maxLen]
 
 private def moleculeMaskedWeightedMSE3d {batch maxLen dim : Nat}
     (pred target : Tensor { dtype := dtype, device := device, shape := #[batch, maxLen, dim] })
     (mask : Tensor { dtype := .Float32, device := device, shape := #[batch, maxLen] })
     (weights : Tensor { dtype := dtype, device := device, shape := #[batch, maxLen] }) : Tensor { dtype := .Float32, device := device, shape := #[] } :=
-  let mask3 := Tensor.expand (Tensor.unsqueeze mask 2) #[batch, maxLen, dim]
-  let weights3 := Tensor.expand (Tensor.unsqueeze weights 2) #[batch, maxLen, dim]
+  let mask3 := Tensor.broadcastTo (Tensor.unsqueeze mask 2) #[batch, maxLen, dim]
+  let weights3 := Tensor.broadcastTo (Tensor.unsqueeze weights 2) #[batch, maxLen, dim]
   let diff := Tensor.sub pred target
   let sq := Tensor.mul diff diff
   let masked := Tensor.mul (Tensor.mul sq mask3) weights3
@@ -415,7 +412,7 @@ Apply the same first-dimension-versus-rest flattening used by the Julia Muon
 rule before Newton–Schulz orthogonalization.  This also makes vector leaves a
 valid `n × 1` matrix for the IO-backed Tyr kernel.
 -/
-private def moleculeMuonOrthogonalize {σ : StaticSpec}
+private def moleculeMuonOrthogonalize {σ : StaticSpec} [DType.RealFloating σ.dtype]
     (grad : Tensor σ) (numIters : Nat) : IO (Tensor (σ.withDType .BFloat16)) := do
   let dims := flattenedMatrixShape σ.shape
   have hDims : TensorSpec.numelOfShape #[dims.1, dims.2] = TensorSpec.numelOfShape σ.shape := by
@@ -449,7 +446,7 @@ def moleculeMuonStep [TensorStruct Params] [FloatingTensorStruct Params]
   let nesterov := FloatingTensorStruct.zipWith (fun grad mom =>
     Tensor.add (Tensor.mulScalar grad (1.0 - momentumCoeff)) (Tensor.mulScalar mom momentumCoeff))
     rawGrads momentum
-  let orth ← TensorStruct.mapM (fun {σ} grad => do
+  let orth ← FloatingTensorStruct.mapM (fun {σ} [DType.RealFloating σ.dtype] grad => do
     let direction ← moleculeMuonOrthogonalize grad numIters
     let (rows, cols) := flattenedMatrixShape σ.shape
     let aspect := Float.sqrt (max 1.0 (rows.toFloat / cols.toFloat))
@@ -491,13 +488,15 @@ def moleculeMuonStepT [TensorStruct Params] [FloatingTensorStruct Params]
   let nesterov := FloatingTensorStruct.zipWith (fun grad mom =>
     Tensor.add (Tensor.mulScalar grad (1.0 - momentumCoeff)) (Tensor.mulScalar mom momentumCoeff))
     rawGrads momentum
-  let orth ← TensorStruct.mapM (fun {σ} grad => do
+  let orth ← FloatingTensorStruct.mapM (fun {σ} [DType.RealFloating σ.dtype] grad => do
     let direction ← moleculeMuonOrthogonalize grad numIters
     let (rows, cols) := flattenedMatrixShape σ.shape
     let aspect := Float.sqrt (max 1.0 (rows.toFloat / cols.toFloat))
-    let promoted ← IO.ofExcept (mulTensorScalar? (Tensor.mulScalar direction aspect) lrT)
-    let scaled ← IO.ofExcept (Tensor.castLike? grad promoted.tensor)
-    IO.ofExcept (Tensor.ofRaw scaled.raw)) nesterov
+    let scaled := Tensor.mulScalar direction aspect
+    let lr : Tensor (σ.withDType .Float32) := Tensor.broadcastTo (lrT.to grad.device) σ.shape
+    let product : Tensor (σ.withDType .BFloat16) :=
+      (Tensor.mul (floatDynamic scaled) lr).castDType .BFloat16
+    pure (Tensor.castLike (σ := σ.withDType .BFloat16) (τ := σ) grad product)) nesterov
   let params' := TensorStructFor.zipWith
       (P := fun σ => σ.dtype = .Float32 ∧ σ.device = device)
       (fun {σ} proof param direction => by

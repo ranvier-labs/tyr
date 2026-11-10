@@ -24,9 +24,9 @@ variable {device : Device}
     Special tokens have 0 bytes (don't contribute to BPB). -/
 structure TokenBytes where
   /-- Vocabulary size -/
-  vocabSize : UInt32
+  vocabSize : Nat
   /-- Bytes per token ID as Int64 tensor of shape [vocabSize] -/
-  bytes : Tensor { shape := #[vocabSize.toNat], dtype := .Int64, device := .CPU }
+  bytes : Tensor { shape := #[vocabSize], dtype := .Int64, device := .CPU }
   deriving Repr
 
 private def indexSelect1d {n k : Nat} (t : Tensor { shape := #[n], dtype := .Int64, device := device })
@@ -36,16 +36,16 @@ private def indexSelect1d {n k : Nat} (t : Tensor { shape := #[n], dtype := .Int
 
 /-- Transfer the byte table without leaving the IO error boundary. -/
 private def bytesAt (tb : TokenBytes) (device : Device) :
-    IO (Tensor { shape := #[tb.vocabSize.toNat], dtype := .Int64, device }) := do
+    IO (Tensor { shape := #[tb.vocabSize], dtype := .Int64, device }) := do
   let raw ← RawTensor.convertIO tb.bytes.shape tb.bytes.raw device none
-  IO.ofExcept (Tensor.ofRaw raw)
+  pure (Tensor.ofRaw! raw)
 
 /-- Build token bytes mapping from a BPE tokenizer.
     For each token:
     - Regular tokens: count UTF-8 bytes from idToBytes
     - Special tokens: 0 bytes -/
 def TokenBytes.fromTokenizer (tok : BPETokenizer) : TokenBytes :=
-  let byteCounts : Array Int64 := Array.ofFn (n := tok.vocabSize.toNat) fun id =>
+  let byteCounts : Array Int64 := Array.ofFn (n := tok.vocabSize) fun id =>
     let tokenId : TokenId := id.val.toUInt32
     if tok.isSpecialToken tokenId then
       -- Special tokens contribute 0 bytes
@@ -56,7 +56,7 @@ def TokenBytes.fromTokenizer (tok : BPETokenizer) : TokenBytes :=
       | none => 0
 
   { vocabSize := tok.vocabSize
-    bytes := Tensor.fromInt64ArrayShaped byteCounts #[tok.vocabSize.toNat] (by simp [byteCounts]) }
+    bytes := Tensor.fromInt64ArrayShaped byteCounts #[tok.vocabSize] (by simp [byteCounts]) }
 
 /-- Compute total bytes from an array of token IDs.
     Uses the token bytes mapping to sum up byte counts. -/
@@ -67,8 +67,7 @@ def TokenBytes.totalBytes (tb : TokenBytes) (tokenIds : Array UInt32) : IO UInt6
   -- Use index_select to get byte counts for each token
   let bytesPerToken ← indexSelect1d tb.bytes idxTensor
   -- Sum all bytes
-  let total ← IO.ofExcept (Tensor.sumAll? bytesPerToken)
-  let totalFloat ← IO.ofExcept (Tensor.item? total)
+  let totalFloat := Tensor.item (Tensor.sumAll bytesPerToken)
   return totalFloat.toUInt64
 
 /-- Compute total bytes for a 1D tensor of token IDs.
@@ -78,8 +77,7 @@ def TokenBytes.totalBytesFromTensor (tb : TokenBytes) (tokenIds : Tensor { shape
   -- Index into bytes to get byte counts per token
   let bytesPerToken ← indexSelect1d (← bytesAt tb device) tokenIds
   -- Sum all bytes
-  let total ← IO.ofExcept (Tensor.sumAll? bytesPerToken)
-  let totalFloat ← IO.ofExcept (Tensor.item? total)
+  let totalFloat := Tensor.item (Tensor.sumAll bytesPerToken)
   return totalFloat.toUInt64
 
 /-- Compute total bytes with a loss mask.
@@ -98,10 +96,8 @@ def TokenBytes.totalBytesWithMask (tb : TokenBytes)
   let bytesPerToken ← indexSelect1d (← bytesAt tb device) flatIds
 
   -- Multiply by mask and sum (mask is Float32, so cast the counts)
-  let bytesFloat ← IO.ofExcept (bytesPerToken.castDType? .Float32)
-  let maskedBytes ← IO.ofExcept (Tensor.mul? bytesFloat flatMask)
-  let summed ← IO.ofExcept (Tensor.sumAll? maskedBytes)
-  let total ← IO.ofExcept (Tensor.item? summed)
+  let bytesFloat := bytesPerToken.castDType .Float32
+  let total := Tensor.item (Tensor.sumAll (Tensor.mul bytesFloat flatMask))
   return total.toUInt64
 
 /-- Compute total bytes with a loss mask, with the batch and sequence
@@ -121,33 +117,33 @@ def TokenBytes.save (tb : TokenBytes) (path : String) : IO Unit := do
 
     Unlike the legacy loader, the stored tensor is validated against the
     claimed spec (`[vocabSize]`, Int64) and a mismatch is an IO error. -/
-def TokenBytes.load (path : String) (vocabSize : UInt32) : IO TokenBytes := do
-  let bytes ← Tensor.loadTensorExact {shape := #[vocabSize.toNat], dtype := .Int64, device := .CPU} path
+def TokenBytes.load (path : String) (vocabSize : Nat) : IO TokenBytes := do
+  let bytes ← Tensor.loadTensorExact {shape := #[vocabSize], dtype := .Int64, device := .CPU} path
   return { vocabSize, bytes }
 
 /-- Create a dummy token bytes mapping for testing.
     Assumes each token represents 2 bytes on average (rough approximation). -/
-def TokenBytes.dummy (vocabSize : UInt32) : TokenBytes :=
-  let byteCounts : Array Int64 := Array.replicate vocabSize.toNat 2  -- Default 2 bytes per token
-  { vocabSize, bytes := Tensor.fromInt64ArrayShaped byteCounts #[vocabSize.toNat] (by simp [byteCounts]) }
+def TokenBytes.dummy (vocabSize : Nat) : TokenBytes :=
+  let byteCounts : Array Int64 := Array.replicate vocabSize 2  -- Default 2 bytes per token
+  { vocabSize, bytes := Tensor.fromInt64ArrayShaped byteCounts #[vocabSize] (by simp [byteCounts]) }
 
 /-- Create a realistic token bytes mapping for testing.
     Uses a distribution typical of BPE tokenizers:
     - Single bytes (0-255): 1 byte each
     - Common words: 3-6 bytes
     - Special tokens (last 100): 0 bytes -/
-def TokenBytes.realistic (vocabSize : UInt32) (numSpecialTokens : UInt32 := 100) : TokenBytes :=
-  let byteCounts : Array Int64 := Array.ofFn (n := vocabSize.toNat) fun id =>
+def TokenBytes.realistic (vocabSize : Nat) (numSpecialTokens : Nat := 100) : TokenBytes :=
+  let byteCounts : Array Int64 := Array.ofFn (n := vocabSize) fun id =>
     if id.val < 256 then
       -- Base bytes: 1 byte each
       1
-    else if id.val >= vocabSize.toNat - numSpecialTokens.toNat then
+    else if id.val >= vocabSize - numSpecialTokens then
       -- Special tokens: 0 bytes
       0
     else
       -- Regular tokens: average ~3 bytes (BPE merges)
       3
 
-  { vocabSize, bytes := Tensor.fromInt64ArrayShaped byteCounts #[vocabSize.toNat] (by simp [byteCounts]) }
+  { vocabSize, bytes := Tensor.fromInt64ArrayShaped byteCounts #[vocabSize] (by simp [byteCounts]) }
 
 end tokenizer

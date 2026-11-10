@@ -8,15 +8,10 @@ open torch
   let σ : StaticSpec := ⟨#[1, 1, 2, 2], .Float64, .CPU⟩
   let q := Tensor.zerosFor σ
   let values := ((Tensor.fromFloatArray #[2, 4, 6, 8]).reshape #[1, 1, 2, 2]).castDType .Float64
-  let v : Tensor σ ← match Tensor.ofRaw values.raw with
-    | .ok t => pure t
-    | .error message => throw <| IO.userError message
+  let v : Tensor σ := values
   let full := Tensor.attention q q v false
   let causal := Tensor.attention q q v true
   for output in #[full, causal] do
-    match output.validate with
-    | .ok () => pure ()
-    | .error message => LeanTest.fail message
   LeanTest.assertEqual (← full.toFloatArray) #[4, 6, 4, 6]
   LeanTest.assertEqual (← causal.toFloatArray) #[2, 4, 4, 6]
 
@@ -42,7 +37,7 @@ open torch
   let result := Tensor.conv2dBias x kernel (Tensor.full #[1] 0.5)
   LeanTest.assertEqual result.runtimeShape #[1, 1, 2, 2]
   LeanTest.assertEqual (← result.toFloatArray) #[12.5, 16.5, 24.5, 28.5]
-  let joined := Tensor.catManyChecked
+  let joined := Tensor.catMany!
     #[(Tensor.fromFloatArray #[1, 2]).packShape, (Tensor.fromFloatArray #[3]).packShape] 0 #[3]
   LeanTest.assertEqual (← joined.toFloatArray) #[1, 2, 3]
 
@@ -52,12 +47,15 @@ open torch
   LeanTest.assertEqual (← sampled.toFloatArray) (Array.replicate 16 (-7.0))
     "Lean Int64 bounds cross the C ABI with their signed bit pattern intact"
 
-@[test] def testTypedFlashAttentionCheckedErrors : IO Unit := do
+example (_q : Tensor ⟨#[1, 1, 2, 2], .Float32, .CPU⟩) (_ints : Tensor ⟨#[1, 1, 2, 2], .Int64, .CPU⟩) : True := by
+  have _ := Tensor.flashAttention _q _q _q
+  fail_if_success have _ := Tensor.flashAttention _ints _ints _ints
+  trivial
+
+@[test] def testTypedFlashAttentionValuesAndDropoutErrors : IO Unit := do
   let q := Tensor.zeros #[1, 1, 2, 2]
   let v := (Tensor.fromFloatArray #[2, 4, 6, 8]).reshape #[1, 1, 2, 2]
-  let result ← match Tensor.flashAttention? q q v with
-    | .ok result => pure result
-    | .error message => LeanTest.fail message
+  let result := Tensor.flashAttention q q v
   LeanTest.assertEqual (← result.toFloatArray) #[4, 6, 4, 6]
   LeanTest.assertTrue (result.actualSpec == q.actualSpec)
   for dropout in #[-0.5, 1.5] do
@@ -68,10 +66,6 @@ open torch
       LeanTest.assertTrue (!error.toString.isEmpty)
       pure true
     LeanTest.assertTrue rejected "Invalid FlashAttention dropout must return IO.error"
-  let ints := q.castDType .Int64
-  match Tensor.flashAttention? ints ints ints with
-  | .ok _ => LeanTest.fail "Integer FlashAttention must return an error"
-  | .error message => LeanTest.assertTrue (!message.isEmpty)
 
 @[test] def testTypedRandintRecoverableErrors : IO Unit := do
   for (low, high, device) in #[(3, 3, Device.CPU), (4, 3, Device.CPU)] do
@@ -104,7 +98,7 @@ example (_matrix : Tensor ⟨#[2, 3], .Float32, .CPU⟩) : True := by
     let w := weights.castDType dtype
     let norm : RMSNorm 4 dtype := { weight := w, eps := ⟨0.01⟩ }
     let normalized := Tensor.rmsNormWeighted x.toFloat32 (Tensor.ones #[4]) 0.01
-    let expected := Tensor.mul (Tensor.castLike x normalized) (w.expand #[1, 2, 4])
+    let expected := Tensor.mul (Tensor.castLike x normalized) (w.broadcastTo #[1, 2, 4])
     let outputs := #[norm.forward3d x,
       (norm.forward2d (x.reshape #[2, 4])).reshape #[1, 2, 4],
       (norm.forward4d (x.reshape #[1, 1, 2, 4])).reshape #[1, 2, 4],

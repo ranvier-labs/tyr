@@ -1,7 +1,6 @@
 import LeanTest
 import Tyr.Typed.Neural
 import Tyr.Inference.OwnedKV
-import Tyr.Model.BranchingFlows.TypedOps
 
 namespace Tests.TensorValueUpdates
 
@@ -18,7 +17,7 @@ open torch
 
 @[test] def testCopyIntoPreservesStorageView : IO Unit := do
   let original := Tensor.full #[4] 3
-  let view := original.sliceChecked 0 1 2 #[2]
+  let view := original.slice 0 1 2
   let updated ← Tensor.copyInto original (Tensor.full #[4] 7)
   LeanTest.assertEqual (← view.toFloatArray) #[3, 3]
     "A retained storage view must preserve its original values"
@@ -40,18 +39,11 @@ open torch
 
 @[test] def testSliceScatterPreservesStorageView : IO Unit := do
   let original := Tensor.full #[4] 3
-  let view := original.sliceChecked 0 1 2 #[2]
+  let view := original.slice 0 1 2
   let updated := Tensor.sliceScatter original 0 1 (Tensor.full #[2] 7)
   LeanTest.assertEqual (← view.toFloatArray) #[3, 3]
     "Functional slice updates must preserve retained storage views"
   LeanTest.assertEqual (← updated.toFloatArray) #[3, 7, 7, 3]
-
-@[test] def testBranchingCopyPreservesDestinationAlias : IO Unit := do
-  let original := Tensor.full #[2] 3
-  let updated ← branching.copyIntoChecked? original (Tensor.full #[2] 7)
-  LeanTest.assertEqual (← original.toFloatArray) #[3, 3]
-    "Branching copy must preserve retained destination aliases"
-  LeanTest.assertEqual (← updated.toFloatArray) #[7, 7]
 
 @[test] def testDynamicCopyPreservesDTypeAndRejectsImplicitCast : IO Unit := do
   let original := (Tensor.fullInt #[2] 3)
@@ -59,10 +51,6 @@ open torch
   LeanTest.assertEqual copied.raw.dtype DType.Int64
   LeanTest.assertTrue (copied.raw.device == original.raw.device)
   LeanTest.assertEqual (← copied.toFloatArray) #[7, 7]
-  let mismatched := (Tensor.full #[2] 1.75).raw
-  let rejected := Tensor.checkedUpdate? (σ := original.staticSpec) .Int64 .CPU mismatched
-  LeanTest.assertTrue rejected.toOption.isNone
-    "A consumed update result must retain the destination's exact dtype"
   LeanTest.assertEqual (← original.toFloatArray) #[3, 3]
 
 @[test] def testDynamicRequiresGradPreservesNativeMetadata : IO Unit := do

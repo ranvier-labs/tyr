@@ -33,7 +33,7 @@ open torch.dist
 
 /-- Runtime environment state for standalone training. -/
 structure TrainEnvState where
-  localRank? : Option UInt64 := none
+  localRank? : Option Nat := none
   worldSize? : Option Nat := none
   rank? : Option Nat := none
   masterAddr? : Option String := none
@@ -43,7 +43,7 @@ structure TrainEnvState where
 
 /-- Resolve distributed/device env vars once into a typed structure. -/
 def loadTrainEnvState : IO TrainEnvState := do
-  let localRank? := ((← IO.getEnv "LOCAL_RANK").bind (·.toNat?)).map (·.toUInt64)
+  let localRank? := (← IO.getEnv "LOCAL_RANK").bind (·.toNat?)
   let worldSize? := (← IO.getEnv "WORLD_SIZE").bind (·.toNat?)
   let rank? := (← IO.getEnv "RANK").bind (·.toNat?)
   let masterAddr? := (← IO.getEnv "MASTER_ADDR")
@@ -69,9 +69,9 @@ structure Args where
   /-- Resume from checkpoint -/
   resume : Option String := none
   /-- Override number of iterations -/
-  numIterations : Option UInt64 := none
+  numIterations : Option Nat := none
   /-- Local rank for distributed training (from env) -/
-  localRank : UInt64 := 0
+  localRank : Nat := 0
   /-- Run in debug mode with small model -/
   debug : Bool := false
   deriving Repr, Inhabited
@@ -85,28 +85,28 @@ def parseArgs (args : List String) : Args :=
     | "--checkpoint-dir" :: dir :: rest, acc => go rest { acc with checkpointDir := dir }
     | "--resume" :: path :: rest, acc => go rest { acc with resume := some path }
     | "--iterations" :: n :: rest, acc =>
-        go rest { acc with numIterations := n.toNat?.map (·.toUInt64) }
+        go rest { acc with numIterations := n.toNat? }
     | "--local-rank" :: n :: rest, acc =>
-        go rest { acc with localRank := (n.toNat?.map (·.toUInt64)).getD acc.localRank }
+        go rest { acc with localRank := (n.toNat?).getD acc.localRank }
     | "--local_rank" :: n :: rest, acc =>
-        go rest { acc with localRank := (n.toNat?.map (·.toUInt64)).getD acc.localRank }
+        go rest { acc with localRank := (n.toNat?).getD acc.localRank }
     | "--debug" :: rest, acc => go rest { acc with debug := true }
     | arg :: rest, acc =>
         if arg.startsWith "--local-rank=" then
           let v := arg.drop "--local-rank=".length
-          go rest { acc with localRank := (v.toNat?.map (·.toUInt64)).getD acc.localRank }
+          go rest { acc with localRank := (v.toNat?).getD acc.localRank }
         else if arg.startsWith "--local_rank=" then
           let v := arg.drop "--local_rank=".length
-          go rest { acc with localRank := (v.toNat?.map (·.toUInt64)).getD acc.localRank }
+          go rest { acc with localRank := (v.toNat?).getD acc.localRank }
         else if arg.startsWith "--local-rank:" then
           let v := arg.drop "--local-rank:".length
-          go rest { acc with localRank := (v.toNat?.map (·.toUInt64)).getD acc.localRank }
+          go rest { acc with localRank := (v.toNat?).getD acc.localRank }
         else
           go rest acc
   go args default
 
 /-- Get local rank from typed env state (for torchrun). -/
-def getLocalRankFromEnv (env : TrainEnvState) : UInt64 :=
+def getLocalRankFromEnv (env : TrainEnvState) : Nat :=
   env.localRank?.getD 0
 
 /-- Get world size from typed env state. -/
@@ -115,7 +115,7 @@ def getWorldSizeFromEnv (env : TrainEnvState) : Nat :=
 
 /-- Get global rank from typed env state (for distributed training). -/
 def getRankFromEnv (env : TrainEnvState) : Nat :=
-  env.rank?.getD (getLocalRankFromEnv env).toNat
+  env.rank?.getD (getLocalRankFromEnv env)
 
 /-- Render a device for logging. -/
 def deviceToString (device : Device) : String :=
@@ -126,7 +126,7 @@ def deviceToString (device : Device) : String :=
 
 /-- Resolve training device from TYR_DEVICE.
     In distributed mode, CUDA ordinal follows LOCAL_RANK (per-node index). -/
-def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) (env : TrainEnvState) : IO Device := do
+def resolveTrainingDevice (_rank localRank : Nat) (isDistributed : Bool) (env : TrainEnvState) : IO Device := do
   let cudaOrdinal := if isDistributed then localRank else 0
   let requested? := env.requestedDevice?
   match requested? with
@@ -173,7 +173,7 @@ def runTraining (args : Args) (env : TrainEnvState) : IO Unit := do
       pure (0, 1)
   let localRank := env.localRank?.getD args.localRank
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed env
-  let seed := 42 + rank
+  let seed : UInt64 := 42 + rank.toUInt64
   manualSeed seed
   IO.println s!"Rank {rank}/{worldSize} local={localRank} device={deviceToString trainDevice}"
 
@@ -197,10 +197,10 @@ def runTraining (args : Args) (env : TrainEnvState) : IO Unit := do
       { Config.default with
         nLayer := 4
         nHead := 4
-        headDim := 64
-        modelDim := 256
+        halfHeadDim := 32
         maxSeqLen := 512
         blockSize := 64
+        maxSeqLenPos := by decide
       }
     else
       Config.default
@@ -242,13 +242,13 @@ def runTraining (args : Args) (env : TrainEnvState) : IO Unit := do
     bosToken := 50256  -- GPT-2 BOS
     numWorkers := 4
     bufferSize := 8
-    seed := 42 + rank  -- Different seed per rank
+    seed := 42 + rank.toUInt64  -- Different seed per rank
   }
 
   if isMaster then
     IO.println s!"Training for {hp.numIterations + hp.extensionIterations} iterations"
     IO.println s!"  Cooldown fraction: {hp.cooldownFrac}"
-    IO.println s!"  Gradient accumulation: {effectiveGradAccumSteps hp worldSize.toNat}"
+    IO.println s!"  Gradient accumulation: {effectiveGradAccumSteps hp worldSize}"
     IO.println s!"  Validation interval: {hp.valInterval}"
     IO.println ""
 

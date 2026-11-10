@@ -5,10 +5,10 @@ import Tests.Assertions
 namespace Tests.SpeechTokenizerDTypes
 open torch torch.qwen3tts
 
-example (_rvq : RVQDecode (device := .CPU))
+example (_rvq : RVQDecode (device := .CPU) (count := 1))
     (_weight : Tensor ⟨#[512, 256, 1], .Float64, .CPU⟩) : True := by
   fail_if_success
-    have _ : RVQDecode (device := .CPU) := { _rvq with outputProj := _weight }
+    have _ : RVQDecode (device := .CPU) (count := 1) := { _rvq with outputProj := _weight }
   trivial
 
 private abbrev bf16 : RealFloatingDType := ⟨.BFloat16, by decide⟩
@@ -17,8 +17,8 @@ example (_layout : SpeechTokenizerDTypes)
     (_codebook : QuantizerCodebook (device := .CPU) _layout)
     (_projection : Tensor ⟨#[512, 256, 1], .Float32, .CPU⟩) : True := by
   fail_if_success
-    have _ : RVQDecode (device := .CPU) _layout :=
-      { outputProj := _projection, codebooks := #[] }
+    have _ : RVQDecode (device := .CPU) _layout (count := 0) :=
+      { outputProj := _projection, codebooks := Vector.empty }
   fail_if_success
     have _ : QuantizerCodebook (device := .CPU) float32SpeechTokenizerDTypes := _codebook
   trivial
@@ -36,8 +36,8 @@ example : True := by
   for (compute, usage, sum) in #[(float32DType, float32DType, bf16),
       (float32DType, bf16, float32DType), (bf16, bf16, bf16)] do
     let layout ← IO.ofExcept (SpeechTokenizerDTypes.ofDTypes? compute.val usage.val sum.val)
-    let sums ← IO.ofExcept ((Tensor.fromFloatArray #[6, 8]).castDType? layout.sum)
-    let counts ← IO.ofExcept ((Tensor.fromFloatArray #[2, 4]).castDType? layout.usage)
+    let sums := (Tensor.fromFloatArray #[6, 8]).castDType layout.sum
+    let counts := (Tensor.fromFloatArray #[2, 4]).castDType layout.usage
     let result : Tensor ⟨#[2], layout.compute.val, .CPU⟩ := layout.divideCodebook sums counts
     LeanTest.assertEqual result.raw.dtype compute.val
     LeanTest.assertEqual (← result.toFloatArray) #[3, 2]
@@ -84,7 +84,7 @@ private def writeAnchors (path : System.FilePath) (computeShape : Array Nat)
   LeanTest.assertEqual layout.compute.val .Float32
   LeanTest.assertEqual layout.usage .Float32
   LeanTest.assertEqual layout.sum .BFloat16
-  let sums ← safetensors.loadTensorExact path.toString "sum" #[2048, 256]
+  let sums ← (← safetensors.Source.open path.toString).load "sum" #[2048, 256]
   let checked ← IO.ofExcept (sums.atDType? layout.sum)
   LeanTest.assertEqual checked.raw.dtype .BFloat16
   LeanTest.assertEqual checked.runtimeShape #[2048, 256]

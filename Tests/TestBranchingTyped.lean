@@ -17,11 +17,11 @@ private def fixture : BranchingBridgeResult MoleculeAtom := {
 
 @[test] def testBranchingIndexedBatchAndStaticBuffers : IO Unit := do
   let cfg : BranchingTrainConfig := { maxLen := 2 }
-  let ⟨_, packed⟩ ← packBranchingMolecule cfg fixture
+  let ⟨batch, packed⟩ ← packBranchingMolecule cfg fixture
   LeanTest.assertEqual packed.label.actualSpec.dtype .Int64
   LeanTest.assertEqual packed.padmask.actualSpec.dtype .Int64
   LeanTest.assertEqual packed.coord.actualSpec.dtype .Float32
-  let buffer ← BranchingMoleculeBatch.zeros 1 2 .CPU .BFloat16
+  let buffer ← BranchingMoleculeBatch.zeros batch cfg.maxLen .CPU .BFloat16
   let copied ← buffer.copyInto packed
   LeanTest.assertEqual copied.coord.actualSpec.dtype .BFloat16
   LeanTest.assertEqual copied.t.actualSpec.dtype .BFloat16
@@ -35,26 +35,6 @@ private def fixture : BranchingBridgeResult MoleculeAtom := {
   let converted ← TensorStruct.castTo (Tensor { shape := #[2], dtype := .BFloat16, device := .CPU }) original
   LeanTest.assertEqual converted.actualSpec.dtype .BFloat16
   LeanTest.assertEqual original.actualSpec.dtype .Float32
-
-@[test] def testBranchingStaticCopyRejectsImplicitCastAndBroadcast : IO Unit := do
-  let dst ← data.cloneInferenceIO (Tensor.fullInt #[2] 7)
-  let fractional := Tensor.fromFloatArray #[1.75, 2.25]
-  let dtypeError ← try
-    let _ ← copyIntoChecked? dst fractional
-    pure none
-  catch error => pure (some error.toString)
-  LeanTest.assertTrue (dtypeError.any (·.containsSubstr "dtype mismatch"))
-    "Static buffer copy must reject an implicit Float32-to-Int64 cast"
-  LeanTest.assertEqual (← dst.toUInt64Array) #[7, 7]
-  let shapeError ← try
-    let _ ← copyIntoChecked? dst (Tensor.fullInt #[1] 3)
-    pure none
-  catch error => pure (some error.toString)
-  LeanTest.assertTrue (shapeError.any (·.containsSubstr "shape mismatch"))
-    "Static buffer copy must reject native copy_ broadcasting"
-  LeanTest.assertEqual (← dst.toUInt64Array) #[7, 7]
-  let copied ← copyIntoChecked? dst (Tensor.castLike dst fractional)
-  LeanTest.assertEqual (← copied.toUInt64Array) #[1, 2]
 
 @[test] def testBranchingMuonPreservesBF16Rounding : IO Unit := do
   let param := (Tensor.fromFloatArray #[1, 2, 3, 4, 5, 6]).reshape #[3, 2]
@@ -126,12 +106,12 @@ private def checkBranchingTypedTraining (dtype : DType) [DType.RealFloating dtyp
 private def checkBranchingFullTransformer (dtype : DType) [DType.RealFloating dtype]
     [DType.Promotes dtype .Float32 .Float32] [DType.Promotes .Float32 dtype .Float32]
     [DType.NonBool dtype] : IO Unit := do
-  let initial ← FullMoleculeTransformerParams.init 2 4 1 4 4 2 2
-  let params ← TensorStruct.castTo (FullMoleculeTransformerParams (device := .CPU) 2 4 1 4 4 2 2 dtype) initial
+  let initial ← FullMoleculeTransformerParams.init 2 4 1 (2 * 2) 4 2 2
+  let params ← TensorStruct.castTo (FullMoleculeTransformerParams (device := .CPU) 2 4 1 (2 * 2) 4 2 2 dtype) initial
   let ⟨_, packed0⟩ ← packBranchingMolecule { maxLen := 2 } fixture
   let packed ← packed0.castDType dtype
   let (a, _, _, _) ← params.forward packed.coord packed.label packed.t packed.padmask
-  let (cos, sin) := Tensor.rotaryFreqs 2 4
+  let (cos, sin) := Tensor.rotaryFreqs 2 2
   let (b, _, _, _) ← params.forwardFreqs packed.coord packed.label packed.t packed.padmask cos sin
   LeanTest.assertEqual (← a.toFloatArray) (← b.toFloatArray)
   LeanTest.assertEqual a.actualSpec.dtype dtype

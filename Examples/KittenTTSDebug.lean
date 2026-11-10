@@ -106,7 +106,7 @@ def main (args : List String) : IO UInt32 := do
   torch.manualSeed seed
   let out ← bundle.debugPhonemes phonemes voice speed
   let refStyle ← bundle.loadVoiceStyle voice phonemes.toList.length
-  let decoderStyle : Tensor { shape := #[1, bundle.cfg.styleDim], dtype := .Float32, device := modelDevice } := sliceTensor refStyle 1 0 bundle.cfg.styleDim
+  let decoderStyle : Tensor { shape := #[1, bundle.cfg.styleDim], dtype := .Float32, device := modelDevice } := Tensor.slice refStyle 1 0 bundle.cfg.styleDim (_bounds := by simp [KittenTTSConfig.fullStyleDim]; omega)
   let ids := bundle.inputIdsFromPhonemes phonemes
   let seq := ids.size
   let ⟨hSeq⟩ ← if h : 0 < seq then pure (PLift.up h) else
@@ -155,20 +155,16 @@ def main (args : List String) : IO UInt32 := do
   IO.println s!"pred_durations={out.predDurations}"
   IO.println s!"alignment_frames={out.alignmentFrames}"
   let textEncStats ← tensorStats textEnc
-  let asrStats ← tensorStats out.asr.2
-  let f0Stats ← tensorStats out.f0Curve.2
-  let nStats ← tensorStats out.nCurve.2
+  let asrStats ← tensorStats out.asr
+  let f0Stats ← tensorStats out.f0Curve
+  let nStats ← tensorStats out.nCurve
   let audioStats ← tensorStats out.audio.2
   printStats "text_enc" textEncStats
   printStats "asr" asrStats
   printStats "f0" f0Stats
   printStats "n" nStats
   if hFrames : out.alignmentFrames > 0 then
-    let frames := out.alignmentFrames
-    let asr : Tensor { shape := #[1, bundle.cfg.hiddenDim, frames], dtype := .Float32, device := modelDevice } ← IO.ofExcept (out.asr.2.reshapeChecked? #[1, bundle.cfg.hiddenDim, frames])
-    let f0Curve : Tensor { shape := #[1, 1, 2 * frames], dtype := .Float32, device := modelDevice } ← IO.ofExcept (out.f0Curve.2.reshapeChecked? #[1, 1, 2 * frames])
-    let nCurve : Tensor { shape := #[1, 1, 2 * frames], dtype := .Float32, device := modelDevice } ← IO.ofExcept (out.nCurve.2.reshapeChecked? #[1, 1, 2 * frames])
-    let decoderDebug ← bundle.model.decoder.debugForward asr f0Curve nCurve decoderStyle hFrames
+    let decoderDebug ← bundle.model.decoder.debugForward out.asr out.f0Curve out.nCurve decoderStyle hFrames
     let decoderF0Stats ← tensorStats decoderDebug.f0.2
     let decoderNStats ← tensorStats decoderDebug.n.2
     let decoderEncodeStats ← tensorStats decoderDebug.encode.2

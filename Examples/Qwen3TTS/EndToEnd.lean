@@ -32,15 +32,15 @@ structure Args where
   thinkMode : String := "auto"
   seed : Option UInt64 := none
   temperature : Float := 0.9
-  topK : Nat := 50
+  topK : TopK := none
   topP : Float := 1.0
   repetitionPenalty : Float := 1.05
   suppressTail : Nat := 1024
   subtalkerTemperature : Float := 0.9
-  subtalkerTopK : Nat := 50
+  subtalkerTopK : TopK := none
   subtalkerTopP : Float := 1.0
   subtalkerTemperaturesByGroup : Option (Array Float) := none
-  subtalkerTopKsByGroup : Option (Array Nat) := none
+  subtalkerTopKsByGroup : Option (Array TopK) := none
   subtalkerTopPsByGroup : Option (Array Float) := none
   encodeAudioPath : Option String := none
   encodeOutCodesPath : String := "output/qwen3tts_encoded_codes.txt"
@@ -92,13 +92,13 @@ private def parseFloatCsv? (s : String) : Option (Array Float) := Id.run do
     | none => return none
   if out.isEmpty then none else some out
 
-private def parseNatCsv? (s : String) : Option (Array Nat) := Id.run do
-  let mut out : Array Nat := #[]
+private def parseTopKCsv? (s : String) : Option (Array TopK) := Id.run do
+  let mut out : Array TopK := #[]
   for part in s.splitOn "," do
     let tok := part.trimAscii.toString
     if tok.isEmpty then
       return none
-    match tok.toNat? with
+    match PosNat.parseOrNone? tok with
     | some v => out := out.push v
     | none => return none
   if out.isEmpty then none else some out
@@ -125,7 +125,7 @@ private partial def parseArgsLoop : List String → Args → Args
   | "--temperature" :: v :: rest, acc =>
       parseArgsLoop rest { acc with temperature := (parseFloatLit? v).getD acc.temperature }
   | "--top-k" :: v :: rest, acc =>
-      parseArgsLoop rest { acc with topK := v.toNat?.getD acc.topK }
+      parseArgsLoop rest { acc with topK := (PosNat.parseOrNone? v).getD acc.topK }
   | "--top-p" :: v :: rest, acc =>
       parseArgsLoop rest { acc with topP := (parseFloatLit? v).getD acc.topP }
   | "--repetition-penalty" :: v :: rest, acc =>
@@ -135,13 +135,13 @@ private partial def parseArgsLoop : List String → Args → Args
   | "--subtalker-temperature" :: v :: rest, acc =>
       parseArgsLoop rest { acc with subtalkerTemperature := (parseFloatLit? v).getD acc.subtalkerTemperature }
   | "--subtalker-top-k" :: v :: rest, acc =>
-      parseArgsLoop rest { acc with subtalkerTopK := v.toNat?.getD acc.subtalkerTopK }
+      parseArgsLoop rest { acc with subtalkerTopK := (PosNat.parseOrNone? v).getD acc.subtalkerTopK }
   | "--subtalker-top-p" :: v :: rest, acc =>
       parseArgsLoop rest { acc with subtalkerTopP := (parseFloatLit? v).getD acc.subtalkerTopP }
   | "--subtalker-temp-by-group" :: v :: rest, acc =>
       parseArgsLoop rest { acc with subtalkerTemperaturesByGroup := parseFloatCsv? v }
   | "--subtalker-top-k-by-group" :: v :: rest, acc =>
-      parseArgsLoop rest { acc with subtalkerTopKsByGroup := parseNatCsv? v }
+      parseArgsLoop rest { acc with subtalkerTopKsByGroup := parseTopKCsv? v }
   | "--subtalker-top-p-by-group" :: v :: rest, acc =>
       parseArgsLoop rest { acc with subtalkerTopPsByGroup := parseFloatCsv? v }
   | "--encode-audio-path" :: v :: rest, acc => parseArgsLoop rest { acc with encodeAudioPath := some v }
@@ -206,7 +206,7 @@ private def switchFlag (flag : String) : Bool :=
   ].contains flag
 
 private def validateFlagValue (flag : String) (value : String) : Except String Unit := do
-  if #["--max-text-len", "--max-frames", "--top-k", "--suppress-tail", "--subtalker-top-k",
+  if #["--max-text-len", "--max-frames", "--suppress-tail",
         "--stream-chunk-frames", "--decode-chunk-size", "--decode-left-context"].contains flag then
     if value.toNat?.isNone then
       throw s!"Invalid numeric value for {flag}: {value}"
@@ -220,9 +220,12 @@ private def validateFlagValue (flag : String) (value : String) : Except String U
   if #["--subtalker-temp-by-group", "--subtalker-top-p-by-group"].contains flag then
     if (parseFloatCsv? value).isNone then
       throw s!"Invalid CSV float value for {flag}: {value}"
+  if #["--top-k", "--subtalker-top-k"].contains flag then
+    if (PosNat.parseOrNone? value).isNone then
+      throw s!"Invalid top-k value for {flag}: {value} (expected a positive count or none)"
   if flag == "--subtalker-top-k-by-group" then
-    if (parseNatCsv? value).isNone then
-      throw s!"Invalid CSV integer value for {flag}: {value}"
+    if (parseTopKCsv? value).isNone then
+      throw s!"Invalid CSV top-k value for {flag}: {value} (expected positive counts or none)"
 
 private partial def validateRawArgs : List String → Except String Unit
   | [] => .ok ()
@@ -254,15 +257,15 @@ private def printUsage : IO Unit := do
   IO.println "  --think-mode <auto|think|no-think>  Reasoning-mode codec prefill control (default: auto)"
   IO.println "  --seed <u64>                  Deterministic RNG seed for sampling"
   IO.println "  --temperature <f>             Sampling temperature (default: 0.9)"
-  IO.println "  --top-k <n>                   Top-k sampling (default: 50)"
+  IO.println "  --top-k <n|none>              Top-k sampling (default: none)"
   IO.println "  --top-p <f>                   Top-p sampling (default: 1.0)"
   IO.println "  --repetition-penalty <f>      Repetition penalty for first-codebook sampling (default: 1.05)"
   IO.println "  --suppress-tail <n>           Suppress top tail vocab IDs except EOS (default: 1024)"
   IO.println "  --subtalker-temperature <f>   Subtalker sampling temperature (default: 0.9)"
-  IO.println "  --subtalker-top-k <n>         Subtalker top-k sampling (default: 50)"
+  IO.println "  --subtalker-top-k <n|none>    Subtalker top-k sampling (default: none)"
   IO.println "  --subtalker-top-p <f>         Subtalker top-p sampling (default: 1.0)"
   IO.println "  --subtalker-temp-by-group <csv>  Residual-group temperatures, e.g. 0.9,0.85,0.8"
-  IO.println "  --subtalker-top-k-by-group <csv> Residual-group top-k values, e.g. 50,40,30"
+  IO.println "  --subtalker-top-k-by-group <csv> Residual-group top-k values, e.g. 50,40,none"
   IO.println "  --subtalker-top-p-by-group <csv> Residual-group top-p values, e.g. 1.0,0.95,0.9"
   IO.println "  --encode-audio-path <path>    Encode audio to speech-tokenizer codec IDs"
   IO.println "  --encode-out-codes-path <p>   Output codec-ID file for --encode-audio-path"
@@ -364,13 +367,11 @@ private def loadSpeakerEmbedding? (cfg : Qwen3TTSConfig) (dtype : RealFloatingDT
         throw <| IO.userError
           s!"speaker embedding dim mismatch: speaker enc_dim={cfg.speakerEncoderConfig.encDim}, talker hidden={cfg.talkerConfig.hiddenSize}"
       let path ← expandHome p
-      let raw ← RawTensor.loadTensorExact #[cfg.speakerEncoderConfig.encDim] path
-      let stored ← IO.ofExcept <| SomeDTypeTensor.ofRaw
-        (shape := #[cfg.speakerEncoderConfig.encDim]) (device := .CPU) raw
+      let stored ← SomeDTypeTensor.loadTensorExact #[cfg.speakerEncoderConfig.encDim] .CPU path
       let converted ← RawTensor.convertIO #[cfg.speakerEncoderConfig.encDim] stored.2.raw
         device (some dtype.val)
-      let emb ← IO.ofExcept <| Tensor.ofRaw
-        (σ := ⟨#[cfg.speakerEncoderConfig.encDim], dtype.val, device⟩) converted
+      let emb : Tensor ⟨#[cfg.speakerEncoderConfig.encDim], dtype.val, device⟩ :=
+        Tensor.ofRaw! converted
       pure (some (Tensor.reshape emb #[1, 1, cfg.talkerConfig.hiddenSize] (by simp [hDim])))
 
 private def buildTalkerInputsEquivalent
@@ -400,9 +401,9 @@ private def buildTalkerInputsEquivalent
     Int64.ofNat cfg.ttsPadTokenId.toNat
   ]).to device) #[1, 3]
   let ttsSpecialEmb : Tensor { shape := #[1, 3, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedText model.talker.model ttsSpecialIds
-  let ttsBosEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedSlice ttsSpecialEmb 1 0 1
-  let ttsEosEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedSlice ttsSpecialEmb 1 1 1
-  let ttsPadEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedSlice ttsSpecialEmb 1 2 1
+  let ttsBosEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.slice ttsSpecialEmb 1 0 1
+  let ttsEosEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.slice ttsSpecialEmb 1 1 1
+  let ttsPadEmbed : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.slice ttsSpecialEmb 1 2 1
 
   let codecPrefillIds : Array UInt64 :=
     match thinkMode, languageId with
@@ -451,24 +452,24 @@ private def buildTalkerInputsEquivalent
   let codecInputResult : (Sigma fun n => Tensor { shape := #[1, n, hidden], dtype := dtypes.talker.val, device := device }) :=
     match speakerEmbed with
     | some spk =>
-        let codecWithSpeaker : Tensor { shape := #[1, codecPrefillLen + 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat codecEmb0 spk 1
-        let codecInput : Tensor { shape := #[1, (codecPrefillLen + 1) + 2, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat codecWithSpeaker codecEmb1 1
+        let codecWithSpeaker : Tensor { shape := #[1, codecPrefillLen + 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat codecEmb0 spk 1
+        let codecInput : Tensor { shape := #[1, (codecPrefillLen + 1) + 2, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat codecWithSpeaker codecEmb1 1
         ⟨((codecPrefillLen + 1) + 2), codecInput⟩
     | none =>
-        let codecInput : Tensor { shape := #[1, codecPrefillLen + 2, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat codecEmb0 codecEmb1 1
+        let codecInput : Tensor { shape := #[1, codecPrefillLen + 2, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat codecEmb0 codecEmb1 1
         ⟨(codecPrefillLen + 2), codecInput⟩
 
   let ⟨codecInputLen, codecInput⟩ := codecInputResult
-  let codecPrefix : Tensor { shape := #[1, codecInputLen - 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedSlice codecInput 1 0 (codecInputLen - 1)
-  let padScaffold : Tensor { shape := #[1, codecInputLen - 2, hidden], dtype := dtypes.talker.val, device := device } := Tensor.expand ttsPadEmbed #[1, codecInputLen - 2, hidden]
+  let codecPrefix : Tensor { shape := #[1, codecInputLen - 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.slice codecInput 1 0 (codecInputLen - 1)
+  let padScaffold : Tensor { shape := #[1, codecInputLen - 2, hidden], dtype := dtypes.talker.val, device := device } := Tensor.broadcastTo ttsPadEmbed #[1, codecInputLen - 2, hidden]
   let scaffold0 : Tensor { shape := #[1, codecInputLen - 1, hidden], dtype := dtypes.talker.val, device := device } :=
-    qwen35.typedCat padScaffold ttsBosEmbed 1
+    Tensor.cat padScaffold ttsBosEmbed 1
   let scaffold : Tensor { shape := #[1, codecInputLen - 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.add scaffold0 codecPrefix
-  let partA : Tensor { shape := #[1, 3 + (codecInputLen - 1), hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat roleEmbed scaffold 1
+  let partA : Tensor { shape := #[1, 3 + (codecInputLen - 1), hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat roleEmbed scaffold 1
 
   let textMainTensor : Tensor { shape := #[1, textMainLen], dtype := .Int64, device := device } := idsTensor1 textMainIds
   let textMainEmbed : Tensor { shape := #[1, textMainLen, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedText model.talker.model textMainTensor
-  let textPlusEos : Tensor { shape := #[1, textMainLen + 1, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat textMainEmbed ttsEosEmbed 1
+  let textPlusEos : Tensor { shape := #[1, textMainLen + 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat textMainEmbed ttsEosEmbed 1
   let codecPadIds : Tensor { shape := #[1, textMainLen + 1], dtype := .Int64, device := device } :=
     (Tensor.fullInt #[1, textMainLen + 1] (Int64.ofNat cfg.talkerConfig.codecPadId.toNat)).to device
   let codecPadEmbed : Tensor { shape := #[1, textMainLen + 1, hidden], dtype := dtypes.talker.val, device := device } := TalkerModel.embedCodec model.talker.model codecPadIds
@@ -479,9 +480,9 @@ private def buildTalkerInputsEquivalent
   let partC : Tensor { shape := #[1, 1, hidden], dtype := dtypes.talker.val, device := device } := Tensor.add ttsPadEmbed codecBosEmbed
 
   let partABLen : Nat := (3 + (codecInputLen - 1)) + (textMainLen + 1)
-  let partAB : Tensor { shape := #[1, partABLen, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat partA partB 1
+  let partAB : Tensor { shape := #[1, partABLen, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat partA partB 1
   let outLen : Nat := partABLen + 1
-  let talkerInputs : Tensor { shape := #[1, outLen, hidden], dtype := dtypes.talker.val, device := device } := qwen35.typedCat partAB partC 1
+  let talkerInputs : Tensor { shape := #[1, outLen, hidden], dtype := dtypes.talker.val, device := device } := Tensor.cat partAB partC 1
   pure ((⟨outLen, talkerInputs⟩), ttsPadEmbed)
 
 private def buildBridgeConfig (args : Args) : SpeechTokenizerBridgeConfig := {
@@ -529,7 +530,7 @@ def runEndToEnd (args : Args) : IO Unit := do
   IO.println s!"Language: {args.language}"
   IO.println s!"Target device: {repr targetDevice}"
   let thinkMode := parseThinkMode args.thinkMode
-  let subtalkerTopKsByGroup : Option (Array Nat) :=
+  let subtalkerTopKsByGroup : Option (Array TopK) :=
     args.subtalkerTopKsByGroup
   match args.seed with
   | some seed =>
@@ -542,21 +543,20 @@ def runEndToEnd (args : Args) : IO Unit := do
   let cfg ← Qwen3TTSConfig.loadFromPretrainedDir modelDir
   IO.println s!"Model type: {cfg.ttsModelType}, talker hidden={cfg.talkerConfig.hiddenSize}, code groups={cfg.talkerConfig.numCodeGroups}"
   let vocabTopKMax := cfg.talkerConfig.codePredictorConfig.vocabSize
-  if args.topK > vocabTopKMax then
-    throw <| IO.userError
-      s!"--top-k ({args.topK}) exceeds talker vocab size ({vocabTopKMax})"
-  if args.subtalkerTopK > vocabTopKMax then
-    throw <| IO.userError
-      s!"--subtalker-top-k ({args.subtalkerTopK}) exceeds talker vocab size ({vocabTopKMax})"
-  match args.subtalkerTopKsByGroup with
-  | some ks =>
-      for i in [:ks.size] do
-        let k := ks.getD i 0
-        if k > vocabTopKMax then
+  if let some k := args.topK then
+    if k.val > vocabTopKMax then
+      throw <| IO.userError
+        s!"--top-k ({k.val}) exceeds talker vocab size ({vocabTopKMax})"
+  if let some k := args.subtalkerTopK then
+    if k.val > vocabTopKMax then
+      throw <| IO.userError
+        s!"--subtalker-top-k ({k.val}) exceeds talker vocab size ({vocabTopKMax})"
+  if let some ks := args.subtalkerTopKsByGroup then
+    for h : i in [:ks.size] do
+      if let some k := ks[i] then
+        if k.val > vocabTopKMax then
           throw <| IO.userError
-            s!"--subtalker-top-k-by-group[{i}] ({k}) exceeds talker vocab size ({vocabTopKMax})"
-  | none =>
-      pure ()
+            s!"--subtalker-top-k-by-group[{i}] ({k.val}) exceeds talker vocab size ({vocabTopKMax})"
 
   match args.encodeAudioPath with
   | some audioPath =>
@@ -618,7 +618,7 @@ def runEndToEnd (args : Args) : IO Unit := do
         IO.println s!"Extracted speaker embedding from reference audio: {refAudioPath}"
         -- The speaker encoder has its own stored dtype; conditioning enters
         -- the talker's execution dtype at this explicit model boundary.
-        let emb ← IO.ofExcept (emb.castDType? dtypes.talker.val)
+        let emb := emb.castDType dtypes.talker.val
         pure (some emb)
     | none, none =>
         pure none
@@ -713,10 +713,10 @@ def runEndToEnd (args : Args) : IO Unit := do
       args.subtalkerTemperaturesByGroup subtalkerTopKsByGroup args.subtalkerTopPsByGroup
     let codeLen := out.lengths.getD 0 maxFrames
 
-    let codes3 : Tensor { shape := #[1, maxFrames, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := qwen35.typedSlice out.codes 0 0 1
+    let codes3 : Tensor { shape := #[1, maxFrames, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := Tensor.slice out.codes 0 0 1
     let codes2 : Tensor { shape := #[maxFrames, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } :=
       Tensor.reshape codes3 #[maxFrames, cfg.talkerConfig.numCodeGroups]
-    let trimmed : Tensor { shape := #[codeLen, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := qwen35.typedSlice codes2 0 0 codeLen
+    let trimmed : Tensor { shape := #[codeLen, cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } := Tensor.slice codes2 0 0 codeLen
     let flat : Tensor { shape := #[codeLen * cfg.talkerConfig.numCodeGroups], dtype := .Int64, device := targetDevice } :=
       Tensor.reshape trimmed #[codeLen * cfg.talkerConfig.numCodeGroups]
     let codeVals ← Tensor.toUInt64Array flat

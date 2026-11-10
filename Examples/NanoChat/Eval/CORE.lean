@@ -254,7 +254,7 @@ def computeLosses {batch seq vocab : Nat} (logits : Tensor { shape := #[batch, s
   let batchSeq := batch * seq
   let logitsFlat := Tensor.reshape logits #[batchSeq, vocab]
   let targetsFlat := Tensor.reshape targetIds #[batchSeq]
-  let lossesFlat := Tensor.crossEntropyNone logitsFlat targetsFlat
+  let lossesFlat := Tensor.crossEntropyNone! logitsFlat targetsFlat
   Tensor.reshape lossesFlat #[batch, seq]
 
 /-- Evaluate multiple choice example.
@@ -298,7 +298,9 @@ def evaluateMC {batch seq vocab : Nat}
       let numTokens := endLossIdx - startLossIdx
 
       if numTokens > 0 then
-        let segmentLosses := Tensor.sliceChecked lossesFlat 0 startIdx numTokens #[numTokens]
+        let ⟨hSpan⟩ ← if h : startIdx + numTokens ≤ batch * seq then pure (PLift.up h) else
+          throw <| IO.userError s!"CORE loss span {startIdx}+{numTokens} exceeds {batch * seq}"
+        let segmentLosses := Tensor.slice lossesFlat 0 startIdx numTokens
         let meanLoss := Tensor.item (Tensor.meanAll segmentLosses)
         meanLosses := meanLosses.push meanLoss
       else
@@ -325,6 +327,7 @@ def evaluateMC {batch seq vocab : Nat}
     3. Return correct=true if all predictions match -/
 def evaluateLM {seq vocab : Nat}
     (logits : Tensor { shape := #[1, seq, vocab], dtype := .Float32, device := device })
+    (hVocab : 0 < vocab)
     (targetIds : Tensor { shape := #[1, seq], dtype := .Int64, device := device })
     (batchInfo : BatchInfo) : IO EvalResult := do
   let startIdx := batchInfo.startIndices[0]!
@@ -335,7 +338,7 @@ def evaluateLM {seq vocab : Nat}
 
   -- Get argmax predictions at each position: [1, seq]
   -- predictions[i] is the predicted token for position i+1
-  let predictions ← IO.ofExcept (Tensor.argmax? logits 2)
+  let predictions := Tensor.argmax logits 2 (_nonempty := by simpa using hVocab)
 
   -- Flatten to 1D for easier slicing
   let predsFlat := Tensor.reshape predictions #[seq]
@@ -350,8 +353,10 @@ def evaluateLM {seq vocab : Nat}
   if numTokens == 0 then
     return { correct := false, losses := #[], prediction := 0 }
 
-  let predSlice := Tensor.sliceChecked predsFlat 0 predStartIdx numTokens #[numTokens]
-  let targetSlice := Tensor.sliceChecked targetFlat 0 startIdx numTokens #[numTokens]
+  let ⟨hSpan⟩ ← if h : predStartIdx + numTokens ≤ seq ∧ startIdx + numTokens ≤ seq then pure (PLift.up h) else
+    throw <| IO.userError s!"CORE continuation span {startIdx}+{numTokens} exceeds {seq}"
+  let predSlice := Tensor.slice predsFlat 0 predStartIdx numTokens
+  let targetSlice := Tensor.slice targetFlat 0 startIdx numTokens
   let allCorrect := (← predSlice.toUInt64Array) == (← targetSlice.toUInt64Array)
 
   return { correct := allCorrect
@@ -388,6 +393,7 @@ def evaluateSingleExample {vocab : Nat}
     (taskMeta : TaskMeta)
     (tokenize : String → Array UInt64)
     (runModel : ModelRunner (device := device) vocab)
+    (hVocab : 0 < vocab)
     (config : EvalConfig)
     : IO (Option Bool) := do
   unless config.device == device do
@@ -432,7 +438,7 @@ def evaluateSingleExample {vocab : Nat}
     | .multipleChoice | .schema => evaluateMC logits targetReshaped batchInfo goldIdx
     | .languageModeling =>
       if h : batchSize = 1 then
-        evaluateLM (seq := seqLen) (by simpa only [h] using logits) (by simpa only [h] using targetReshaped) batchInfo
+        evaluateLM (seq := seqLen) (by simpa only [h] using logits) hVocab (by simpa only [h] using targetReshaped) batchInfo
       else
         throw <| IO.userError "Language-model evaluation requires exactly one sequence"
 
@@ -451,6 +457,7 @@ def evaluateTask {vocab : Nat}
     (taskMeta : TaskMeta)
     (tokenize : String → Array UInt64)
     (runModel : ModelRunner (device := device) vocab)
+    (hVocab : 0 < vocab)
     (config : EvalConfig)
     : IO Float := do
   if examples.isEmpty then return 0.0
@@ -468,9 +475,9 @@ def evaluateTask {vocab : Nat}
   -- Evaluate examples strided by rank
   for idx in [:examples.size] do
     -- Skip if not assigned to this rank
-    if idx % worldSize.toNat == rank.toNat then
+    if idx % worldSize == rank then
       let item := examples[idx]!
-      let maybeCorrect ← evaluateSingleExample item taskMeta tokenize runModel config
+      let maybeCorrect ← evaluateSingleExample item taskMeta tokenize runModel hVocab config
       match maybeCorrect with
       | none => pure ()  -- Skip invalid examples
       | some isCorrect =>

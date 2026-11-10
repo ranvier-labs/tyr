@@ -6,6 +6,7 @@
 -/
 import Tyr.Basic
 import Tyr.TensorStruct
+import Tyr.Tokenizer.Types
 
 namespace torch.qwen35
 
@@ -39,6 +40,15 @@ instance : TensorStruct LayerType where
   zipWith _ x _ := x
   fold _ init _ := init
 
+/-- Hybrid schedule: every `interval`th layer is full attention, the rest linear attention. -/
+def defaultLayerTypes (numLayers interval : Nat) : Array LayerType :=
+  Array.ofFn (n := numLayers) fun i =>
+    if (i.val + 1) % interval == 0 then .fullAttention else .linearAttention
+
+@[simp] theorem defaultLayerTypes_size (numLayers interval : Nat) :
+    (defaultLayerTypes numLayers interval).size = numLayers := by
+  simp [defaultLayerTypes]
+
 /-- Qwen3.5 text model configuration.
     Dense checkpoints use `num_experts = 0`.
     MoE checkpoints set `num_experts > 0`. -/
@@ -52,46 +62,48 @@ structure Qwen35Config where
   head_dim : Nat := 256
 
   rope_theta : Float := 1000000.0
-  partial_rotary_factor : Float := 0.25
+  /-- Half the leading channels of each head that RoPE rotates (`head_dim * partial_rotary_factor / 2`). -/
+  half_rotary_dim : Nat := 32
   rms_norm_eps : Float := 1e-6
-  max_position_embeddings : Nat := 32768
-
-  attention_bias : Bool := false
-  attention_dropout : Float := 0.0
-  attn_output_gate : Bool := true
-  hidden_act : String := "silu"
 
   linear_conv_kernel_dim : Nat := 4
   linear_key_head_dim : Nat := 128
   linear_value_head_dim : Nat := 128
   linear_num_key_heads : Nat := 16
   linear_num_value_heads : Nat := 32
-  mamba_ssm_dtype : String := "float32"
 
-  layer_types : Array LayerType := #[]
-  full_attention_interval : Nat := 4
-  mlp_only_layers : Array Nat := #[]
-  mrope_interleaved : Bool := false
-  mrope_section : Array Nat := #[]
-  mtp_num_hidden_layers : Nat := 0
-  mtp_use_dedicated_embeddings : Bool := false
+  layer_types : Array LayerType := defaultLayerTypes num_hidden_layers 4
 
   moe_intermediate_size : Nat := 512
   shared_expert_intermediate_size : Nat := 512
   num_experts_per_tok : Nat := 8
   num_experts : Nat := 0
 
-  use_cache : Bool := true
   tie_word_embeddings : Bool := false
-
-  pad_token_id : Option UInt64 := none
-  bos_token_id : Option UInt64 := none
-  eos_token_id : Option UInt64 := none
+  eos_token_id : Option tokenizer.TokenId := none
   /-- Linear-attention value heads are a whole multiple of key heads; checked when the config is built. -/
   linearKeyHeadsDivide : linear_num_key_heads ∣ linear_num_value_heads := by decide
+  /-- Query heads are a whole multiple of K/V heads; checked when the config is built. -/
+  kvHeadsDivide : num_key_value_heads ∣ num_attention_heads := by decide
+  headsPos : 0 < num_attention_heads ∧ 0 < num_key_value_heads ∧ 0 < linear_num_key_heads := by decide
+  /-- RoPE rotates a nonzero even prefix of each head; checked when the config is built. -/
+  rotaryValid : 0 < half_rotary_dim ∧ 2 * half_rotary_dim ≤ head_dim := by decide
+  /-- One mixer kind per decoder layer; checked when the config is built. -/
+  layerTypesSize : layer_types.size = num_hidden_layers := by simp
+  /-- The causal depthwise conv has a kernel; checked when the config is built. -/
+  convKernelPos : 0 < linear_conv_kernel_dim := by decide
+  /-- The depthwise conv has one group per channel, so its channel count is positive; checked
+      when the config is built. -/
+  linearKeyHeadDimPos : 0 < linear_key_head_dim := by decide
+  /-- MoE routes each token to between one and `num_experts` experts; checked when the config is built. -/
+  expertsValid : 0 < num_experts → 0 < num_experts_per_tok ∧ num_experts_per_tok ≤ num_experts := by decide
+  /-- RoPE frequencies and RMSNorm divide by these; checked when the config is built. -/
+  ropeThetaPos : 0 < rope_theta := by native_decide
+  rmsNormEpsPos : 0 < rms_norm_eps := by native_decide
+  /-- Generation stops on and embeds the eos token; checked when the config is built. -/
+  eosInVocab : eos_token_id.all (·.toNat < vocab_size) = true := by decide
   deriving Repr
 
-instance : Inhabited Qwen35Config := ⟨{}⟩
 
 namespace Qwen35Config
 
@@ -109,49 +121,20 @@ def qwen35_35B_A3B : Qwen35Config := {
   num_key_value_heads := 2
   head_dim := 256
   rope_theta := 1000000.0
-  partial_rotary_factor := 0.25
+  half_rotary_dim := 32
   rms_norm_eps := 1e-6
-  max_position_embeddings := 32768
-  attention_bias := false
-  attention_dropout := 0.0
-  attn_output_gate := true
-  hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 128
   linear_value_head_dim := 128
   linear_num_key_heads := 16
   linear_num_value_heads := 32
-  mamba_ssm_dtype := "float32"
-  layer_types := #[]
-  full_attention_interval := 4
-  mlp_only_layers := #[]
-  mrope_interleaved := false
-  mrope_section := #[]
-  mtp_num_hidden_layers := 0
-  mtp_use_dedicated_embeddings := false
   moe_intermediate_size := 512
   shared_expert_intermediate_size := 512
   num_experts_per_tok := 8
   num_experts := 256
-  use_cache := true
   tie_word_embeddings := false
-  pad_token_id := none
-  bos_token_id := none
   eos_token_id := none
 }
-
-/-- Build default hybrid schedule: every `interval`th layer is full attention, rest linear attention. -/
-def defaultLayerTypes (numLayers interval : Nat) : Array LayerType :=
-  Id.run do
-    let mut out : Array LayerType := Array.mkEmpty numLayers
-    if interval == 0 then
-      for _ in [:numLayers] do
-        out := out.push .fullAttention
-      return out
-    for i in [:numLayers] do
-      let isFull := ((i + 1) % interval) == 0
-      out := out.push (if isFull then .fullAttention else .linearAttention)
-    return out
 
 /-- Default multimodal Qwen3.6-35B-A3B text config from Hugging Face `config.json`. -/
 def qwen36_35B_A3B : Qwen35Config := {
@@ -163,43 +146,20 @@ def qwen36_35B_A3B : Qwen35Config := {
   num_key_value_heads := 2
   head_dim := 256
   rope_theta := 10000000.0
-  partial_rotary_factor := 0.25
+  half_rotary_dim := 32
   rms_norm_eps := 1e-6
-  max_position_embeddings := 262144
-  attention_bias := false
-  attention_dropout := 0.0
-  attn_output_gate := true
-  hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 128
   linear_value_head_dim := 128
   linear_num_key_heads := 16
   linear_num_value_heads := 32
-  mamba_ssm_dtype := "float32"
-  layer_types := defaultLayerTypes 40 4
-  full_attention_interval := 4
-  mlp_only_layers := #[]
-  mrope_interleaved := true
-  mrope_section := #[11, 11, 10]
-  mtp_num_hidden_layers := 1
-  mtp_use_dedicated_embeddings := false
   moe_intermediate_size := 512
   shared_expert_intermediate_size := 512
   num_experts_per_tok := 8
   num_experts := 256
-  use_cache := true
   tie_word_embeddings := false
-  pad_token_id := none
-  bos_token_id := some 248044
   eos_token_id := some 248044
 }
-
-/-- Return `layer_types` if valid, otherwise synthesize the default interval schedule. -/
-def normalizedLayerTypes (cfg : Qwen35Config) : Array LayerType :=
-  if cfg.layer_types.size == cfg.num_hidden_layers then
-    cfg.layer_types
-  else
-    defaultLayerTypes cfg.num_hidden_layers cfg.full_attention_interval
 
 /-- Default dense Qwen3.5-0.8B style config. -/
 def qwen35_0_8B : Qwen35Config := {
@@ -211,44 +171,17 @@ def qwen35_0_8B : Qwen35Config := {
   num_key_value_heads := 2
   head_dim := 256
   rope_theta := 10000000.0
-  partial_rotary_factor := 0.25
+  half_rotary_dim := 32
   rms_norm_eps := 1e-6
-  max_position_embeddings := 262144
-  attention_bias := false
-  attention_dropout := 0.0
-  attn_output_gate := true
-  hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 128
   linear_value_head_dim := 128
   linear_num_key_heads := 16
   linear_num_value_heads := 16
-  mamba_ssm_dtype := "float32"
-  layer_types := defaultLayerTypes 24 4
-  full_attention_interval := 4
-  mlp_only_layers := #[]
-  mrope_interleaved := true
-  mrope_section := #[11, 11, 10]
-  mtp_num_hidden_layers := 1
-  mtp_use_dedicated_embeddings := false
-  moe_intermediate_size := 512
-  shared_expert_intermediate_size := 512
-  num_experts_per_tok := 8
   num_experts := 0
-  use_cache := true
   tie_word_embeddings := true
-  pad_token_id := none
-  bos_token_id := none
   eos_token_id := some 248044
 }
-
-/-- Config with `layer_types` normalized for runtime use. -/
-def normalize (cfg : Qwen35Config) : Qwen35Config :=
-  { cfg with layer_types := normalizedLayerTypes cfg }
-
-/-- Query heads per KV head (full-attention GQA). -/
-def numHeadsPerKVGroup (cfg : Qwen35Config) : Nat :=
-  if cfg.num_key_value_heads == 0 then 1 else cfg.num_attention_heads / cfg.num_key_value_heads
 
 /-- Linear-attention key projection dimension. -/
 @[simp] def linearKeyDim (cfg : Qwen35Config) : Nat :=
@@ -261,6 +194,10 @@ def numHeadsPerKVGroup (cfg : Qwen35Config) : Nat :=
 /-- Depthwise-conv channel count for linear-attention fused QKV path. -/
 @[simp] def linearConvDim (cfg : Qwen35Config) : Nat :=
   (linearKeyDim cfg) * 2 + (linearValueDim cfg)
+
+theorem linearConvDim_pos (cfg : Qwen35Config) : 0 < linearConvDim cfg := by
+  have := Nat.mul_pos cfg.headsPos.2.2 cfg.linearKeyHeadDimPos
+  simp only [linearConvDim, linearKeyDim]; omega
 
 /-- Repeat factor to broadcast linear K/Q heads to V heads. -/
 def linearKVRepeat (cfg : Qwen35Config) : Nat :=
@@ -276,25 +213,15 @@ theorem linear_key_heads_mul_repeat (cfg : Qwen35Config) :
 
 /-- Whether this config uses MoE FFN blocks. -/
 def isMoE (cfg : Qwen35Config) : Bool :=
-  cfg.num_experts > 0 && cfg.num_experts_per_tok > 0
+  cfg.num_experts > 0
 
-/-- Rotary dimension for partial RoPE. Clamped to an even value in `[2, head_dim]`. -/
+/-- Rotary dimension for partial RoPE. -/
 def rotaryDim (cfg : Qwen35Config) : Nat :=
-  let raw := (cfg.head_dim.toFloat * cfg.partial_rotary_factor).toUInt64.toNat
-  let base :=
-    if raw == 0 then cfg.head_dim
-    else if raw > cfg.head_dim then cfg.head_dim
-    else raw
-  if base <= 2 then
-    2
-  else if base % 2 == 0 then
-    base
-  else
-    base - 1
+  2 * cfg.half_rotary_dim
 
-/-- Number of rotary frequencies (`rotary_dim / 2`). -/
+/-- Number of rotary frequencies. -/
 def rotaryHalfDim (cfg : Qwen35Config) : Nat :=
-  (rotaryDim cfg) / 2
+  cfg.half_rotary_dim
 
 end Qwen35Config
 
@@ -310,16 +237,19 @@ def qwen35_35B_A3B : Config := Qwen35Config.qwen35_35B_A3B
 
 def qwen36_35B_A3B : Config := Qwen35Config.qwen36_35B_A3B
 
-def normalize (cfg : Config) : Config := Qwen35Config.normalize cfg
-
-def normalizedLayerTypes (cfg : Config) : Array LayerType :=
-  Qwen35Config.normalizedLayerTypes cfg
-
 def isMoE (cfg : Config) : Bool := Qwen35Config.isMoE cfg
+
+/-- Whether layer `i` uses full attention (otherwise linear attention). -/
+def isFullAttentionLayer (cfg : Config) (i : Nat) : Bool :=
+  match cfg.layer_types.getD i .linearAttention with
+  | .fullAttention => true
+  | .linearAttention => false
 
 def rotaryDim (cfg : Config) : Nat := Qwen35Config.rotaryDim cfg
 
 def rotaryHalfDim (cfg : Config) : Nat := Qwen35Config.rotaryHalfDim cfg
+
+theorem rotaryDim_le (cfg : Config) : 2 * cfg.rotaryHalfDim ≤ cfg.head_dim := cfg.rotaryValid.2
 
 @[simp] def linearKeyDim (cfg : Config) : Nat := Qwen35Config.linearKeyDim cfg
 
@@ -332,8 +262,6 @@ def linearKVRepeat (cfg : Config) : Nat := Qwen35Config.linearKVRepeat cfg
 theorem linear_key_heads_mul_repeat (cfg : Config) :
     cfg.linear_num_key_heads * linearKVRepeat cfg = cfg.linear_num_value_heads :=
   Qwen35Config.linear_key_heads_mul_repeat cfg
-
-def numHeadsPerKVGroup (cfg : Config) : Nat := Qwen35Config.numHeadsPerKVGroup cfg
 
 end Config
 

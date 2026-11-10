@@ -196,12 +196,13 @@ void testCombinedConversion(const std::filesystem::path& directory) {
 
   // Conversions LibTorch rejects, and a tag past the last constructor.
   for (const unsigned tag : {tagOf(tyr::lean::DType::QInt8), tagOf(tyr::lean::DType::Bits1x8), tyr::lean::DTypeCount}) {
-    LeanObject result(lean_torch_cast_dtype_checked(lean_alloc_array(0, 0), input.get(),
-                                                   static_cast<uint8_t>(tag)), lean_dec);
-    require(lean_obj_tag(result.get()) == 0,
-            "Unsupported checked cast must return Except.error: " + std::to_string(tag));
-    require(std::string(lean_string_cstr(lean_ctor_get(result.get(), 0))).find("castDType:") == 0,
-            "Checked cast errors must retain operation context");
+    bool thrown = false;
+    try {
+      LeanObject result(lean_torch_cast_dtype(input.get(), static_cast<uint8_t>(tag)), lean_dec);
+    } catch (const std::exception&) {
+      thrown = true;
+    }
+    require(thrown, "Unsupported cast must throw (aborting from Lean): " + std::to_string(tag));
     auto option = dtypeOption(tag);
     LeanObject moved(lean_torch_convert_tensor(lean_alloc_array(0, 0), input.get(),
                                              lean_box(1), option.get()), lean_dec);
@@ -224,21 +225,9 @@ void testCombinedConversion(const std::filesystem::path& directory) {
   requireConverted(directory, complex_output.get(), c10::ScalarType::ComplexDouble,
                    c10::DeviceType::CPU, "Complex64 to Complex128");
   const auto complex_tag = static_cast<uint8_t>(tyr::lean::DType::Complex128);
-  LeanObject checked_complex(lean_torch_cast_dtype_checked(lean_alloc_array(0, 0),
-                              complex_input.get(), complex_tag), lean_dec);
-  require(lean_obj_tag(checked_complex.get()) == 1, "Complex checked cast must return Except.ok");
-  requireConverted(directory, lean_ctor_get(checked_complex.get(), 0),
-                   c10::ScalarType::ComplexDouble, c10::DeviceType::CPU,
-                   "Checked Complex64 to Complex128");
-
-  auto* wrong_shape = lean_alloc_array(1, 1);
-  lean_array_set_core(wrong_shape, 0, lean_box(2));
-  LeanObject shape_error(lean_torch_cast_dtype_checked(wrong_shape, complex_input.get(),
-                          complex_tag), lean_dec);
-  require(lean_obj_tag(shape_error.get()) == 0 &&
-          std::string(lean_string_cstr(lean_ctor_get(shape_error.get(), 0)))
-              .find("source tensor shape mismatch") != std::string::npos,
-          "Checked dtype conversion must validate the supplied source shape");
+  LeanObject cast_complex(lean_torch_cast_dtype(complex_input.get(), complex_tag), lean_dec);
+  requireConverted(directory, cast_complex.get(), c10::ScalarType::ComplexDouble,
+                   c10::DeviceType::CPU, "Plain Complex64 to Complex128");
 
   for (const unsigned tag : {tyr::lean::DTypeCount, 255u}) {
     auto option = dtypeOption(tag);
@@ -249,8 +238,8 @@ void testCombinedConversion(const std::filesystem::path& directory) {
   }
   for (const uint64_t index : {uint64_t{128}, uint64_t{255}, uint64_t{256},
                                std::numeric_limits<uint64_t>::max()}) {
-    LeanObject device(lean_alloc_ctor(0, 0, 8), lean_dec);
-    lean_ctor_set_uint64(device.get(), 0, index);
+    LeanObject device(lean_alloc_ctor(0, 1, 0), lean_dec);
+    lean_ctor_set(device.get(), 0, lean_uint64_to_nat(index));
     LeanObject result(lean_torch_convert_tensor(lean_alloc_array(0, 0), input.get(),
                                               device.get(), lean_box(0)), lean_dec);
     require(lean_io_result_is_error(result.get()),
@@ -301,7 +290,7 @@ int main(int argc, char** argv) {
     require(c64 == static_cast<unsigned>(tyr::lean::DType::Complex64), "ComplexFloat metadata must report Complex64");
     require(c128 == static_cast<unsigned>(tyr::lean::DType::Complex128), "ComplexDouble metadata must report Complex128");
     require(c64 != c128, "Different complex widths must remain distinguishable");
-    phase("checked dtype and device conversions");
+    phase("dtype and device conversions");
     testCombinedConversion(argv[1]);
     std::cout << "Native tensor metadata checks passed (device bounds/platform, Meta rejection, RawTensor dtype and conversion ABI).\n";
     return 0;

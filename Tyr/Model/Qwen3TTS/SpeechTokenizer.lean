@@ -14,13 +14,12 @@
   (16 quantizers, 1024 latent dim, 2x convnext upsample, 4 decoder blocks).
 -/
 import Tyr.Typed.Neural
-import Tyr.SafeTensors.Exact
+import Tyr.SafeTensors.Source
 import Tyr.Model.Qwen3TTS.SpeechTokenizerDTypes
 import Tyr.TensorStruct
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen.RoPE
-import Lean.Data.Json
-import Lean.Data.Json.FromToJson.Basic
+import Tyr.Model.ConfigJson
 
 namespace torch.qwen3tts
 
@@ -30,222 +29,76 @@ open Lean
 
 /-! ## Config parsing -/
 
-structure SpeechTokenizer12HzDecoderConfig where
-  codebookSize : Nat := 2048
-  codebookDim : Nat := 512
-  latentDim : Nat := 1024
-  hiddenSize : Nat := 512
-  intermediateSize : Nat := 1024
-  layerScaleInitialScale : Float := 0.01
-  rmsNormEps : Float := 1e-5
-  ropeTheta : Float := 10000.0
-  headDim : Nat := 64
-  numAttentionHeads : Nat := 16
-  numKeyValueHeads : Nat := 16
-  numHiddenLayers : Nat := 8
-  numQuantizers : Nat := 16
-  numSemanticQuantizers : Nat := 1
-  slidingWindow : Nat := 72
-  upsampleRates : Array Nat := #[8, 5, 4, 3]
-  upsamplingRatios : Array Nat := #[2, 2]
-  decoderDim : Nat := 1536
-  deriving Repr, Inhabited
-
-/-- Mimi encoder metadata. Its attention, MLP and quantizer dimensions are
-independent of the waveform decoder's `decoder_config`. -/
-structure SpeechTokenizer12HzEncoderConfig where
-  codebookSize : Nat := 2048
-  codebookDim : Nat := 256
-  hiddenSize : Nat := 512
-  intermediateSize : Nat := 2048
-  headDim : Nat := 64
-  numAttentionHeads : Nat := 8
-  numKeyValueHeads : Nat := 8
-  numHiddenLayers : Nat := 8
-  numQuantizers : Nat := 32
-  numSemanticQuantizers : Nat := 1
-  slidingWindow : Nat := 250
-  upsamplingRatios : Array Nat := #[8, 6, 5, 4]
-  normEps : Float := 1e-5
-  ropeTheta : Float := 10000.0
-  samplingRate : Nat := 24000
-  deriving Repr, Inhabited
-
+/-- Qwen3-TTS 12 Hz tokenizer metadata. The Mimi encoder and the waveform
+decoder architectures are fixed and `fromJson` rejects any other value; only the
+encoder's codebook split varies between tokenizer variants. -/
 structure SpeechTokenizer12HzConfig where
-  decoder : SpeechTokenizer12HzDecoderConfig := {}
-  encoder : SpeechTokenizer12HzEncoderConfig := {}
-  /-- Number of available encoder quantizers actually emitted by Qwen. -/
+  /-- Codebooks the encoder computes. -/
+  encoderNumQuantizers : Nat := 32
+  /-- Leading codebooks Qwen emits. -/
   encoderValidNumQuantizers : Nat := 16
-  inputSampleRate : Nat := 24000
-  encodeDownsampleRate : Nat := 1920
-  outputSampleRate : Nat := 24000
-  decodeUpsampleRate : Nat := 1920
-  deriving Repr, Inhabited
-
-private def parseJsonFile (path : String) : IO Json := do
-  let contents ← IO.FS.readFile path
-  match Json.parse contents with
-  | .ok json => pure json
-  | .error err => throw (IO.userError s!"Failed to parse JSON at {path}: {err}")
-
-private def getObjVal? (j : Json) (key : String) : Option Json :=
-  match j with
-  | .obj kvs => Std.TreeMap.Raw.get? kvs key
-  | _ => none
-
-private def getArr? (j : Json) : Option (Array Json) :=
-  match j with
-  | .arr a => some a
-  | _ => none
-
-private def getNat? (j : Json) : Option Nat :=
-  match (FromJson.fromJson? j : Except String Nat) with
-  | .ok n => some n
-  | .error _ => none
-
-private def getFloat? (j : Json) : Option Float :=
-  match (FromJson.fromJson? j : Except String Float) with
-  | .ok x => some x
-  | .error _ => (getNat? j).map (·.toFloat)
-
-private def getNatFieldD (j : Json) (key : String) (d : Nat) : Nat :=
-  match getObjVal? j key >>= getNat? with
-  | some n => n
-  | none => d
-
-private def getFloatFieldD (j : Json) (key : String) (d : Float) : Float :=
-  match getObjVal? j key >>= getFloat? with
-  | some x => x
-  | none => d
-
-private def getUInt64ArrayFieldD (j : Json) (key : String) (d : Array Nat) : Array Nat :=
-  match getObjVal? j key >>= getArr? with
-  | some arr =>
-    Id.run do
-      let mut out : Array Nat := #[]
-      for item in arr do
-        match getNat? item with
-        | some n => out := out.push n
-        | none => pure ()
-      if out.isEmpty then d else out
-  | none => d
+  encoderNumSemanticQuantizers : Nat := 1
+  /-- At least one semantic and one acoustic codebook among those emitted, all of
+      them computed by the encoder; checked when the config is built. -/
+  quantizerSplit : 1 ≤ encoderNumSemanticQuantizers ∧
+      encoderNumSemanticQuantizers < encoderValidNumQuantizers ∧
+      encoderValidNumQuantizers ≤ encoderNumQuantizers := by decide
+  deriving Repr
 
 namespace SpeechTokenizer12HzConfig
 
-private def parseEncoderConfig (j : Json) (d : SpeechTokenizer12HzEncoderConfig := {})
-    : SpeechTokenizer12HzEncoderConfig := {
-  codebookSize := getNatFieldD j "codebook_size" d.codebookSize
-  codebookDim := getNatFieldD j "codebook_dim" d.codebookDim
-  hiddenSize := getNatFieldD j "hidden_size" d.hiddenSize
-  intermediateSize := getNatFieldD j "intermediate_size" d.intermediateSize
-  headDim := getNatFieldD j "head_dim" d.headDim
-  numAttentionHeads := getNatFieldD j "num_attention_heads" d.numAttentionHeads
-  numKeyValueHeads := getNatFieldD j "num_key_value_heads" d.numKeyValueHeads
-  numHiddenLayers := getNatFieldD j "num_hidden_layers" d.numHiddenLayers
-  numQuantizers := getNatFieldD j "num_quantizers" d.numQuantizers
-  numSemanticQuantizers := getNatFieldD j "num_semantic_quantizers" d.numSemanticQuantizers
-  slidingWindow := getNatFieldD j "sliding_window" d.slidingWindow
-  upsamplingRatios := getUInt64ArrayFieldD j "upsampling_ratios" d.upsamplingRatios
-  normEps := getFloatFieldD j "norm_eps" d.normEps
-  ropeTheta := getFloatFieldD j "rope_theta" d.ropeTheta
-  samplingRate := getNatFieldD j "sampling_rate" d.samplingRate
-}
+open ConfigJson
 
-private def parseDecoderConfig (j : Json) (d : SpeechTokenizer12HzDecoderConfig := {})
-    : SpeechTokenizer12HzDecoderConfig := {
-  codebookSize := getNatFieldD j "codebook_size" d.codebookSize
-  codebookDim := getNatFieldD j "codebook_dim" d.codebookDim
-  latentDim := getNatFieldD j "latent_dim" d.latentDim
-  hiddenSize := getNatFieldD j "hidden_size" d.hiddenSize
-  intermediateSize := getNatFieldD j "intermediate_size" d.intermediateSize
-  layerScaleInitialScale := getFloatFieldD j "layer_scale_initial_scale" d.layerScaleInitialScale
-  rmsNormEps := getFloatFieldD j "rms_norm_eps" d.rmsNormEps
-  ropeTheta := getFloatFieldD j "rope_theta" d.ropeTheta
-  headDim := getNatFieldD j "head_dim" d.headDim
-  numAttentionHeads := getNatFieldD j "num_attention_heads" d.numAttentionHeads
-  numKeyValueHeads := getNatFieldD j "num_key_value_heads" d.numKeyValueHeads
-  numHiddenLayers := getNatFieldD j "num_hidden_layers" d.numHiddenLayers
-  numQuantizers := getNatFieldD j "num_quantizers" d.numQuantizers
-  numSemanticQuantizers := getNatFieldD j "num_semantic_quantizers" d.numSemanticQuantizers
-  slidingWindow := getNatFieldD j "sliding_window" d.slidingWindow
-  upsampleRates := getUInt64ArrayFieldD j "upsample_rates" d.upsampleRates
-  upsamplingRatios := getUInt64ArrayFieldD j "upsampling_ratios" d.upsamplingRatios
-  decoderDim := getNatFieldD j "decoder_dim" d.decoderDim
-}
+def inputSampleRate (_cfg : SpeechTokenizer12HzConfig) : Nat := 24000
+def encodeDownsampleRate (_cfg : SpeechTokenizer12HzConfig) : Nat := 1920
+def outputSampleRate (_cfg : SpeechTokenizer12HzConfig) : Nat := 24000
+def decodeUpsampleRate (_cfg : SpeechTokenizer12HzConfig) : Nat := 1920
 
-private def requireTrue (ok : Bool) (msg : String) : IO Unit := do
-  unless ok do
-    throw (IO.userError msg)
+private def requireNats (j : Json) (pins : List (String × Nat)) : Except String Unit :=
+  pins.forM fun (key, value) => requireEq j key value
 
-/-- Parse encoder and decoder metadata independently, preserving defaults for
-omitted fields as in the upstream configuration classes. -/
-def fromJson (root : Json) (defaults : SpeechTokenizer12HzConfig := {})
-    : SpeechTokenizer12HzConfig := Id.run do
-  let decoder :=
-    match getObjVal? root "decoder_config" with
-    | some j => parseDecoderConfig j defaults.decoder
-    | none => defaults.decoder
-  let encoder :=
-    match getObjVal? root "encoder_config" with
-    | some j => parseEncoderConfig j defaults.encoder
-    | none => defaults.encoder
-  return {
-    decoder
-    encoder
-    encoderValidNumQuantizers := getNatFieldD root "encoder_valid_num_quantizers" defaults.encoderValidNumQuantizers
-    inputSampleRate := getNatFieldD root "input_sample_rate" defaults.inputSampleRate
-    encodeDownsampleRate := getNatFieldD root "encode_downsample_rate" defaults.encodeDownsampleRate
-    outputSampleRate := getNatFieldD root "output_sample_rate" defaults.outputSampleRate
-    decodeUpsampleRate := getNatFieldD root "decode_upsample_rate" defaults.decodeUpsampleRate
-  }
+def fromJson (root : Json) (defaults : SpeechTokenizer12HzConfig := {}) :
+    Except String SpeechTokenizer12HzConfig := do
+  requireNats root [("input_sample_rate", 24000), ("output_sample_rate", 24000),
+    ("encode_downsample_rate", 1920), ("decode_upsample_rate", 1920)]
+  if let some d ← objectField? root "decoder_config" then
+    requireNats d [("codebook_size", 2048), ("codebook_dim", 512), ("latent_dim", 1024),
+      ("hidden_size", 512), ("intermediate_size", 1024), ("head_dim", 64),
+      ("num_attention_heads", 16), ("num_key_value_heads", 16), ("num_hidden_layers", 8),
+      ("num_quantizers", 16), ("num_semantic_quantizers", 1), ("sliding_window", 72),
+      ("decoder_dim", 1536)]
+    requireEq d "upsample_rates" (#[8, 5, 4, 3] : Array Nat)
+    requireEq d "upsampling_ratios" (#[2, 2] : Array Nat)
+  let encoder ← objectField? root "encoder_config"
+  if let some e := encoder then
+    requireNats e [("codebook_size", 2048), ("codebook_dim", 256), ("hidden_size", 512),
+      ("intermediate_size", 2048), ("head_dim", 64), ("num_attention_heads", 8),
+      ("num_key_value_heads", 8), ("num_hidden_layers", 8), ("sliding_window", 250),
+      ("sampling_rate", 24000)]
+    requireEq e "upsampling_ratios" (#[8, 6, 5, 4] : Array Nat)
+    requireEq e "norm_eps" (1e-5 : Float)
+    requireEq e "rope_theta" (10000.0 : Float)
+  let encoderNumQuantizers ← match encoder with
+    | some e => fieldD? e "num_quantizers" defaults.encoderNumQuantizers
+    | none => pure defaults.encoderNumQuantizers
+  let encoderNumSemanticQuantizers ← match encoder with
+    | some e => fieldD? e "num_semantic_quantizers" defaults.encoderNumSemanticQuantizers
+    | none => pure defaults.encoderNumSemanticQuantizers
+  let encoderValidNumQuantizers ← fieldD? root "encoder_valid_num_quantizers" defaults.encoderValidNumQuantizers
+  let ⟨hSplit⟩ ← if h : 1 ≤ encoderNumSemanticQuantizers ∧
+      encoderNumSemanticQuantizers < encoderValidNumQuantizers ∧
+      encoderValidNumQuantizers ≤ encoderNumQuantizers then pure (PLift.up h) else
+    throw s!"Unsupported encoder quantizer split: semantic={encoderNumSemanticQuantizers}, valid={encoderValidNumQuantizers}, available={encoderNumQuantizers} (need 1 <= semantic < valid <= available)"
+  pure { encoderNumQuantizers, encoderValidNumQuantizers, encoderNumSemanticQuantizers, quantizerSplit := hSplit }
 
 /-- Load tokenizer config from `speech_tokenizer/config.json`. -/
-def loadFromFile (path : String) (defaults : SpeechTokenizer12HzConfig := {})
-    : IO SpeechTokenizer12HzConfig := do
-  return fromJson (← parseJsonFile path) defaults
+def loadFromFile (path : String) (defaults : SpeechTokenizer12HzConfig := {}) :
+    IO SpeechTokenizer12HzConfig := do
+  IO.ofExcept (fromJson (← parseFile path) defaults)
 
-/-- Validate the fixed Mimi encoder architecture and select the emitted
-semantic/acoustic codebooks. Decoder metadata does not control encoding. -/
-def encoderCodebookCounts (cfg : SpeechTokenizer12HzConfig) : IO (Nat × Nat) := do
-  let e := cfg.encoder
-  for (name, actual, expected) in #[
-      ("codebook_size", e.codebookSize, 2048), ("codebook_dim", e.codebookDim, 256),
-      ("hidden_size", e.hiddenSize, 512), ("intermediate_size", e.intermediateSize, 2048),
-      ("head_dim", e.headDim, 64), ("num_attention_heads", e.numAttentionHeads, 8),
-      ("num_key_value_heads", e.numKeyValueHeads, 8), ("num_hidden_layers", e.numHiddenLayers, 8),
-      ("sliding_window", e.slidingWindow, 250), ("sampling_rate", e.samplingRate, 24000)] do
-    requireTrue (actual == expected)
-      s!"Unsupported speech tokenizer encoder {name}={actual} (expected {expected})"
-  requireTrue (e.upsamplingRatios == #[8, 6, 5, 4])
-    s!"Unsupported speech tokenizer encoder upsampling_ratios={e.upsamplingRatios} (expected #[8,6,5,4])"
-  requireTrue (e.normEps == 1e-5 && e.ropeTheta == 10000.0)
-    s!"Unsupported speech tokenizer encoder norm_eps={e.normEps}/rope_theta={e.ropeTheta}"
-  requireTrue (cfg.inputSampleRate == 24000 && cfg.encodeDownsampleRate == 1920)
-    s!"Unsupported encoder input_sample_rate={cfg.inputSampleRate}/encode_downsample_rate={cfg.encodeDownsampleRate}"
-  let valid := cfg.encoderValidNumQuantizers
-  requireTrue (valid <= e.numQuantizers && e.numSemanticQuantizers >= 1 && e.numSemanticQuantizers < valid)
-    s!"Unsupported encoder quantizer split: semantic={e.numSemanticQuantizers}, valid={valid}, available={e.numQuantizers} (need 1 <= semantic < valid <= available)"
-  return (e.numSemanticQuantizers, (valid - e.numSemanticQuantizers))
-
-/-- Validate the waveform decoder architecture, independently of the encoder. -/
-def validateSupported (cfg : SpeechTokenizer12HzConfig) : IO Unit := do
-  let d := cfg.decoder
-  requireTrue (d.codebookSize == 2048) s!"Unsupported speech tokenizer codebook_size={d.codebookSize} (expected 2048)"
-  requireTrue (d.codebookDim == 512) s!"Unsupported speech tokenizer codebook_dim={d.codebookDim} (expected 512)"
-  requireTrue (d.latentDim == 1024) s!"Unsupported speech tokenizer latent_dim={d.latentDim} (expected 1024)"
-  requireTrue (d.hiddenSize == 512) s!"Unsupported speech tokenizer hidden_size={d.hiddenSize} (expected 512)"
-  requireTrue (d.intermediateSize == 1024) s!"Unsupported speech tokenizer intermediate_size={d.intermediateSize} (expected 1024)"
-  requireTrue (d.headDim == 64) s!"Unsupported speech tokenizer head_dim={d.headDim} (expected 64)"
-  requireTrue (d.numAttentionHeads == 16) s!"Unsupported speech tokenizer num_attention_heads={d.numAttentionHeads} (expected 16)"
-  requireTrue (d.numKeyValueHeads == 16) s!"Unsupported speech tokenizer num_key_value_heads={d.numKeyValueHeads} (expected 16)"
-  requireTrue (d.numHiddenLayers == 8) s!"Unsupported speech tokenizer num_hidden_layers={d.numHiddenLayers} (expected 8)"
-  requireTrue (d.numQuantizers == 16) s!"Unsupported speech tokenizer num_quantizers={d.numQuantizers} (expected 16)"
-  requireTrue (d.numSemanticQuantizers == 1) s!"Unsupported speech tokenizer num_semantic_quantizers={d.numSemanticQuantizers} (expected 1)"
-  requireTrue (d.slidingWindow == 72) s!"Unsupported speech tokenizer sliding_window={d.slidingWindow} (expected 72)"
-  requireTrue (d.upsampleRates == #[8, 5, 4, 3]) s!"Unsupported speech tokenizer upsample_rates={d.upsampleRates} (expected #[8,5,4,3])"
-  requireTrue (d.upsamplingRatios == #[2, 2]) s!"Unsupported speech tokenizer upsampling_ratios={d.upsamplingRatios} (expected #[2,2])"
-  requireTrue (d.decoderDim == 1536) s!"Unsupported speech tokenizer decoder_dim={d.decoderDim} (expected 1536)"
-  requireTrue (cfg.decodeUpsampleRate == 1920) s!"Unsupported decode_upsample_rate={cfg.decodeUpsampleRate} (expected 1920)"
+/-- Semantic and acoustic codebooks the encoder emits. -/
+def encoderCodebookCounts (cfg : SpeechTokenizer12HzConfig) : Nat × Nat :=
+  (cfg.encoderNumSemanticQuantizers, cfg.encoderValidNumQuantizers - cfg.encoderNumSemanticQuantizers)
 
 end SpeechTokenizer12HzConfig
 
@@ -253,7 +106,7 @@ end SpeechTokenizer12HzConfig
 
 private def loadFrozen {dtype : DType} (path : String) (name : String) (s : Shape)
     : IO (Tensor { shape := s, dtype := dtype, device := device }) := do
-  let packed ← safetensors.loadTensorExact path name s device
+  let packed ← (← safetensors.Source.open path).load name s device
   match packed.atDType? dtype with
   | .ok t => pure (Tensor.detach t)
   | .error message => throw <| IO.userError s!"Speech tokenizer tensor '{name}': {message}"
@@ -262,13 +115,13 @@ private def addBias3d {batch channels frames : Nat}
     (x : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device })
     (bias : Tensor { shape := #[channels], dtype := dtypes.compute.val, device := device }) : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
   let b : Tensor { shape := #[1, channels, 1], dtype := dtypes.compute.val, device := device } := Tensor.reshape bias #[1, channels, 1]
-  Tensor.add x (Tensor.expand b #[batch, channels, frames])
+  Tensor.add x (Tensor.broadcastTo b #[batch, channels, frames])
 
 private def scale3d {batch seq dim : Nat}
     (x : Tensor { shape := #[batch, seq, dim], dtype := dtypes.compute.val, device := device })
     (scale : Tensor { shape := #[dim], dtype := dtypes.compute.val, device := device }) : Tensor { shape := #[batch, seq, dim], dtype := dtypes.compute.val, device := device } :=
   let s : Tensor { shape := #[1, 1, dim], dtype := dtypes.compute.val, device := device } := Tensor.reshape scale #[1, 1, dim]
-  Tensor.mul x (Tensor.expand s #[batch, seq, dim])
+  Tensor.mul x (Tensor.broadcastTo s #[batch, seq, dim])
 
 private def clampWave {s : Shape} (x : Tensor { shape := s, dtype := dtypes.compute.val, device := device }) : Tensor { shape := s, dtype := dtypes.compute.val, device := device } :=
   Tensor.clampFloat x (-1.0) 1.0
@@ -285,9 +138,9 @@ structure QuantizerCodebook (dtypes : SpeechTokenizerDTypes := float32SpeechToke
   embeddingSum : Tensor { shape := #[2048, 256], dtype := dtypes.sum, device := device }
   deriving TensorStruct
 
-structure RVQDecode (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
+structure RVQDecode (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) (count : Nat) where
   outputProj : Tensor { shape := #[512, 256, 1], dtype := dtypes.compute.val, device := device }
-  codebooks : Array (QuantizerCodebook (device := device) (dtypes := dtypes))
+  codebooks : Vector count (QuantizerCodebook (device := device) (dtypes := dtypes))
   deriving TensorStruct
 
 structure DecoderTransformerLayer (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
@@ -322,8 +175,7 @@ structure UpsampleStage (dtypes : SpeechTokenizerDTypes := float32SpeechTokenize
   convNeXt : (UpsampleConvNeXtBlock (device := device) (dtypes := dtypes))
   deriving TensorStruct
 
-structure DecoderResidualUnit (dim : Nat) (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
-  conv1Dilation : Nat := 1
+structure DecoderResidualUnit (dim dilation : Nat) (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
   act1Alpha : Tensor { shape := #[dim], dtype := dtypes.compute.val, device := device }
   act1Beta : Tensor { shape := #[dim], dtype := dtypes.compute.val, device := device }
   conv1Weight : Tensor { shape := #[dim, dim, 7], dtype := dtypes.compute.val, device := device }
@@ -339,14 +191,14 @@ structure DecoderBlock (inDim outDim upRate : Nat) (dtypes : SpeechTokenizerDTyp
   snakeBeta : Tensor { shape := #[inDim], dtype := dtypes.compute.val, device := device }
   transWeight : Tensor { shape := #[inDim, outDim, 2 * upRate], dtype := dtypes.compute.val, device := device }
   transBias : Tensor { shape := #[outDim], dtype := dtypes.compute.val, device := device }
-  res1 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim
-  res2 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim
-  res3 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim
+  res1 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim 1
+  res2 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim 3
+  res3 : DecoderResidualUnit (device := device) (dtypes := dtypes) outDim 9
   deriving TensorStruct
 
 structure SpeechTokenizer12HzDecoder (dtypes : SpeechTokenizerDTypes := float32SpeechTokenizerDTypes) where
-  rvqFirst : (RVQDecode (device := device) (dtypes := dtypes))
-  rvqRest : (RVQDecode (device := device) (dtypes := dtypes))
+  rvqFirst : RVQDecode (device := device) (dtypes := dtypes) (count := 1)
+  rvqRest : RVQDecode (device := device) (dtypes := dtypes) (count := 15)
 
   preConvWeight : Tensor { shape := #[1024, 512, 3], dtype := dtypes.compute.val, device := device }
   preConvBias : Tensor { shape := #[1024], dtype := dtypes.compute.val, device := device }
@@ -385,12 +237,11 @@ private def loadCodebook (weightsPath : String) (namePrefix : String) : IO (Quan
   let embeddingSum ← loadFrozen (dtype := dtypes.sum) weightsPath s!"{namePrefix}.embedding_sum" #[2048, 256]
   pure { clusterUsage, embeddingSum }
 
-private def loadRVQ (weightsPath : String) (namePrefix : String) (nCodebooks : Nat) : IO (RVQDecode (device := device) (dtypes := dtypes)) := do
+private def loadRVQ (weightsPath : String) (namePrefix : String) (nCodebooks : Nat) : IO (RVQDecode (device := device) (dtypes := dtypes) (count := nCodebooks)) := do
   let outputProj ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.output_proj.weight" #[512, 256, 1]
-  let mut codebooks : Array (QuantizerCodebook (device := device) (dtypes := dtypes)) := #[]
-  for i in [:nCodebooks] do
-    let cb ← loadCodebook weightsPath s!"{namePrefix}.vq.layers.{i}._codebook"
-    codebooks := codebooks.push cb
+  let indices : Vector nCodebooks Nat := ⟨Array.range nCodebooks, Array.size_range⟩
+  let codebooks ← indices.mapM fun i =>
+    loadCodebook (device := device) (dtypes := dtypes) weightsPath s!"{namePrefix}.vq.layers.{i}._codebook"
   pure { outputProj, codebooks }
 
 private def loadTransformerLayer (weightsPath : String) (i : Nat) : IO (DecoderTransformerLayer (device := device) (dtypes := dtypes)) := do
@@ -449,8 +300,8 @@ private def loadUpsampleStage (weightsPath : String) (idx : Nat) : IO (UpsampleS
   let convNeXt ← loadUpsampleConvNeXt weightsPath s!"{p}.1"
   pure { transConvWeight, transConvBias, convNeXt }
 
-private def loadResidualUnit (weightsPath : String) (namePrefix : String) (dim : Nat) (dilation : Nat)
-    : IO (DecoderResidualUnit (device := device) (dtypes := dtypes) dim) := do
+private def loadResidualUnit (weightsPath : String) (namePrefix : String) (dim dilation : Nat)
+    : IO (DecoderResidualUnit (device := device) (dtypes := dtypes) dim dilation) := do
   let act1Alpha ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act1.alpha" #[dim]
   let act1Beta ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.act1.beta" #[dim]
   let conv1Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv1.conv.weight" #[dim, dim, 7]
@@ -460,7 +311,6 @@ private def loadResidualUnit (weightsPath : String) (namePrefix : String) (dim :
   let conv2Weight ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv2.conv.weight" #[dim, dim, 1]
   let conv2Bias ← loadFrozen (dtype := dtypes.compute.val) weightsPath s!"{namePrefix}.conv2.conv.bias" #[dim]
   pure {
-    conv1Dilation := dilation
     act1Alpha
     act1Beta
     conv1Weight
@@ -489,7 +339,6 @@ private def loadDecoderBlock
 /-- Load decoder weights from `speech_tokenizer` directory. -/
 def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : IO (Σ dtypes : SpeechTokenizerDTypes, SpeechTokenizer12HzDecoder (device := device) dtypes) := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
-  SpeechTokenizer12HzConfig.validateSupported cfg
 
   let weightsPath := s!"{speechTokenizerDir}/model.safetensors"
   let dtypes ← SpeechTokenizerDTypes.load weightsPath "decoder.pre_conv.conv.weight" #[1024, 512, 3]
@@ -561,26 +410,24 @@ private def decodeCodebook {batch frames : Nat}
     (cb : (QuantizerCodebook (device := device) (dtypes := dtypes)))
     (codes : Tensor { shape := #[batch, frames], dtype := .Int64, device := device }) : Tensor { shape := #[batch, 256, frames], dtype := dtypes.compute.val, device := device } :=
   let usage : Tensor { shape := #[2048], dtype := dtypes.usage, device := device } := clampMin1d cb.clusterUsage 1e-5
-  let usage2d : Tensor { shape := #[2048, 256], dtype := dtypes.usage, device := device } := Tensor.expand (Tensor.reshape usage #[2048, 1]) #[2048, 256]
+  let usage2d : Tensor { shape := #[2048, 256], dtype := dtypes.usage, device := device } := Tensor.broadcastTo (Tensor.reshape usage #[2048, 1]) #[2048, 256]
   let embedding : Tensor { shape := #[2048, 256], dtype := dtypes.compute.val, device := device } := dtypes.divideCodebook cb.embeddingSum usage2d
   let q : Tensor { shape := #[batch, frames, 256], dtype := dtypes.compute.val, device := device } := Tensor.embedding codes embedding
   Tensor.reshape (Tensor.transpose q 1 2) #[batch, 256, frames]
 
-private def decodeRVQSlice {batch groups frames : Nat}
-    (rvq : (RVQDecode (device := device) (dtypes := dtypes)))
+private def decodeRVQSlice {batch groups frames count : Nat}
+    (rvq : RVQDecode (device := device) (dtypes := dtypes) (count := count))
     (codes : Tensor { shape := #[batch, groups, frames], dtype := .Int64, device := device })
-    (start : Nat) (hf : 0 < frames)
+    (start : Nat) (hf : 0 < frames) (hfit : start + count ≤ groups := by omega)
     : Tensor { shape := #[batch, 512, frames], dtype := dtypes.compute.val, device := device } :=
   Id.run do
     let mut quantized : Tensor { shape := #[batch, 256, frames], dtype := dtypes.compute.val, device := device } := Tensor.castLike rvq.outputProj (Tensor.zeros #[batch, 256, frames] false codes.device)
-    let mut off : Nat := 0
-    for cb in rvq.codebooks do
-      let idx := start + off
-      let code3 : Tensor { shape := #[batch, 1, frames], dtype := .Int64, device := device } := Tensor.sliceChecked codes 1 idx 1 #[batch, 1, frames]
+    for h : k in [:count] do
+      let code3 : Tensor { shape := #[batch, 1, frames], dtype := .Int64, device := device } :=
+        Tensor.slice codes 1 (start + k) 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
       let code2 : Tensor { shape := #[batch, frames], dtype := .Int64, device := device } := Tensor.reshape code3 #[batch, frames]
-      let q := decodeCodebook cb code2
+      let q := decodeCodebook (rvq.codebooks.get ⟨k, by have := h.upper; simpa using this⟩) code2
       quantized := Tensor.add quantized q
-      off := off + 1
     let out : Tensor { shape := #[batch, 512, frames], dtype := dtypes.compute.val, device := device } :=
       Tensor.reshape (Tensor.conv1d quantized rvq.outputProj 1 0 1) #[batch, 512, frames]
         (by simp [Nat.sub_add_cancel hf])
@@ -600,13 +447,15 @@ private def causalConv1d {batch inC outC frames kernel : Nat}
     (weight : Tensor { shape := #[outC, inC, kernel], dtype := dtypes.compute.val, device := device })
     (bias : Tensor { shape := #[outC], dtype := dtypes.compute.val, device := device })
     (dilation : Nat := 1)
+    (hConv : 0 < kernel ∧ 0 < dilation := by decide)
     : Tensor { shape := #[batch, outC, frames], dtype := dtypes.compute.val, device := device } :=
   let leftPad : Nat := dilation * (kernel - 1)
   let left : Tensor { shape := #[batch, inC, leftPad], dtype := dtypes.compute.val, device := device } := Tensor.castLike x (Tensor.zeros #[batch, inC, leftPad] false x.device)
   let xPad : Tensor { shape := #[batch, inC, frames + leftPad], dtype := dtypes.compute.val, device := device } :=
     Tensor.reshape (Tensor.cat left x 2) #[batch, inC, frames + leftPad] (by simp [Nat.add_comm])
   let y0 : Tensor { shape := #[batch, outC, frames], dtype := dtypes.compute.val, device := device } :=
-    Tensor.reshape (Tensor.conv1d xPad weight 1 0 dilation) #[batch, outC, frames]
+    Tensor.reshape (Tensor.conv1d xPad weight 1 0 dilation
+        ⟨by decide, hConv.2, hConv.1, by simp only [leftPad]; omega⟩) #[batch, outC, frames]
       (by simp only [leftPad]; congr 2; simp; omega)
   addBias3d y0 bias
 
@@ -615,35 +464,38 @@ private def causalDepthwiseConv1d {batch channels frames : Nat}
     (hf : 0 < frames)
     (weight : Tensor { shape := #[channels, 1, 7], dtype := dtypes.compute.val, device := device })
     (bias : Tensor { shape := #[channels], dtype := dtypes.compute.val, device := device })
+    (hc : 0 < channels := by decide)
     : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
   let left : Tensor { shape := #[batch, channels, 6], dtype := dtypes.compute.val, device := device } := Tensor.castLike x (Tensor.zeros #[batch, channels, 6] false x.device)
   let xPad : Tensor { shape := #[batch, channels, frames + 6], dtype := dtypes.compute.val, device := device } :=
     Tensor.reshape (Tensor.cat left x 2) #[batch, channels, frames + 6] (by simp [Nat.add_comm])
   let y : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
-    Tensor.reshape (Tensor.conv1dGroups xPad weight bias 1 0 1 channels) #[batch, channels, frames]
+    Tensor.reshape (Tensor.conv1dGroups xPad weight bias 1 0 1 channels (by conv_valid)
+        ⟨hc, (Nat.one_mul _).symm, Nat.dvd_refl _⟩) #[batch, channels, frames]
       (by simp [Tensor.convExtent, Nat.sub_add_cancel hf])
   y
 
 private def causalTransConv1d {batch inC outC frames kernel stride rightPad : Nat}
     (x : Tensor { shape := #[batch, inC, frames], dtype := dtypes.compute.val, device := device })
-    (hk : 0 < kernel)
+    (hValid : 0 < kernel ∧ 0 < stride ∧ 0 < frames)
     (weight : Tensor { shape := #[inC, outC, kernel], dtype := dtypes.compute.val, device := device })
     (bias : Tensor { shape := #[outC], dtype := dtypes.compute.val, device := device })
     : Tensor { shape := #[batch, outC, ((frames - 1) * stride + kernel) - rightPad], dtype := dtypes.compute.val, device := device } :=
   let outLen : Nat := (frames - 1) * stride + kernel
   let y0 : Tensor { shape := #[batch, outC, outLen], dtype := dtypes.compute.val, device := device } :=
-    Tensor.reshape (Tensor.convTranspose1d x weight bias stride 0 0 1) #[batch, outC, outLen]
-      (by simp only [outLen]; simp [Nat.add_assoc, Nat.sub_add_cancel hk])
-  Tensor.sliceChecked y0 2 0 (outLen - rightPad) #[batch, outC, outLen - rightPad]
+    Tensor.reshape (Tensor.convTranspose1d x weight bias stride 0 0 1
+        ⟨hValid.2.1, by decide, hValid.1, hValid.2.2, Or.inl hValid.2.1, by omega⟩) #[batch, outC, outLen]
+      (by simp only [outLen]; simp [Nat.add_assoc, Nat.sub_add_cancel hValid.1])
+  Tensor.slice y0 2 0 (outLen - rightPad)
 
 private def snakeBeta {batch channels frames : Nat}
     (x : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device })
     (alpha : Tensor { shape := #[channels], dtype := dtypes.compute.val, device := device })
     (beta : Tensor { shape := #[channels], dtype := dtypes.compute.val, device := device }) : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
   let alphaE : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
-    Tensor.expand (Tensor.reshape (Tensor.exp alpha) #[1, channels, 1]) #[batch, channels, frames]
+    Tensor.broadcastTo (Tensor.reshape (Tensor.exp alpha) #[1, channels, 1]) #[batch, channels, frames]
   let betaE : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
-    Tensor.expand (Tensor.reshape (Tensor.exp beta) #[1, channels, 1]) #[batch, channels, frames]
+    Tensor.broadcastTo (Tensor.reshape (Tensor.exp beta) #[1, channels, 1]) #[batch, channels, frames]
   let sin2 : Tensor { shape := #[batch, channels, frames], dtype := dtypes.compute.val, device := device } :=
     let z := Tensor.sin (Tensor.mul x alphaE)
     Tensor.mul z z
@@ -679,8 +531,8 @@ private def forwardAttention {batch seq : Nat}
   let k : Tensor { shape := #[batch, seq, 16, 64], dtype := dtypes.compute.val, device := device } := Tensor.reshape k0 #[batch, seq, 16, 64]
   let v : Tensor { shape := #[batch, seq, 16, 64], dtype := dtypes.compute.val, device := device } := Tensor.reshape v0 #[batch, seq, 16, 64]
 
-  let q := Tensor.applyRotary q cos sin
-  let k := Tensor.applyRotary k cos sin
+  let q := Tensor.applyRotary (half := 32) q cos sin
+  let k := Tensor.applyRotary (half := 32) k cos sin
 
   let qh : Tensor { shape := #[batch, 16, seq, 64], dtype := dtypes.compute.val, device := device } := Tensor.splitHeads q
   let kh : Tensor { shape := #[batch, 16, seq, 64], dtype := dtypes.compute.val, device := device } := Tensor.splitHeads k
@@ -718,7 +570,7 @@ private def forwardPreTransformer {batch frames : Nat}
   Id.run do
     let x0 : Tensor { shape := #[batch, frames, 1024], dtype := dtypes.compute.val, device := device } := Tensor.reshape (Tensor.transpose x 1 2) #[batch, frames, 1024]
     let mut h : Tensor { shape := #[batch, frames, 512], dtype := dtypes.compute.val, device := device } := Tensor.affine3d x0 m.preTransformerInputProj m.preTransformerInputBias
-    let (cos0, sin0) := Tensor.rotaryFreqs frames 64 10000.0
+    let (cos0, sin0) := Tensor.rotaryFreqs frames 32 10000.0
     let cos : Tensor { shape := #[frames, 32], dtype := .Float32, device := device } := cos0.to h.device
     let sin : Tensor { shape := #[frames, 32], dtype := .Float32, device := device } := sin0.to h.device
     for layer in m.preTransformerLayers do
@@ -728,13 +580,14 @@ private def forwardPreTransformer {batch frames : Nat}
     let hOut : Tensor { shape := #[batch, frames, 1024], dtype := dtypes.compute.val, device := device } := Tensor.affine3d hNorm m.preTransformerOutputProj m.preTransformerOutputBias
     Tensor.reshape (Tensor.transpose hOut 1 2) #[batch, 1024, frames]
 
-private def forwardResidualUnit {batch frames dim : Nat}
-    (u : DecoderResidualUnit (device := device) (dtypes := dtypes) dim)
+private def forwardResidualUnit {batch frames dim dilation : Nat}
+    (u : DecoderResidualUnit (device := device) (dtypes := dtypes) dim dilation)
     (x : Tensor { shape := #[batch, dim, frames], dtype := dtypes.compute.val, device := device })
-    (hf : 0 < frames) : Tensor { shape := #[batch, dim, frames], dtype := dtypes.compute.val, device := device } :=
+    (hf : 0 < frames) (hd : 0 < dilation := by decide) :
+    Tensor { shape := #[batch, dim, frames], dtype := dtypes.compute.val, device := device } :=
   let residual := x
   let h1 := snakeBeta x u.act1Alpha u.act1Beta
-  let h2 := causalConv1d h1 hf u.conv1Weight u.conv1Bias u.conv1Dilation
+  let h2 := causalConv1d h1 hf u.conv1Weight u.conv1Bias dilation ⟨by decide, hd⟩
   let h3 := snakeBeta h2 u.act2Alpha u.act2Beta
   let h4 := causalConv1d h3 hf u.conv2Weight u.conv2Bias
   Tensor.add residual h4
@@ -747,7 +600,7 @@ private def forwardDecoderBlock {batch frames inDim outDim upRate : Nat}
   let h1 : Tensor { shape := #[batch, outDim, frames * upRate], dtype := dtypes.compute.val, device := device } :=
     Tensor.reshape (causalTransConv1d (batch := batch) (inC := inDim) (outC := outDim)
       (frames := frames) (kernel := 2 * upRate) (stride := upRate) (rightPad := upRate)
-      h0 (by omega) blk.transWeight blk.transBias) #[batch, outDim, frames * upRate]
+      h0 ⟨by omega, hu, hf⟩ blk.transWeight blk.transBias) #[batch, outDim, frames * upRate]
       (by congr 2; obtain ⟨g, rfl⟩ : ∃ g, frames = g + 1 := ⟨frames - 1, by omega⟩; simp [Nat.add_mul]; omega)
   have hOut : 0 < frames * upRate := Nat.mul_pos hf hu
   let h2 := forwardResidualUnit blk.res1 h1 hOut
@@ -761,7 +614,7 @@ private def forwardUpsampleStage {batch frames : Nat}
   let h0 : Tensor { shape := #[batch, 1024, frames * 2], dtype := dtypes.compute.val, device := device } :=
     Tensor.reshape (causalTransConv1d (batch := batch) (inC := 1024) (outC := 1024)
       (frames := frames) (kernel := 2) (stride := 2) (rightPad := 0)
-      x (by decide) stage.transConvWeight stage.transConvBias) #[batch, 1024, frames * 2]
+      x ⟨by decide, by decide, hf⟩ stage.transConvWeight stage.transConvBias) #[batch, 1024, frames * 2]
       (by simp; rw [show (frames - 1) * 2 + 2 = frames * 2 by omega])
   forwardConvNeXt stage.convNeXt h0 (by omega)
 
@@ -812,23 +665,27 @@ def decodeChunked {batch frames : Nat}
       let mut start : Nat := 0
       let mut chunks : Array (Sigma (fun shape => Tensor { shape := shape, dtype := dtypes.compute.val, device := device })) := #[]
       while start < frames do
-        let remaining := frames - start
-        let curChunk := if remaining < chunkSize then remaining else chunkSize
-        let context := if start < leftContextSize then start else leftContextSize
-        let chunkStart := start - context
-        let chunkFrames := context + curChunk
-        let codesChunk : Tensor { shape := #[batch, 16, chunkFrames], dtype := .Int64, device := device } := Tensor.sliceChecked codes 2 chunkStart chunkFrames #[batch, 16, chunkFrames]
-        -- `start < frames` and `chunkSize > 0` make the chunk nonempty.
-        if hChunk : 0 < chunkFrames then
-          let wavChunk : Tensor { shape := #[batch, 1, chunkFrames * 1920], dtype := dtypes.compute.val, device := device } := decode m codesChunk hChunk
-          let keepStart : Nat := context * 1920
-          let keepSamples : Nat := curChunk * 1920
-          let wavKeep : Tensor { shape := #[batch, 1, keepSamples], dtype := dtypes.compute.val, device := device } := Tensor.sliceChecked wavChunk 2 keepStart keepSamples #[batch, 1, keepSamples]
-          chunks := chunks.push wavKeep.packShape
-          start := start + curChunk
+        if hStart : start < frames then
+          let remaining := frames - start
+          let curChunk := if remaining < chunkSize then remaining else chunkSize
+          let context := if start < leftContextSize then start else leftContextSize
+          let chunkStart := start - context
+          let chunkFrames := context + curChunk
+          let codesChunk : Tensor { shape := #[batch, 16, chunkFrames], dtype := .Int64, device := device } := Tensor.slice codes 2 chunkStart chunkFrames
+            (_bounds := by simp only [chunkFrames, chunkStart, context, curChunk, remaining]; split <;> split <;> simp <;> omega)
+          -- `start < frames` and `chunkSize > 0` make the chunk nonempty.
+          if hChunk : 0 < chunkFrames then
+            let wavChunk : Tensor { shape := #[batch, 1, chunkFrames * 1920], dtype := dtypes.compute.val, device := device } := decode m codesChunk hChunk
+            let keepStart : Nat := context * 1920
+            let keepSamples : Nat := curChunk * 1920
+            let wavKeep : Tensor { shape := #[batch, 1, keepSamples], dtype := dtypes.compute.val, device := device } := Tensor.slice wavChunk 2 keepStart keepSamples
+            chunks := chunks.push wavKeep.packShape
+            start := start + curChunk
+          else
+            start := frames
         else
-          start := frames
-      let wavDyn := Tensor.catManyChecked chunks 2 #[batch, 1, frames * 1920]
+          break
+      let wavDyn := Tensor.catMany! chunks 2 #[batch, 1, frames * 1920]
       Tensor.reshape wavDyn #[batch, 1, frames * 1920]
 
 /-- Streaming decoder state for incremental 12Hz codec-frame ingestion. -/
@@ -861,7 +718,7 @@ private def decodeOneStreamingChunk {batch : Nat}
     (force : Bool := false)
     : DecodeStreamState (device := device) batch × Option (Sigma fun samples => Tensor { shape := #[batch, 1, samples], dtype := dtypes.compute.val, device := device }) :=
   let remaining := st.totalFrames - st.emittedFrames
-  if remaining == 0 then
+  if hRem : remaining = 0 then
     (st, none)
   else if !force && remaining < st.chunkSize then
     (st, none)
@@ -872,12 +729,13 @@ private def decodeOneStreamingChunk {batch : Nat}
     let chunkStart := start - context
     let chunkFrames := context + curChunk
     let allCodes : Tensor { shape := #[batch, 16, st.totalFrames], dtype := .Int64, device := device } := Tensor.reshape st.codesDyn #[batch, 16, st.totalFrames]
-    let codesChunk : Tensor { shape := #[batch, 16, chunkFrames], dtype := .Int64, device := device } := Tensor.sliceChecked allCodes 2 chunkStart chunkFrames #[batch, 16, chunkFrames]
+    let codesChunk : Tensor { shape := #[batch, 16, chunkFrames], dtype := .Int64, device := device } := Tensor.slice allCodes 2 chunkStart chunkFrames
+      (_bounds := by simp only [chunkFrames, chunkStart, context, curChunk, start, remaining] at hRem ⊢; split <;> split <;> simp <;> omega)
     if hChunk : 0 < chunkFrames then
       let wavChunk : Tensor { shape := #[batch, 1, chunkFrames * 1920], dtype := dtypes.compute.val, device := device } := decode m codesChunk hChunk
       let keepStart : Nat := context * 1920
       let keepSamples : Nat := curChunk * 1920
-      let wavKeep : Tensor { shape := #[batch, 1, keepSamples], dtype := dtypes.compute.val, device := device } := Tensor.sliceChecked wavChunk 2 keepStart keepSamples #[batch, 1, keepSamples]
+      let wavKeep : Tensor { shape := #[batch, 1, keepSamples], dtype := dtypes.compute.val, device := device } := Tensor.slice wavChunk 2 keepStart keepSamples
       let st' := { st with emittedFrames := st.emittedFrames + curChunk }
       (st', some ⟨keepSamples, wavKeep⟩)
     else

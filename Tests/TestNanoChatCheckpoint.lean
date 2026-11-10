@@ -7,7 +7,7 @@ namespace Tests.NanoChatCheckpoint
 open torch torch.ModdedTrain LeanTest
 
 private def tinyConfig : moddedGpt.Config := {
-  vocabSize := 16, nLayer := 7, nHead := 1, headDim := 12, modelDim := 12,
+  vocabSize := 16, nLayer := 7, nHead := 1, halfHeadDim := 6,
   maxSeqLen := 8, blockSize := 8, numValueEmbeds := 1
 }
 
@@ -16,7 +16,7 @@ private def assertTreeEqual [TensorStruct α] [FloatingTensorStruct α] (actual 
     TensorStruct.fold (fun {_s} t acc => acc.push (t.runtimeShape, t.raw.dtype)) #[] value
   assertTrue (describe actual == describe expected) "checkpoint tensor traversal metadata"
   let errors := FloatingTensorStruct.zipWith (fun a b => (by simpa using Tensor.abs (Tensor.sub a b))) actual expected
-  let error := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item (Tensor.sumAll t)) 0.0 errors
+  let error := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item! (Tensor.sumAll t)) 0.0 errors
   assertTrue (error.isFinite && error < 1e-6) s!"checkpoint tensor difference {error}"
 
 private def markedMuon {s : Shape} (step : Nat) : Optim.NorMuon.ParamState ⟨s, .Float32, .CPU⟩ := {
@@ -195,11 +195,11 @@ private def metadata (tokens : Nat) : CheckpointMetadata := {
 
 @[test] def testNanoChatIndexedTrainingStep : IO Unit := do
   let params ← moddedGpt.ModdedGPTParams.init tinyConfig
-  let yarn ← moddedGpt.YarnRotary.init tinyConfig.headDim tinyConfig.maxSeqLen
+  let yarn ← moddedGpt.YarnRotary.init tinyConfig.halfHeadDim tinyConfig.maxSeqLen
   let input := (Tensor.fromInt64Array #[0, 1, 2, 3]).reshape #[1, 4]
   let target := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshape #[1, 4]
   let opt := OptimizerState.init tinyConfig params
-  let (updated, nextOpt, result) ← trainStep params yarn input target opt
+  let (updated, nextOpt, result) ← trainStep params yarn (by decide) input target opt
     { numIterations := 10 } 1.0
   assertTrue result.loss.isFinite "Indexed NanoChat forward/backward produces a finite loss"
   assertEqual result.tokensProcessed 4
@@ -212,5 +212,21 @@ def run : IO Unit := do
   testNanoChatSnapshotRestoresOptimizerUpdate
   testNanoChatSnapshotReplacementAndCorruption
   testNanoChatLegacyFlatCheckpoint
+
+@[test] def testNanoChatIntervalsRoundTripAndRejectZero : IO Unit := do
+  let hp : Hyperparameters := { valInterval := none, logInterval := 7 }
+  let json := Lean.toJson hp
+  match Lean.fromJson? (α := Hyperparameters) json with
+  | .ok decoded =>
+      assertTrue (decoded.valInterval.isNone) "a never-firing interval stores as null"
+      assertEqual (decoded.logInterval.map (·.val)) (some 7)
+  | .error e => throw <| IO.userError s!"Hyperparameters JSON should round-trip: {e}"
+  let zero := json.setObjVal! "checkpointInterval" (Lean.toJson (0 : Nat))
+  match Lean.fromJson? (α := Hyperparameters) zero with
+  | .ok _ => throw <| IO.userError "A zero interval should be rejected on load"
+  | .error e => assertTrue (e.contains "positive") e
+  assertFalse (StepInterval.fires none 0) "none never fires"
+  assertTrue (StepInterval.fires 5 10) "an interval fires on its multiples"
+  assertFalse (StepInterval.fires 5 11) "and not between them"
 
 end Tests.NanoChatCheckpoint

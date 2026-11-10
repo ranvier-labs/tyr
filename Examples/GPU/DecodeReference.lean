@@ -27,22 +27,21 @@ def runDecodeCacheParity (device : Device) : IO Bool := do
 
   -- Reference: do attention over the full sequence (causal=true, q_seq=kv_seq).
   let refAll : Tensor { shape := #[batch, qHeads, totalLen, headDim], dtype := .BFloat16, device := device } :=
-    Tensor.attentionGQAQKV qAll kAll vAll true true
+    Tensor.attentionGQAQKV qAll kAll vAll true true (_heads := by decide)
 
   -- Build a 1-layer cache, append tokens one at a time, run cached attention.
   let mut cache ← Generator.KVCache.Cache.init 1 batch maxLen kvHeads headDim (device := device)
   -- Accumulate per-step kernel outputs into a list, then stack.
   let mut acc : Array (Tensor { shape := #[batch, qHeads, 1, headDim], dtype := .BFloat16, device := device }) := #[]
-  for i in [:totalLen] do
-    let pos : Nat := i
+  for h : pos in [:totalLen] do
     let qStep : Tensor { shape := #[batch, qHeads, 1, headDim], dtype := .BFloat16, device := device } :=
-      Tensor.sliceChecked qAll 2 pos 1 #[batch, qHeads, 1, headDim]
+      Tensor.slice qAll 2 pos 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
     let kStep : Tensor { shape := #[batch, kvHeads, 1, headDim], dtype := .BFloat16, device := device } :=
-      Tensor.sliceChecked kAll 2 pos 1 #[batch, kvHeads, 1, headDim]
+      Tensor.slice kAll 2 pos 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
     let vStep : Tensor { shape := #[batch, kvHeads, 1, headDim], dtype := .BFloat16, device := device } :=
-      Tensor.sliceChecked vAll 2 pos 1 #[batch, kvHeads, 1, headDim]
+      Tensor.slice vAll 2 pos 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
     let (cache', out) ← cache.attendLayer (numQHeads := qHeads)
-        0 qStep kStep vStep (enableGqa := true)
+        0 qStep kStep vStep (enableGqa := true) (_heads := by decide)
     cache ← cache'.incrementSeqLens
     acc := acc.push out
 
@@ -53,19 +52,18 @@ def runDecodeCacheParity (device : Device) : IO Bool := do
   -- Compare each step's cached output to the corresponding slice of refAll.
   let mut allOk := true
   let mut maxAbsAll : Float := 0.0
-  for i in [:totalLen] do
-    let pos : Nat := i
+  for h : pos in [:totalLen] do
     let refStep : Tensor { shape := #[batch, qHeads, 1, headDim], dtype := .BFloat16, device := device } :=
-      Tensor.sliceChecked refAll 2 pos 1 #[batch, qHeads, 1, headDim]
-    let some cachedStep := acc[i]? |
-      throw <| IO.userError s!"Missing cached decode output at step {i}"
+      Tensor.slice refAll 2 pos 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
+    let some cachedStep := acc[pos]? |
+      throw <| IO.userError s!"Missing cached decode output at step {pos}"
     let diff := Tensor.abs (cachedStep - refStep)
     let maxAbs := Tensor.item (Tensor.maxAll diff)
     if maxAbs > maxAbsAll then maxAbsAll := maxAbs
     let ok := Tensor.allclose refStep cachedStep 3e-2 3e-2
     if !ok then
       allOk := false
-      IO.println s!"  cache_parity step {i}: max_abs={maxAbs} (FAIL)"
+      IO.println s!"  cache_parity step {pos}: max_abs={maxAbs} (FAIL)"
 
   IO.println s!"cache_parity: ok={allOk} max_abs_overall={maxAbsAll}"
   pure allOk

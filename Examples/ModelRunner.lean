@@ -47,7 +47,7 @@ def resolveDevice (arg : String) : IO (Device × Option String) := do
         match (requested.drop 5).toNat? with
         | some idx =>
             if ← cuda_is_available then
-              pure (← Device.cuda idx.toUInt64, none)
+              pure (← Device.cuda idx, none)
             else
               pure (.CPU, some s!"Warning: --device cuda:{idx} requested but CUDA is unavailable; falling back to CPU.")
         | none => pure (.CPU, some s!"Warning: invalid device selector '{arg}'; falling back to CPU.")
@@ -125,8 +125,9 @@ def generatedIdsFromBatch
     (ids : Tensor { shape := #[batch, outSeq], dtype := .Int64, device := device })
     : IO (Array (Array UInt64)) := do
   let mut out : Array (Array UInt64) := #[]
-  for i in [:batch] do
-    let row2 : Tensor { shape := #[1, outSeq], dtype := .Int64, device := device } := ids.sliceChecked 0 i 1 #[1, outSeq]
+  for h : i in [:batch] do
+    let row2 : Tensor { shape := #[1, outSeq], dtype := .Int64, device := device } :=
+      ids.slice 0 i 1 (_bounds := by have := h.upper; simp at this ⊢; omega)
     let row1 : Tensor { shape := #[outSeq], dtype := .Int64, device := device } := Tensor.reshape row2 #[outSeq]
     let vals ← Tensor.toUInt64Array row1
     let promptLen := promptLens.getD i 0

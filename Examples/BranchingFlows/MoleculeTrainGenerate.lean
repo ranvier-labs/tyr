@@ -61,7 +61,7 @@ structure RunOptions where
   delWeight : Float := 1.0
   useBranchingTimeProb : Float := 0.5
   deletionPad : Float := 1.2
-  logEvery : Nat := 50
+  logEvery : StepInterval := 50
   sampleSteps : Nat := 7
   sampleCount : Nat := 1
   generate : Bool := true
@@ -262,7 +262,9 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
   | "--deletion-pad" :: value :: rest =>
       parseArgsLoop rest { opts with deletionPad := (← parseFloatArg "--deletion-pad" value) }
   | "--log-every" :: value :: rest =>
-      parseArgsLoop rest { opts with logEvery := (← parseNatArg "--log-every" value) }
+      match PosNat.parseOrNone? value with
+      | some logEvery => parseArgsLoop rest { opts with logEvery }
+      | none => throw <| IO.userError s!"Invalid --log-every: {value} (expected a positive count or none)"
   | "--sample-steps" :: value :: rest =>
       parseArgsLoop rest { opts with sampleSteps := (← parseNatArg "--sample-steps" value) }
   | "--sample-count" :: value :: rest =>
@@ -540,7 +542,7 @@ private def runWithModel {dtype : DType} [DType.RealFloating dtype]
       let t2 ← IO.monoMsNow
       sampleMs := sampleMs + (t1 - t0)
       trainMs := trainMs + (t2 - t1)
-      if opts.logEvery > 0 && step % opts.logEvery == 0 then
+      if opts.logEvery.fires step then
         IO.println s!"molecule_train step={globalStep} lr={lr} total={lastReport.total} coord={lastReport.coord} label={lastReport.label} splits={lastReport.splits} del={lastReport.del}"
         if opts.timePhases && step > 0 then
           IO.println s!"molecule_phases step={globalStep} sample_ms_avg={(sampleMs / (step + 1))} train_ms_avg={(trainMs / (step + 1))}"
@@ -660,10 +662,6 @@ private def runAt (dtype : DType) [DType.RealFloating dtype]
     throw (IO.userError "total steps must be positive")
   if opts.sampleCount == 0 then
     throw (IO.userError "sample count must be positive")
-  if opts.vocabSize == 0 then
-    throw (IO.userError "vocab size must be positive")
-  if opts.maskToken >= opts.vocabSize then
-    throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
   if opts.maxLen == 0 then
     throw (IO.userError "max length must be positive")
   match opts.coordTargetCap? with
@@ -701,10 +699,14 @@ private def runAt (dtype : DType) [DType.RealFloating dtype]
         throw (IO.userError "--require-data requires --data")
 
   let vocab : Nat := opts.vocabSize
-  let bridgeCfgBase := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
+  let ⟨hVocab⟩ ← if h : 0 < opts.vocabSize then pure (PLift.up h) else
+    throw (IO.userError "vocab size must be positive")
+  let ⟨hMask⟩ ← if h : opts.maskToken < opts.vocabSize then pure (PLift.up h) else
+    throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
+  let bridgeCfgBase := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken hVocab hMask
   let labelDFM :=
     if opts.fixedLabels then none
-    else some (DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken)
+    else some (DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken hVocab hMask)
   let bridgeCfg := { bridgeCfgBase with labelDFM }
   let records ← loadRecords opts
   let allStates ← exceptToIO "convert molecule records"
@@ -729,21 +731,23 @@ private def runAt (dtype : DType) [DType.RealFloating dtype]
 
   torch.manualSeed opts.seed
   if opts.fullArchitecture then
+    -- The even check above makes `opts.headDim = 2 * half`.
+    let half := opts.headDim / 2
     let model :=
       fullMoleculeTransformerModel (dtype := dtype) (device := opts.device) (maxLen := opts.maxLen) (vocab := vocab)
-        (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
+        (hidden := opts.hiddenDim) (heads := opts.heads) (half := half)
         (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
         (coordUpdateLayers := opts.coordUpdateLayers)
         (coordTargetCap? := opts.coordTargetCap?)
     let initParams ←
-      FullMoleculeTransformerParams.init vocab opts.hiddenDim opts.heads opts.headDim
+      FullMoleculeTransformerParams.init vocab opts.hiddenDim opts.heads (2 * half)
         opts.mlp opts.rffDim opts.layers (device := opts.device)
     let initParams ← TensorStruct.castTo
-      (FullMoleculeTransformerParams (device := opts.device) vocab opts.hiddenDim opts.heads opts.headDim
+      (FullMoleculeTransformerParams (device := opts.device) vocab opts.hiddenDim opts.heads (2 * half)
         opts.mlp opts.rffDim opts.layers dtype) initParams
     let makeLearnedModel := fun params =>
       fullMoleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
-        (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
+        (hidden := opts.hiddenDim) (heads := opts.heads) (half := half)
         (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
         trainCfg.padToken params (coordUpdateLayers := opts.coordUpdateLayers)
         (splitLogitCap? := opts.splitLogitCap?)

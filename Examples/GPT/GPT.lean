@@ -148,20 +148,21 @@ def blockForward {n_embd n_head batch seq : Nat}
   let v := Tensor.linear3d h params.v_proj
   -- Reshape for multi-head attention:
   -- [batch, seq, n_embd] -> [batch, seq, n_head, head_dim] -> [batch, n_head, seq, head_dim]
-  if n_head == 0 || n_embd % n_head != 0 then
+  if n_head == 0 then
+    throw (IO.userError "GPT embedding dimension must be divisible by a nonzero head count")
+  let ⟨hDiv⟩ ← if h : n_embd % n_head = 0 then pure (PLift.up h) else
     throw (IO.userError "GPT embedding dimension must be divisible by a nonzero head count")
   let head_dim := n_embd / n_head
-  let q ← TensorOps.reshape q #[batch, seq, n_head, head_dim]
-  let q := TensorOps.splitHeads q
-  let k ← TensorOps.reshape k #[batch, seq, n_head, head_dim]
-  let k := TensorOps.splitHeads k
-  let v ← TensorOps.reshape v #[batch, seq, n_head, head_dim]
-  let v := TensorOps.splitHeads v
+  have hHeads : batch * seq * n_embd = batch * seq * n_head * head_dim := by
+    rw [Nat.mul_assoc _ n_head, Nat.mul_div_cancel' (Nat.dvd_of_mod_eq_zero hDiv)]
+  let q := TensorOps.splitHeads (q.reshape #[batch, seq, n_head, head_dim] (by simpa using hHeads))
+  let k := TensorOps.splitHeads (k.reshape #[batch, seq, n_head, head_dim] (by simpa using hHeads))
+  let v := TensorOps.splitHeads (v.reshape #[batch, seq, n_head, head_dim] (by simpa using hHeads))
   -- Scaled dot-product attention with causal masking (with dropout built-in)
   -- Input: [batch, n_head, seq, head_dim], Output: [batch, n_head, seq, head_dim]
   let attn ← TensorOps.attention q k v dropout_p training
   -- Reshape back: [batch, n_head, seq, head_dim] -> [batch, seq, n_head, head_dim] -> [batch, seq, n_embd]
-  let attn ← TensorOps.reshape (TensorOps.joinHeads attn) #[batch, seq, n_embd]
+  let attn := (TensorOps.joinHeads attn).reshape #[batch, seq, n_embd] (by simpa using hHeads.symm)
   -- Output projection + dropout
   let attn := Tensor.affine3d attn params.c_proj params.c_proj_bias
   let attn ← TensorOps.dropout attn dropout_p training
@@ -189,7 +190,7 @@ def forward {cfg : Config} {batch seq : Nat}
   let positions := (Tensor.arange seq).to params.wpe.device
   let pos_emb := TensorOps.embedding1d positions params.wpe
   -- Expand pos_emb to match batch: [seq, n_embd] -> [batch, seq, n_embd]
-  let pos_emb_expanded := Tensor.expand pos_emb #[batch, seq, cfg.n_embd]
+  let pos_emb_expanded := Tensor.broadcastTo pos_emb #[batch, seq, cfg.n_embd]
   -- Combine embeddings + dropout: [batch, seq, n_embd]
   let x : Activation (device := device) #[batch, seq, cfg.n_embd] := Tensor.add tok_emb pos_emb_expanded
   let x ← TensorOps.dropout x cfg.dropout training
@@ -211,9 +212,9 @@ def loss {cfg : Config} {batch seq : Nat}
     (training : Bool := true) : IO (Activation (device := device) #[]) := do
   let logits ← forward params idx training
   -- Reshape for cross-entropy: (batch*seq, vocab) vs (batch*seq,)
-  let logits_flat ← TensorOps.reshape logits #[batch * seq, cfg.vocab_size]
-  let targets_flat ← TensorOps.reshape targets #[batch * seq]
-  IO.ofExcept (Tensor.crossEntropy? logits_flat targets_flat)
+  let logits_flat := logits.reshape #[batch * seq, cfg.vocab_size]
+  let targets_flat := targets.reshape #[batch * seq]
+  pure (Tensor.crossEntropy! logits_flat targets_flat)
 
 /-- Training state using Optax-style optimizer -/
 structure TrainState (cfg : Config) where
@@ -258,10 +259,9 @@ def generate {cfg : Config}
     -- Forward pass to get logits [1, seq, vocab] (training=false disables dropout)
     let logits ← forward params inputTensor false
 
-    -- Get logits for last position: logits[:, -1, :] -> [1, vocab]
-    -- Reshape to [1 * seq * vocab] then slice last vocab elements
-    let flat ← TensorOps.reshape logits #[seq * cfg.vocab_size]
-    let lastLogits := (flat.sliceChecked 0 ((seq - 1) * cfg.vocab_size) cfg.vocab_size #[cfg.vocab_size]).reshape #[1, cfg.vocab_size]
+    let ⟨hSeq⟩ ← if h : 0 < seq then pure (PLift.up h) else
+      throw <| IO.userError "GPT generation requires a non-empty context"
+    let lastLogits := (logits.slice 1 (seq - 1) 1).reshape #[1, cfg.vocab_size]
 
     -- Apply temperature and convert to probabilities
     let scaledLogits := lastLogits / temperature

@@ -29,7 +29,7 @@ private abbrev shapeNumel (s : Shape) : Nat :=
 
 private def treeDot [TensorStruct α] [FloatingTensorStruct α] (x y : α) : Float :=
   let prod := FloatingTensorStruct.zipWith Tensor.mul x y
-  TensorStruct.fold (fun t acc => acc + Tensor.item (Tensor.sumAll t)) 0.0 prod
+  TensorStruct.fold (fun t acc => acc + Tensor.item! (Tensor.sumAll t)) 0.0 prod
 
 private def clipScale [TensorStruct α] [FloatingTensorStruct α] (x : α) (maxNorm : Float) : α :=
   let sqNorm := treeDot x x
@@ -75,7 +75,7 @@ def applyTranspose {Params : Type} [TensorStruct Params] [FloatingTensorStruct P
   Id.run do
     let mut acc := TensorStruct.map Tensor.zerosLike prototype
     for i in List.finRange rank do
-      let coeff1 := Tensor.sliceChecked coeffs 0 i.val 1 #[1]
+      let coeff1 := Tensor.slice coeffs 0 i.val 1
       let coeff := Tensor.item (Tensor.sumAll coeff1)
       let row := K.rowAt i
       acc := TensorStruct.add acc (TensorStruct.scale row coeff)
@@ -140,11 +140,11 @@ private def buildTreeFactorFromOutputFactor [TensorStruct Params] [FloatingTenso
     (params : Params)
     (outputFactor : MetricFactor rank (shapeNumel s) .Float32 device) : IO (TreeMetricFactor Params rank) := do
   let rows :=
-    ((List.range rank).toArray.map fun i =>
+    Array.ofFn (n := rank) fun i =>
       let rowFlat : Tensor { shape := #[shapeNumel s], dtype := .Float32, device := device } :=
-        Tensor.reshape (Tensor.sliceChecked outputFactor.matrix 0 i 1 #[1, shapeNumel s])
+        Tensor.reshape (Tensor.slice outputFactor.matrix 0 i 1)
           #[shapeNumel s]
-      Tensor.reshape rowFlat s (by simp))
+      Tensor.reshape rowFlat s (by simp)
   buildTreeFactorFromCotangentRows output params rows (by simp [rows])
 
 private def finalizePreparedStepWithTreeFactor
@@ -168,7 +168,7 @@ private def finalizePreparedStepWithTreeFactor
     diagnostics := {
       gradientNorm := Float.sqrt (treeDot gradient gradient)
       factorRank := rank
-      innerConditionEstimate := Tensor.spectralNorm inner * Tensor.spectralNorm innerInv
+      innerConditionEstimate := Tensor.spectralNorm! inner * Tensor.spectralNorm! innerInv
       residualNorm := Float.sqrt (treeDot residual residual)
       updateNorm := Float.sqrt (treeDot update update)
       }
@@ -232,7 +232,7 @@ private def prepareCrossEntropyStep
     Tensor.reshape predictionReq #[batch * seq, vocab]
   let targetsFlat : Tensor { shape := #[batch * seq], dtype := .Int64, device := device } :=
     Tensor.reshape targets #[batch * seq]
-  let lossT ← IO.ofExcept (Tensor.crossEntropy? logitsFlat targetsFlat)
+  let lossT := Tensor.crossEntropy! logitsFlat targetsFlat
   let outputCotangent ← Tensor.grad lossT predictionReq (Tensor.onesLike lossT)
   pure (paramsReq, predictionReq, lossT, Tensor.detach outputCotangent)
 
@@ -307,7 +307,7 @@ def stepCrossEntropy
       diagnostics := {
         gradientNorm := Float.sqrt (treeDot paramGrad paramGrad)
         factorRank := outDim
-        innerConditionEstimate := Tensor.spectralNorm inner * Tensor.spectralNorm innerInv
+        innerConditionEstimate := Tensor.spectralNorm! inner * Tensor.spectralNorm! innerInv
         residualNorm := Float.sqrt (treeDot residual residual)
         updateNorm := Float.sqrt (treeDot update update)
       }

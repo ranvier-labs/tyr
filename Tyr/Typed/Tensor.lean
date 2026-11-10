@@ -88,13 +88,11 @@ instance {shape : Shape} {device : Device} : Nonempty (SomeDTypeTensor shape dev
 
 namespace SomeDTypeTensor
 
-/-- Recover native dtype metadata and validate the full requested shape/device
-contract without converting values or changing autograd identity. -/
-def ofRaw {shape : Shape} {device : Device} (raw : RawTensor) :
-    Except String (SomeDTypeTensor shape device) := do
-  let dtype := raw.dtype
-  let tensor ← Tensor.ofRaw (σ := ⟨shape, dtype, device⟩) raw
-  pure ⟨dtype, tensor⟩
+/-- Admit a native result whose dtype is chosen at runtime: the index takes the
+result's own dtype, and shape and placement must match. -/
+def ofRaw! {shape : Shape} {device : Device} (raw : RawTensor)
+    (operation : Lean.Name := by exact decl_name%) : SomeDTypeTensor shape device :=
+  ⟨raw.dtype, Tensor.ofRaw! (σ := ⟨shape, raw.dtype, device⟩) raw operation⟩
 
 /-- Compare exact existential indices before using an operation that requires
 one shared dtype. This returns equality evidence, never a dtype conversion. -/
@@ -183,46 +181,10 @@ def atDevice? {σ : StaticSpec} (tensor : Tensor σ) (device : Device) :
 def actualSpec {σ : StaticSpec} (t : Tensor σ) : TensorSpec :=
   { shape := t.raw.runtimeShape, dtype := t.raw.dtype }
 
-/-- Validate a value update using metadata captured before consuming its input.
-The original tensor is deliberately absent: retaining it through result
-validation would prevent native ownership transfer and storage reuse.
-Runtime-selected indices still preserve the actual dtype and placement. -/
-def checkedUpdate? {σ : StaticSpec} (expectedDType : DType) (expectedDevice : Device)
-    (raw : RawTensor) : Except String (Tensor σ) := do
-  TensorSpec.checkDType expectedDType raw.dtype
-  expectedDevice.check raw.device
-  ofRaw raw
-
-/-- Pure value-update adapter. A violated native result contract stops execution
-without constructing a default tensor or retaining the consumed input. -/
-def checkedUpdate {σ : StaticSpec} (expectedDType : DType) (expectedDevice : Device)
-    (raw : RawTensor) : Tensor σ :=
-  match checkedUpdate? expectedDType expectedDevice raw with
-  | .ok tensor => tensor
-  | .error message => nativeInvariantFailure s!"Tensor update: {message}"
-
-/-- Check a replacement against both the static index and the original native
-dtype/device. Dynamic index components must not hide a metadata change in an
-operation that promises to preserve the tensor's specification. -/
-def checkedReplacement? {σ : StaticSpec} (original : Tensor σ) (raw : RawTensor) :
-    Except String (Tensor σ) := do
-  TensorSpec.checkDType original.raw.dtype raw.dtype
-  original.raw.device.check raw.device
-  ofRaw raw
-
-/-- Native adapter for operations whose output must preserve an existing
-specification. A metadata mismatch is a runtime error; the original tensor is
-the well-typed fallback used by Lean's panic mechanism. -/
-def checkedReplacement {σ : StaticSpec} (original : Tensor σ) (raw : RawTensor) : Tensor σ :=
-  letI : Inhabited (Tensor σ) := ⟨original⟩
-  match original.checkedReplacement? raw with
-  | .ok tensor => tensor
-  | .error message => panic! s!"Tensor replacement: {message}"
-
 def ofTensor? {shape : Shape} (dtype : DType) (raw : RawTensor) :
     Option (Tensor { shape, dtype, device := raw.device }) :=
   if raw.runtimeShape == shape && raw.dtype == dtype then
-    (ofRaw raw).toOption
+    some (ofRaw! raw)
   else
     none
 
@@ -230,16 +192,7 @@ def ofTensor {shape : Shape} (dtype : DType) (raw : RawTensor) :
     Except String (Tensor { shape, dtype, device := raw.device }) := do
   TensorSpec.checkShape shape raw.runtimeShape
   TensorSpec.checkDType dtype raw.dtype
-  ofRaw raw
-
-def ofTensorWithContract {shape : Shape} (contract : TensorContract) (raw : RawTensor) :
-    Except String (Tensor { shape, dtype := contract.spec.dtype, device := raw.device }) := do
-  let actual : TensorSpec := { shape := raw.runtimeShape, dtype := raw.dtype }
-  contract.check actual raw.device
-  if contract.spec.shape = shape then
-    ofRaw raw
-  else
-    .error s!"Expected static shape {reprStr contract.spec.shape}, got {reprStr shape}"
+  pure (ofRaw! raw)
 
 /-- Package a tensor with its full static specification, preserving actual placement. -/
 def toSome {σ : StaticSpec} (tensor : Tensor σ) : Sigma Tensor :=
@@ -249,11 +202,6 @@ def toSome {σ : StaticSpec} (tensor : Tensor σ) : Sigma Tensor :=
 def packDType {σ : StaticSpec} (tensor : Tensor σ) : SomeDTypeTensor σ.shape σ.device :=
   ⟨σ.dtype, tensor⟩
 
-/-- Recover the native dtype as an existential index without casting
-values, detaching the graph, or forgetting shape/placement. -/
-def reifyDType {σ : StaticSpec} (tensor : Tensor σ) :
-    Except String (SomeDTypeTensor σ.shape σ.device) :=
-  SomeDTypeTensor.ofRaw tensor.raw
 
 end Tensor
 

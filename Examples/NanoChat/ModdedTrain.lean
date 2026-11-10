@@ -38,9 +38,9 @@ open torch.Optim
 /-- Training hyperparameters for nanochat-style loops. -/
 structure Hyperparameters where
   /-- Total scheduled training iterations -/
-  numIterations : UInt64 := 2050
+  numIterations : Nat := 2050
   /-- Extension iterations beyond `numIterations` (usually 0). -/
-  extensionIterations : UInt64 := 0
+  extensionIterations : Nat := 0
   /-- Per-rank micro-batch size. -/
   deviceBatchSize : Nat := 32
   /-- Target global batch size in tokens across all ranks/accumulation. -/
@@ -68,11 +68,11 @@ structure Hyperparameters where
   /-- Maximum sequence length -/
   maxSeqLen : Nat := 2048
   /-- Validation interval (in iterations) -/
-  valInterval : UInt64 := 50
+  valInterval : StepInterval := 50
   /-- Logging interval -/
-  logInterval : UInt64 := 10
+  logInterval : StepInterval := 10
   /-- Checkpoint interval -/
-  checkpointInterval : UInt64 := 100
+  checkpointInterval : StepInterval := 100
   deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Default hyperparameters -/
@@ -92,14 +92,10 @@ def Hyperparameters.default : Hyperparameters := {}
     - 16 * 2048 * 8 = 262144
     - 24 * 2048 * 8 = 393216
 -/
-def getBatchSize (step : UInt64) : Nat :=
+def getBatchSize (step : Nat) : Nat :=
   if step < 200 then 8
   else if step < 1000 then 16
   else 24
-
-/-- Get tokens per batch for a given iteration -/
-def getTokensPerBatch (step : UInt64) (seqLen gradAccum worldSize : Nat) : Nat :=
-  getBatchSize step * seqLen * gradAccum * worldSize
 
 /-! ## Window Size Schedule -/
 
@@ -113,25 +109,20 @@ def getTokensPerBatch (step : UInt64) (seqLen gradAccum worldSize : Nat) : Nat :
     Short window is used for most attention heads,
     long window for a few "global" heads.
 -/
-def getWindowSizes (step : UInt64) (_blockSize : Nat := 128) : (Nat × Nat) :=
+def getWindowSizes (step : Nat) (_blockSize : Nat := 128) : (Nat × Nat) :=
   if step < 200 then (3, 3)
   else if step < 1000 then (3, 7)
   else (3, 11)
-
-/-- Get sequence length for a given iteration -/
-def getSeqLen (step : UInt64) (blockSize : Nat := 128) : Nat :=
-  let (_, wsLong) := getWindowSizes step blockSize
-  wsLong * blockSize
 
 /-! ## Learning Rate Schedule -/
 
 /-- Get learning rate for a given iteration.
     Matches nanochat base_train's warmup/plateau/linear-warmdown semantics. -/
-def getLearningRate (step : UInt64) (hp : Hyperparameters)
+def getLearningRate (step : Nat) (hp : Hyperparameters)
     (baseLr : Float := 0.023) : Float :=
   let totalSteps := max 1 (hp.numIterations + hp.extensionIterations)
-  let warmupSteps := (hp.warmupFrac * totalSteps.toFloat).toUInt64
-  let warmdownSteps := (hp.cooldownFrac * totalSteps.toFloat).toUInt64
+  let warmupSteps := (hp.warmupFrac * totalSteps.toFloat).toUInt64.toNat
+  let warmdownSteps := (hp.cooldownFrac * totalSteps.toFloat).toUInt64.toNat
   let warmdownStart := totalSteps - warmdownSteps
   if warmupSteps > 0 && step < warmupSteps then
     baseLr * (step.toFloat + 1.0) / warmupSteps.toFloat
@@ -181,14 +172,14 @@ def validateGradAccumConfig (hp : Hyperparameters) (worldSize : Nat) : IO Unit :
     - Warmup: 0.85 -> baseMomentum over 300 steps
     - Then constant at baseMomentum
 -/
-def getMuonMomentum (step : UInt64) (hp : Hyperparameters)
-    (baseMomentum : Float := 0.95) (warmupSteps : UInt64 := 300)
-    (cooldownSteps : UInt64 := 50) : Float :=
+def getMuonMomentum (step : Nat) (hp : Hyperparameters)
+    (baseMomentum : Float := 0.95) (warmupSteps : Nat := 300)
+    (cooldownSteps : Nat := 50) : Float :=
   let _ := hp
   let _ := cooldownSteps
-  NorMuon.getMomentum step.toNat
+  NorMuon.getMomentum step
     0
-    baseMomentum warmupSteps.toNat 0
+    baseMomentum warmupSteps 0
 
 /-! ## Optimizer State -/
 
@@ -252,7 +243,7 @@ structure OptimizerState (cfg : moddedGpt.Config) where
   /-- DistAdam + Muon parameter states used by the training step. -/
   dualState : DualParamState (device := device) cfg
   /-- Current step -/
-  step : UInt64
+  step : Nat
   /-- Base learning rate -/
   baseLr : Float := 0.023
   /-- Weight decay -/
@@ -269,10 +260,6 @@ def OptimizerState.init (cfg : moddedGpt.Config) (params : ModdedGPTParams (devi
     baseLr := lr
     weightDecay := weightDecay
   }
-
-/-- Get current learning rate from schedule -/
-def OptimizerState.currentLr (state : OptimizerState (device := device) cfg) (hp : Hyperparameters) : Float :=
-  getLearningRate state.step hp state.baseLr
 
 /-! ## Training Step -/
 
@@ -300,7 +287,8 @@ structure StepResult where
 -/
 def trainStep {cfg : moddedGpt.Config} {batch seq : Nat}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
+    (hseq : seq ≤ cfg.maxSeqLen)
     (input : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
     (target : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
     (optState : OptimizerState (device := device) cfg)
@@ -314,7 +302,7 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : Nat}
   TensorStruct.zeroGrads params
 
   -- Forward pass (window pattern is in cfg)
-  let lossT ← moddedGpt.loss params yarn input target true
+  let lossT ← moddedGpt.loss params yarn input target hseq true
 
   -- Backward pass
   Tensor.backwardLoss lossT
@@ -375,26 +363,6 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : Nat}
 
   return (newParams, newOptState, result)
 
-/-! ## Gradient Accumulation -/
-
-/-- Accumulate gradients over multiple micro-batches -/
-def accumulateGradients {cfg : moddedGpt.Config} {batch seq : Nat}
-    (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
-    (batches : Array (Tensor { shape := #[batch, seq], dtype := .Int64, device := device } × Tensor { shape := #[batch, seq], dtype := .Int64, device := device }))
-    : IO Float := do
-  let mut totalLoss := 0.0
-  let numBatches := batches.size
-
-  for (input, target) in batches do
-    let lossT ← moddedGpt.loss params yarn input target true
-    -- Scale loss for accumulation
-    let scaledLoss := Tensor.divScalar lossT numBatches.toFloat
-    Tensor.backwardLoss scaledLoss
-    totalLoss := totalLoss + Tensor.item lossT
-
-  return totalLoss / numBatches.toFloat
-
 /-! ## Validation -/
 
 /-- Validation result -/
@@ -410,27 +378,27 @@ structure ValidationResult where
 /-- Run validation on held-out data -/
 def validate {cfg : moddedGpt.Config}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
     (valData : Σ n, DataShard n)
     (batchSize seqLen : Nat)
-    (numBatches : UInt64 := 10)
+    (hseq : seqLen ≤ cfg.maxSeqLen)
+    (numBatches : Nat := 10)
     : IO ValidationResult := do
   let startTime ← IO.monoMsNow
   let mut totalLoss := 0.0
   let mut numValid := 0
 
   -- Create iterator
-  let mut iter := BatchIterator.new valData.2 batchSize seqLen
+  let mut iter := BatchIterator.new valData.2
 
-  for _ in [:numBatches.toNat] do
-    let (maybeBatch, newIter) ← iter.nextGPT
+  for _ in [:numBatches] do
+    let (maybeBatch, newIter) ← iter.nextGPT batchSize seqLen
     iter := newIter
     match maybeBatch with
-    | some (inputDyn, targetDyn) =>
-      -- Reshape dynamic tensors to expected shape
-      let input := (← IO.ofExcept (inputDyn.reshapeChecked? #[batchSize, seqLen])).to device
-      let target := (← IO.ofExcept (targetDyn.reshapeChecked? #[batchSize, seqLen])).to device
-      let lossT ← moddedGpt.loss params yarn input target false
+    | some (input, target) =>
+      let input := input.to device
+      let target := target.to device
+      let lossT ← moddedGpt.loss params yarn input target hseq false
       totalLoss := totalLoss + Tensor.item lossT
       numValid := numValid + 1
     | none => break
@@ -455,7 +423,7 @@ structure Checkpoint (cfg : moddedGpt.Config) where
   /-- Optimizer state -/
   optState : OptimizerState (device := device) cfg
   /-- Current step -/
-  step : UInt64
+  step : Nat
   /-- Best validation loss -/
   bestValLoss : Float
 
@@ -511,15 +479,21 @@ def checkpointExists (path : String) : IO Bool := do
   -- than being mistaken for a fresh training directory.
   if strict then pure true else checkpointExistsAt snapshot
 
-private def saveScalarUInt64 (value : UInt64) (path : String) : IO Unit := do
-  let t := Tensor.fromInt64Array #[value.toInt64]
-  Tensor.saveTensor t path
+private def int64Limit : Nat := 2 ^ 63
 
-private def loadScalarUInt64 (path : String) : IO UInt64 := do
+private def saveScalarNat (value : Nat) (path : String) : IO Unit := do
+  if value ≥ int64Limit then
+    throw <| IO.userError s!"Scalar {value} for {path} exceeds the Int64 checkpoint field"
+  Tensor.saveTensor (Tensor.fromInt64Array #[Int64.ofNat value]) path
+
+private def loadScalarNat (path : String) : IO Nat := do
   let t ← Tensor.loadTensorExact ⟨#[1], .Int64, .CPU⟩ path
   let vals ← Tensor.toUInt64Array t
   match vals[0]? with
-  | some v => pure v
+  | some v =>
+      if v.toNat ≥ int64Limit then
+        throw <| IO.userError s!"Negative scalar in {path}"
+      pure v.toNat
   | none => throw <| IO.userError s!"Missing scalar value in {path}"
 
 private def saveScalarFloat (value : Float) (path : String) : IO Unit := do
@@ -541,8 +515,8 @@ them separately so loading can reconstruct the exact optimizer traversal. -/
 private structure CheckpointStateMetadata where
   version : Nat := 1
   trainingMetadata : Bool
-  step : UInt64
-  optimStep : UInt64
+  step : Nat
+  optimStep : Nat
   adamCount : Nat
   bestValLossBits : UInt64
   baseLrBits : UInt64
@@ -685,7 +659,7 @@ private def captureDataCursor (gen : DistributedDataGenerator) : DataCursor := {
   globalStep := gen.globalStep
   epoch := gen.iterator.epoch
   batchCount := gen.iterator.batchCount
-  bosCurrentPos := gen.iterator.shard.bosFinder.currentPos
+  bosCurrentPos := gen.iterator.shard.bosFinder.currentPos.val
   streamCursor? := some gen.cursor
 }
 
@@ -726,9 +700,9 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint (device := device
     checkpoint.saveParams ckpt.optState.dualState snapshot "optim_dual"
     -- Keep the legacy scalar files for checkpoint inspection tools. The state
     -- sidecar restores exact Float bits and all optimizer-local counters.
-    saveScalarUInt64 ckpt.step s!"{snapshot}/step.pt"
-    saveScalarUInt64 ckpt.optState.step s!"{snapshot}/opt_step.pt"
-    saveScalarUInt64 ckpt.optState.adamState.fst.count.toUInt64 s!"{snapshot}/adam_count.pt"
+    saveScalarNat ckpt.step s!"{snapshot}/step.pt"
+    saveScalarNat ckpt.optState.step s!"{snapshot}/opt_step.pt"
+    saveScalarNat ckpt.optState.adamState.fst.count s!"{snapshot}/adam_count.pt"
     saveScalarFloat ckpt.bestValLoss s!"{snapshot}/best_val_loss.pt"
     saveScalarFloat ckpt.optState.baseLr s!"{snapshot}/base_lr.pt"
     saveScalarFloat ckpt.optState.weightDecay s!"{snapshot}/weight_decay.pt"
@@ -779,9 +753,9 @@ private def loadCheckpointAt (cfg : moddedGpt.Config) (path : String) (quiet : B
           Float.ofBits metadata.bestValLossBits, Float.ofBits metadata.baseLrBits,
           Float.ofBits metadata.weightDecayBits)
       | none => do
-          let step ← loadScalarUInt64 s!"{path}/step.pt"
-          let optStep ← loadScalarUInt64 s!"{path}/opt_step.pt"
-          let adamCount := (← loadScalarUInt64 s!"{path}/adam_count.pt").toNat
+          let step ← loadScalarNat s!"{path}/step.pt"
+          let optStep ← loadScalarNat s!"{path}/opt_step.pt"
+          let adamCount ← loadScalarNat s!"{path}/adam_count.pt"
           let bestValLoss ← loadScalarFloat s!"{path}/best_val_loss.pt"
           let baseLr ← loadScalarFloat s!"{path}/base_lr.pt"
           let weightDecay ← loadScalarFloat s!"{path}/weight_decay.pt"
@@ -868,7 +842,7 @@ structure TrainState (cfg : moddedGpt.Config) where
   /-- Model parameters -/
   params : ModdedGPTParams (device := device) cfg
   /-- YaRN rotary embeddings -/
-  yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen
+  yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen
   /-- Optimizer state -/
   optState : OptimizerState (device := device) cfg
   /-- Data generator -/
@@ -876,7 +850,7 @@ structure TrainState (cfg : moddedGpt.Config) where
   /-- Validation data -/
   valData : Option (Σ n, DataShard n)
   /-- Current step -/
-  step : UInt64
+  step : Nat
   /-- Best validation loss -/
   bestValLoss : Float
   /-- Accumulated tokens -/
@@ -884,51 +858,10 @@ structure TrainState (cfg : moddedGpt.Config) where
   /-- Training start time -/
   startTime : UInt64
 
-/-- Initialize training state -/
-def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
-    (hp : Hyperparameters)
-    (_distributed : Bool) (_worldSize : UInt64)
-    (device : Device := Device.CPU)
-    (lr : Float := 0.023) (weightDecay : Float := 0.0)
-    : IO (TrainState (device := device) cfg) := do
-  let params ← ModdedGPTParams.init cfg (device := device)
-  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase (device := device)
-
-  -- Initialize optimizer state from moved parameters so moment buffers match device
-  let optState := OptimizerState.init cfg params lr weightDecay
-
-  let initialBatchSize := hp.deviceBatchSize
-  let initialSeqLen := hp.maxSeqLen
-  let dataGen ← DistributedDataGenerator.init dataConfig initialBatchSize initialSeqLen
-  let valData ←
-    match dataConfig.valPath with
-    | none => pure none
-    | some valPath =>
-      try
-        let shard ← loadValidationData valPath cfg.maxSeqLen dataConfig.bosToken
-        pure (some shard)
-      catch e =>
-        IO.eprintln s!"Warning: failed to load validation data from {valPath}: {e}"
-        pure none
-
-  let startTime ← IO.monoMsNow
-
-  return {
-    params := params
-    yarn := yarn
-    optState := optState
-    dataGen := dataGen
-    valData := valData
-    step := 0
-    bestValLoss := 1e30  -- Very large number instead of inf
-    totalTokens := 0
-    startTime := startTime.toUInt64
-  }
-
 /-- Log training progress -/
 def logProgress (state : TrainState (device := device) cfg) (result : StepResult)
     (hp : Hyperparameters) : IO Unit := do
-  if state.step % hp.logInterval == 0 then
+  if hp.logInterval.fires state.step then
     let nowMs ← IO.monoMsNow
     let elapsed := nowMs - state.startTime.toNat
     let elapsedSec := elapsed.toFloat / 1000.0
@@ -941,13 +874,14 @@ def logProgress (state : TrainState (device := device) cfg) (result : StepResult
 
 /-- Run validation and log results -/
 def runValidation (state : TrainState (device := device) cfg) (hp : Hyperparameters)
+    (hseq : hp.maxSeqLen ≤ cfg.maxSeqLen)
     : IO (TrainState (device := device) cfg) := do
   match state.valData with
   | none => return state
   | some valData =>
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
-    let valResult ← validate state.params state.yarn valData batchSize seqLen
+    let valResult ← validate state.params state.yarn valData batchSize seqLen hseq
 
     IO.println s!"Validation: loss={valResult.loss} time={valResult.timeMs}ms"
 
@@ -962,7 +896,8 @@ def runValidation (state : TrainState (device := device) cfg) (hp : Hyperparamet
 /-- Distributed training step with gradient accumulation over micro-batches. -/
 def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : Nat}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
+    (hseq : seq ≤ cfg.maxSeqLen)
     (microBatches : Array (Tensor { shape := #[batch, seq], dtype := .Int64, device := device } × Tensor { shape := #[batch, seq], dtype := .Int64, device := device }))
     (optState : OptimizerState (device := device) cfg)
     (hp : Hyperparameters)
@@ -978,7 +913,7 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : Nat}
   let microCount := microBatches.size
   let mut totalLoss := 0.0
   for (input, target) in microBatches do
-    let lossT ← moddedGpt.loss params yarn input target true
+    let lossT ← moddedGpt.loss params yarn input target hseq true
     let scaledLoss := Tensor.divScalar lossT microCount.toFloat
     Tensor.backwardLoss scaledLoss
     totalLoss := totalLoss + Tensor.item lossT
@@ -1221,7 +1156,7 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : Nat}
   let result : StepResult := {
     loss := totalLoss / microCount.toFloat
     gradNorm := 0.0
-    tokensProcessed := batch * seq * worldSize.toNat * microCount
+    tokensProcessed := batch * seq * worldSize * microCount
     timeMs := timeMs
   }
   let newOptState : OptimizerState (device := device) cfg := {
@@ -1238,6 +1173,8 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (state : TrainState (device := device) cfg) (checkpointDir : String := "checkpoints/modded")
     : IO (TrainState (device := device) cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
+  let ⟨hseq⟩ ← if h : hp.maxSeqLen ≤ cfg.maxSeqLen then pure (PLift.up h) else
+    throw <| IO.userError s!"max_seq_len {hp.maxSeqLen} exceeds the model's {cfg.maxSeqLen}"
   let mut state := state
   let startStep := state.optState.step
 
@@ -1247,49 +1184,46 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
     return state
 
-  for step in [startStep.toNat:totalSteps.toNat] do
-    let stepU := step.toUInt64
+  for step in [startStep:totalSteps] do
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
     let gradAccum := effectiveGradAccumSteps hp 1
-    let iterator ← state.dataGen.iterator.updateParams batchSize seqLen
-    let dataGen := { state.dataGen with iterator }
     let mut microBatches : Array (Tensor { shape := #[batchSize, seqLen], dtype := .Int64, device := device } × Tensor { shape := #[batchSize, seqLen], dtype := .Int64, device := device }) := #[]
-    let mut newDataGen := dataGen
+    let mut newDataGen := state.dataGen
     let device := state.params.embed.device
     for _ in [:gradAccum] do
-      let (maybeBatch, newerDataGen) ← newDataGen.nextBatchGPT
+      let (maybeBatch, newerDataGen) ← newDataGen.nextBatchGPT batchSize seqLen
       newDataGen := newerDataGen
       match maybeBatch with
       | none => pure ()
-      | some (inputDyn, targetDyn) =>
-        let input := (← IO.ofExcept (inputDyn.reshapeChecked? #[batchSize, seqLen])).to device
-        let target := (← IO.ofExcept (targetDyn.reshapeChecked? #[batchSize, seqLen])).to device
+      | some (input, target) =>
+        let input := input.to device
+        let target := target.to device
         microBatches := microBatches.push (input, target)
     if microBatches.isEmpty then
       state := { state with dataGen := newDataGen }
       continue
-    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn
+    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn hseq
       microBatches state.optState hp
     state := { state with
       params := newParams
       optState := newOptState
       dataGen := newDataGen
-      step := stepU
+      step := step
       totalTokens := state.totalTokens + result.tokensProcessed
     }
     logProgress state result hp
-    if stepU % hp.valInterval == 0 && stepU > 0 then
-      state ← runValidation state hp
-    if stepU % hp.checkpointInterval == 0 && stepU > 0 then
+    if hp.valInterval.fires step && step > 0 then
+      state ← runValidation state hp hseq
+    if hp.checkpointInterval.fires step && step > 0 then
       let ckpt : Checkpoint (device := device) cfg := {
         params := state.params
         optState := state.optState
-        step := stepU
+        step := step
         bestValLoss := state.bestValLoss
       }
       let metadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
-      let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+      let stepPath := s!"{checkpointDir}/step_{step}.ckpt"
       let latestPath := s!"{checkpointDir}/latest.ckpt"
       saveCheckpoint ckpt stepPath (some metadata)
       saveCheckpoint ckpt latestPath (some metadata)
@@ -1318,109 +1252,17 @@ def syncParameters {cfg : moddedGpt.Config} (params : ModdedGPTParams (device :=
   else
     TensorStruct.makeLeafParams params
 
-/-- Read gradient snapshots and average them across initialized ranks.
-    The returned tree is passed directly to clipping and the optimizer. -/
-def syncGradients {cfg : moddedGpt.Config} (params : ModdedGPTParams (device := device) cfg) :
-    IO (ModdedGPTParams (device := device) cfg) := do
-  let grads ← TensorStruct.grads params
-  let isDistributed ← dist.isInitialized
-  if isDistributed then dist.allReduceGrads grads .avg else pure grads
-
-/-- Clip a gradient value without modifying its parameter's gradient accumulator. -/
-private def clipGradientValue {σ : StaticSpec} [DType.RealFloating σ.dtype] (gradient : Tensor σ) (maxNorm : Float) :
-    Tensor σ :=
-  let values := gradient.toFloat32
-  let norm := Float.sqrt (Tensor.sumAll (values * values)).item
-  if norm > maxNorm then
-    Tensor.mulScalar gradient (maxNorm / norm)
-  else gradient
-
-/-- Distributed training step with gradient synchronization.
-
-    This is the key integration point for multi-GPU training:
-    1. Each rank computes loss and gradients on its local batch
-    2. Gradients are all-reduced (averaged) across ranks
-    3. Each rank applies the same optimizer update
-    4. All ranks end up with identical parameters
-
-    This pattern is called Data Parallel (DP) training.
--/
-def trainStepDistributed {cfg : moddedGpt.Config} {batch seq : Nat}
-    (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
-    (input : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
-    (target : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
-    (optState : OptimizerState (device := device) cfg)
-    (hp : Hyperparameters)
-    (gradClip : Float := 0.0)
-    : IO (ModdedGPTParams (device := device) cfg × OptimizerState (device := device) cfg × StepResult) := do
-  let startTime ← IO.monoMsNow
-
-  -- Check if distributed
-  let isDistributed ← dist.isInitialized
-  let worldSize ← if isDistributed then dist.getWorldSize else pure 1
-
-  -- Ensure parameters are trainable leaves before backprop.
-  let params ← TensorStruct.makeLeafParams params
-  TensorStruct.zeroGrads params
-
-  -- Forward pass (window pattern is in cfg)
-  let lossT ← moddedGpt.loss params yarn input target true
-
-  -- Backward pass
-  Tensor.backwardLoss lossT
-
-  -- Get loss value for logging (before sync to avoid extra comm)
-  let lossVal := Tensor.item lossT
-
-  -- Synchronize the snapshots once and clip those exact values before updating.
-  let grads ← syncGradients params
-  let grads := if gradClip > 0 then
-    FloatingTensorStruct.map (fun gradient => clipGradientValue gradient gradClip) grads
-  else grads
-
-  -- Get current learning rate from schedule
-  let lr := getLearningRate optState.step hp optState.baseLr
-
-  -- Create optimizer with current LR
-  let opt := Optim.adamw (lr := lr) (weight_decay := optState.weightDecay)
-
-  -- Apply optimizer step
-  let (newParams, newAdamState) ← Optim.step opt params grads optState.adamState
-
-  let endTime ← IO.monoMsNow
-  let timeMs := (endTime - startTime).toFloat
-
-  -- Tokens processed = local batch * worldSize
-  let result : StepResult := {
-    loss := lossVal
-    gradNorm := 0.0  -- Could compute from grads if needed
-    tokensProcessed := batch * seq * worldSize.toNat
-    timeMs := timeMs
-  }
-
-  let newOptState : OptimizerState (device := device) cfg := {
-    adamState := newAdamState
-    dualState := optState.dualState
-    step := optState.step + 1
-    baseLr := optState.baseLr
-    weightDecay := optState.weightDecay
-  }
-
-  return (newParams, newOptState, result)
-
 /-- Distributed training state with sampler -/
 structure DistributedTrainState (cfg : moddedGpt.Config) extends TrainState (device := device) cfg where
   /-- Distributed sampler for data sharding -/
   sampler : Option dist.DistributedSampler := none
   /-- World size -/
-  worldSize : UInt64 := 1
+  worldSize : Nat := 1
   /-- This rank -/
-  rank : UInt64 := 0
+  rank : Nat := 0
 
 /-- Initialize distributed training state -/
 def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
-    (hp : Hyperparameters)
     (device : Device := Device.CPU)
     (lr : Float := 0.023) (weightDecay : Float := 0.0)
     : IO (DistributedTrainState (device := device) cfg) := do
@@ -1433,14 +1275,12 @@ def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader
 
   -- Initialize base training state
   let params ← ModdedGPTParams.init cfg (device := device)
-  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase (device := device)
+  let yarn ← YarnRotary.init cfg.halfHeadDim cfg.maxSeqLen cfg.ropeBase (device := device)
 
   -- Initialize optimizer state from moved parameters so moment buffers match device
   let optState := OptimizerState.init cfg params lr weightDecay
 
-  let initialBatchSize := hp.deviceBatchSize
-  let initialSeqLen := hp.maxSeqLen
-  let dataGen ← DistributedDataGenerator.init dataConfig initialBatchSize initialSeqLen
+  let dataGen ← DistributedDataGenerator.init dataConfig
   let valData ←
     match dataConfig.valPath with
     | none => pure none
@@ -1486,6 +1326,8 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (state : DistributedTrainState (device := device) cfg) (checkpointDir : String := "checkpoints/modded")
     : IO (DistributedTrainState (device := device) cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
+  let ⟨hseq⟩ ← if h : hp.maxSeqLen ≤ cfg.maxSeqLen then pure (PLift.up h) else
+    throw <| IO.userError s!"max_seq_len {hp.maxSeqLen} exceeds the model's {cfg.maxSeqLen}"
   let mut state := state
   let isMaster := state.rank == 0
   let startStep := state.optState.step
@@ -1498,54 +1340,51 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
       IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
     return state
 
-  for step in [startStep.toNat:totalSteps.toNat] do
-    let stepU := step.toUInt64
+  for step in [startStep:totalSteps] do
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
-    let gradAccum := effectiveGradAccumSteps hp state.worldSize.toNat
-    let iterator ← state.dataGen.iterator.updateParams batchSize seqLen
-    let dataGen := { state.dataGen with iterator }
+    let gradAccum := effectiveGradAccumSteps hp state.worldSize
     let mut microBatches : Array (Tensor { shape := #[batchSize, seqLen], dtype := .Int64, device := device } × Tensor { shape := #[batchSize, seqLen], dtype := .Int64, device := device }) := #[]
-    let mut newDataGen := dataGen
+    let mut newDataGen := state.dataGen
     let device := state.params.embed.device
     for _ in [:gradAccum] do
-      let (maybeBatch, newerDataGen) ← newDataGen.nextBatchGPT
+      let (maybeBatch, newerDataGen) ← newDataGen.nextBatchGPT batchSize seqLen
       newDataGen := newerDataGen
       match maybeBatch with
       | none => pure ()
-      | some (inputDyn, targetDyn) =>
-        let input := (← IO.ofExcept (inputDyn.reshapeChecked? #[batchSize, seqLen])).to device
-        let target := (← IO.ofExcept (targetDyn.reshapeChecked? #[batchSize, seqLen])).to device
+      | some (input, target) =>
+        let input := input.to device
+        let target := target.to device
         microBatches := microBatches.push (input, target)
     if microBatches.isEmpty then
       state := { state with dataGen := newDataGen }
       continue
-    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn
+    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn hseq
       microBatches state.optState hp
     state := { state with
       params := newParams
       optState := newOptState
       dataGen := newDataGen
-      step := stepU
+      step := step
       totalTokens := state.totalTokens + result.tokensProcessed
     }
     if isMaster then
       logProgress state.toTrainState result hp
-    if stepU % hp.valInterval == 0 && stepU > 0 && isMaster then
-      let baseState ← runValidation state.toTrainState hp
+    if hp.valInterval.fires step && step > 0 && isMaster then
+      let baseState ← runValidation state.toTrainState hp hseq
       state := { state with
         bestValLoss := baseState.bestValLoss
         valData := baseState.valData
       }
-    if stepU % hp.checkpointInterval == 0 && stepU > 0 && isMaster then
+    if hp.checkpointInterval.fires step && step > 0 && isMaster then
       let ckpt : Checkpoint (device := device) cfg := {
         params := state.params
         optState := state.optState
-        step := stepU
+        step := step
         bestValLoss := state.bestValLoss
       }
       let metadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
-      let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+      let stepPath := s!"{checkpointDir}/step_{step}.ckpt"
       let latestPath := s!"{checkpointDir}/latest.ckpt"
       saveCheckpoint ckpt stepPath (some metadata)
       saveCheckpoint ckpt latestPath (some metadata)
@@ -1583,7 +1422,7 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     IO.println s!"Hyperparameters: {repr hp}"
 
   -- Initialize distributed training state
-  let initState ← DistributedTrainState.init cfg dataConfig hp device
+  let initState ← DistributedTrainState.init cfg dataConfig device
 
   -- Resolve resume path (explicit --resume takes precedence over latest in checkpointDir).
   let latestPath := s!"{checkpointDir}/latest.ckpt"
@@ -1673,7 +1512,7 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
   }
 
   -- Match nanochat's strict grad-accum divisibility contract.
-  validateGradAccumConfig effectiveHp worldSize.toNat
+  validateGradAccumConfig effectiveHp worldSize
 
   -- Barrier to ensure all ranks are ready
   if isDistributed then
@@ -1688,31 +1527,26 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
 
   return finalState
 
-/-- Dynamically-shaped GPT micro-batch `(inputs, targets)`. -/
-structure DynamicGPTBatch where
-  batch : Nat
-  seq : Nat
-  input : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }
-  target : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }
-
-/-- Provider callback for GPT micro-batches. -/
-abbrev DynamicGPTBatchProvider := IO (Option DynamicGPTBatch)
+/-- Provider callback for GPT micro-batches `(inputs, targets)`. -/
+abbrev GPTBatchProvider (batch seq : Nat) :=
+  IO (Option (Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU } ×
+    Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }))
 
 /-- Distributed streaming training state (no shard-backed data generator). -/
 structure StreamTrainState (cfg : moddedGpt.Config) where
   params : ModdedGPTParams (device := device) cfg
-  yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen
+  yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen
   optState : OptimizerState (device := device) cfg
-  step : UInt64 := 0
+  step : Nat := 0
   bestValLoss : Float := 1e30
   totalTokens : Nat := 0
   startTime : UInt64 := 0
-  rank : UInt64 := 0
-  worldSize : UInt64 := 1
+  rank : Nat := 0
+  worldSize : Nat := 1
 
 private def logStreamProgress (state : StreamTrainState (device := device) cfg) (result : StepResult)
     (hp : Hyperparameters) : IO Unit := do
-  if state.step % hp.logInterval == 0 then
+  if hp.logInterval.fires state.step then
     let nowMs ← IO.monoMsNow
     let elapsed := nowMs - state.startTime.toNat
     let elapsedSec := elapsed.toFloat / 1000.0
@@ -1731,7 +1565,7 @@ private def initStreamTrainState (cfg : moddedGpt.Config) (device : Device)
       pure (0, 1)
 
   let params ← ModdedGPTParams.init cfg (device := device)
-  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase (device := device)
+  let yarn ← YarnRotary.init cfg.halfHeadDim cfg.maxSeqLen cfg.ropeBase (device := device)
   let optState := OptimizerState.init cfg params lr weightDecay
   let startTime ← IO.monoMsNow
 
@@ -1745,7 +1579,7 @@ private def initStreamTrainState (cfg : moddedGpt.Config) (device : Device)
   }
 
 private def collectMicroBatches {batch seq : Nat}
-    (provider : DynamicGPTBatchProvider)
+    (provider : GPTBatchProvider batch seq)
     (gradAccum : Nat)
     (device : Device)
     : IO (Array (Tensor { shape := #[batch, seq], dtype := .Int64, device := device } × Tensor { shape := #[batch, seq], dtype := .Int64, device := device })) := do
@@ -1753,16 +1587,17 @@ private def collectMicroBatches {batch seq : Nat}
   for _ in [:gradAccum] do
     match ← provider with
     | none => pure ()
-    | some batchData =>
-      let input := (← IO.ofExcept (batchData.input.reshapeChecked? #[batch, seq])).to device
-      let target := (← IO.ofExcept (batchData.target.reshapeChecked? #[batch, seq])).to device
+    | some (input, target) =>
+      let input := input.to device
+      let target := target.to device
       microBatches := microBatches.push (input, target)
   return microBatches
 
 private def validateWithProvider {cfg : moddedGpt.Config} {batch seq : Nat}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
-    (provider : DynamicGPTBatchProvider)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
+    (hseq : seq ≤ cfg.maxSeqLen)
+    (provider : GPTBatchProvider batch seq)
     (numBatches : Nat)
     : IO (Option Float) := do
   if numBatches == 0 then
@@ -1774,10 +1609,10 @@ private def validateWithProvider {cfg : moddedGpt.Config} {batch seq : Nat}
   for _ in [:numBatches] do
     match ← provider with
     | none => pure ()
-    | some batchData =>
-      let input := (← IO.ofExcept (batchData.input.reshapeChecked? #[batch, seq])).to device
-      let target := (← IO.ofExcept (batchData.target.reshapeChecked? #[batch, seq])).to device
-      let lossT ← moddedGpt.loss params yarn input target false
+    | some (input, target) =>
+      let input := input.to device
+      let target := target.to device
+      let lossT ← moddedGpt.loss params yarn input target hseq false
       totalLoss := totalLoss + Tensor.item lossT
       seen := seen + 1
 
@@ -1788,7 +1623,7 @@ private def validateWithProvider {cfg : moddedGpt.Config} {batch seq : Nat}
 
 /-- All ranks finish their cursor files before the master can publish a model
 snapshot. The staging directory is never used by checkpoint readers. -/
-private def checkpointPhase (label : String) (worldSize : UInt64) (device : Device)
+private def checkpointPhase (label : String) (worldSize : Nat) (device : Device)
     (action : IO Unit) : IO Unit := do
   let failure? ← try action; pure none catch e => pure (some s!"{e}")
   let failed : Bool ← if worldSize > 1 then do
@@ -1801,7 +1636,7 @@ private def checkpointPhase (label : String) (worldSize : UInt64) (device : Devi
       throw <| IO.userError s!"Checkpoint {label} failed: {failure?.getD "another rank reported an error"}"
   | false => pure ()
 
-private def stageStreamCursors (checkpointDir : String) (step rank worldSize : UInt64)
+private def stageStreamCursors (checkpointDir : String) (step rank worldSize : Nat)
     (device : Device)
     (saveCursor? : Option (String → IO Unit)) : IO (Option String) := do
   match saveCursor? with
@@ -1815,29 +1650,31 @@ private def stageStreamCursors (checkpointDir : String) (step rank worldSize : U
       checkpointPhase "rank cursor write" worldSize device (saveCursor staging.toString)
       return some staging.toString
 
-private def streamCursorWriter (staging? : Option String) (worldSize : UInt64) :
+private def streamCursorWriter (staging? : Option String) (worldSize : Nat) :
     Option (String → IO Unit) :=
   staging?.map fun staging snapshot => do
-    for rank in [:worldSize.toNat] do
+    for rank in [:worldSize] do
       let name := s!"stream_cursor_rank{rank}.json"
       let contents ← IO.FS.readFile (s!"{staging}/{name}" : System.FilePath)
       IO.FS.writeFile (s!"{snapshot}/{name}" : System.FilePath) contents
     IO.FS.writeFile (s!"{snapshot}/stream_cursor_world_size.txt" : System.FilePath) (toString worldSize)
 
-private def removeStreamCursorStaging (staging? : Option String) (rank : UInt64) : IO Unit := do
+private def removeStreamCursorStaging (staging? : Option String) (rank : Nat) : IO Unit := do
   if rank == 0 then
     if let some staging := staging? then
       try IO.FS.removeDirAll staging catch _ => pure ()
 
 private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (state : StreamTrainState (device := device) cfg)
-    (trainProvider : DynamicGPTBatchProvider)
-    (valProvider? : Option DynamicGPTBatchProvider)
+    (trainProvider : GPTBatchProvider hp.deviceBatchSize hp.maxSeqLen)
+    (valProvider? : Option (GPTBatchProvider hp.deviceBatchSize hp.maxSeqLen))
     (valBatches : Nat)
     (checkpointDir : String)
     (saveStreamCursor? : Option (String → IO Unit) := none)
     : IO (StreamTrainState (device := device) cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
+  let ⟨hseq⟩ ← if h : hp.maxSeqLen ≤ cfg.maxSeqLen then pure (PLift.up h) else
+    throw <| IO.userError s!"max_seq_len {hp.maxSeqLen} exceeds the model's {cfg.maxSeqLen}"
   let mut state := state
   let isMaster := state.rank == 0
   let latestPath := s!"{checkpointDir}/latest.ckpt"
@@ -1850,11 +1687,10 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
       IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
     return state
 
-  for step in [startStep.toNat:totalSteps.toNat] do
-    let stepU := step.toUInt64
+  for step in [startStep:totalSteps] do
     let batchSize := hp.deviceBatchSize
     let seqLen := hp.maxSeqLen
-    let gradAccum := effectiveGradAccumSteps hp state.worldSize.toNat
+    let gradAccum := effectiveGradAccumSteps hp state.worldSize
     let device := state.params.embed.device
 
     let microBatches ← collectMicroBatches
@@ -1866,26 +1702,26 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
         IO.println "No micro-batches available; ending stream training early."
       break
 
-    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn
+    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn hseq
       microBatches state.optState hp
 
     state := { state with
       params := newParams
       optState := newOptState
-      step := stepU
+      step := step
       totalTokens := state.totalTokens + result.tokensProcessed
     }
 
     if isMaster then
       logStreamProgress state result hp
 
-    if stepU % hp.valInterval == 0 && stepU > 0 && isMaster then
+    if hp.valInterval.fires step && step > 0 && isMaster then
       match valProvider? with
       | none => pure ()
       | some valProvider =>
         match ← validateWithProvider
             (cfg := cfg) (batch := batchSize) (seq := seqLen)
-            state.params state.yarn valProvider valBatches with
+            state.params state.yarn hseq valProvider valBatches with
         | none => pure ()
         | some valLoss =>
           IO.println s!"Validation: loss={valLoss}"
@@ -1893,7 +1729,7 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
             IO.println "  New best validation loss!"
             state := { state with bestValLoss := valLoss }
 
-    if stepU % hp.checkpointInterval == 0 && stepU > 0 then
+    if hp.checkpointInterval.fires step && step > 0 then
       let staging? ← stageStreamCursors checkpointDir state.optState.step state.rank state.worldSize
         state.params.embed.device saveStreamCursor?
       checkpointPhase "snapshot publication" state.worldSize state.params.embed.device do
@@ -1901,11 +1737,11 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
           let ckpt : Checkpoint (device := device) cfg := {
             params := state.params
             optState := state.optState
-            step := stepU
+            step := step
             bestValLoss := state.bestValLoss
           }
           let metadata := mkCheckpointMetadata cfg hp state.totalTokens none
-          let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+          let stepPath := s!"{checkpointDir}/step_{step}.ckpt"
           saveCheckpoint ckpt stepPath (some metadata) (streamCursorWriter staging? state.worldSize)
           saveCheckpoint ckpt latestPath (some metadata) (streamCursorWriter staging? state.worldSize)
       removeStreamCursorStaging staging? state.rank
@@ -1933,8 +1769,8 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
     allowing task-mixture token-buffer data feeding. -/
 def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (device : Device)
-    (trainProvider : DynamicGPTBatchProvider)
-    (valProvider? : Option DynamicGPTBatchProvider := none)
+    (trainProvider : GPTBatchProvider hp.deviceBatchSize hp.maxSeqLen)
+    (valProvider? : Option (GPTBatchProvider hp.deviceBatchSize hp.maxSeqLen) := none)
     (valBatches : Nat := 0)
     (checkpointDir : String := "checkpoints/modded")
     (resume : Option String := none)
@@ -2002,7 +1838,7 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
         if let some restoreStreamCursor := restoreStreamCursor? then
           if strict then
             let cursorWorldSize ← IO.FS.readFile (s!"{snapshot}/stream_cursor_world_size.txt" : System.FilePath)
-            if cursorWorldSize.trimAscii.toString.toNat? != some worldSize.toNat then
+            if cursorWorldSize.trimAscii.toString.toNat? != some worldSize then
               throw <| IO.userError "Checkpoint stream cursor world size does not match this training run"
           restoreStreamCursor snapshot
           if isMaster then
@@ -2036,11 +1872,16 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
   }
 
   -- Match nanochat's strict grad-accum divisibility contract.
-  validateGradAccumConfig effectiveHp worldSize.toNat
+  validateGradAccumConfig effectiveHp worldSize
 
   if isDistributed then
     dist.barrier
 
+  -- The providers emit batches of the requested shape.
+  if effectiveHp.deviceBatchSize != hp.deviceBatchSize || effectiveHp.maxSeqLen != hp.maxSeqLen then
+    throw <| IO.userError
+      s!"Checkpoint batch shape {effectiveHp.deviceBatchSize}x{effectiveHp.maxSeqLen} differs from the stream's {hp.deviceBatchSize}x{hp.maxSeqLen}"
+  let effectiveHp := { effectiveHp with deviceBatchSize := hp.deviceBatchSize, maxSeqLen := hp.maxSeqLen }
   let finalState ← trainLoopDistributedStream
     cfg effectiveHp state trainProvider valProvider? valBatches checkpointDir saveStreamCursor?
 

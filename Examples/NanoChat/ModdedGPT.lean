@@ -34,10 +34,8 @@ structure Config where
   nLayer : Nat := 11
   /-- Number of attention heads -/
   nHead : Nat := 6
-  /-- Head dimension -/
-  headDim : Nat := 128
-  /-- Model dimension (nHead * headDim) -/
-  modelDim : Nat := 768
+  /-- Half the head dimension; each head has `2 * halfHeadDim` channels -/
+  halfHeadDim : Nat := 64
   /-- Maximum sequence length -/
   maxSeqLen : Nat := 2048
   /-- Block size for attention windowing -/
@@ -53,7 +51,48 @@ structure Config where
       Pattern is tiled across layers. Final layer always gets L.
       Examples: "L"=all full context, "SL"=alternating, "LSS"=one long then two short -/
   windowPattern : String := "L"
-  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+  /-- Greedy decoding and evaluation pick among `vocabSize` logits; checked when the config is built. -/
+  vocabPos : 0 < vocabSize := by decide
+  /-- Generation decodes from the last `maxSeqLen` tokens; checked when the config is built. -/
+  maxSeqLenPos : 0 < maxSeqLen := by decide
+  deriving Repr
+
+instance : Lean.ToJson Config where
+  toJson cfg := Lean.Json.mkObj [
+    ("vocabSize", Lean.toJson cfg.vocabSize), ("nLayer", Lean.toJson cfg.nLayer),
+    ("nHead", Lean.toJson cfg.nHead), ("halfHeadDim", Lean.toJson cfg.halfHeadDim),
+    ("maxSeqLen", Lean.toJson cfg.maxSeqLen), ("blockSize", Lean.toJson cfg.blockSize),
+    ("ropeBase", Lean.toJson cfg.ropeBase), ("numValueEmbeds", Lean.toJson cfg.numValueEmbeds),
+    ("softcapValue", Lean.toJson cfg.softcapValue), ("windowPattern", Lean.toJson cfg.windowPattern)]
+
+instance : Lean.FromJson Config where
+  fromJson? j := do
+    let vocabSize ← j.getObjValAs? Nat "vocabSize"
+    let ⟨hVocab⟩ ← if h : 0 < vocabSize then pure (PLift.up h) else
+      throw "Invalid model config: vocabSize must be positive"
+    let maxSeqLen ← j.getObjValAs? Nat "maxSeqLen"
+    let ⟨hSeq⟩ ← if h : 0 < maxSeqLen then pure (PLift.up h) else
+      throw "Invalid model config: maxSeqLen must be positive"
+    pure {
+      vocabSize
+      nLayer := ← j.getObjValAs? Nat "nLayer"
+      nHead := ← j.getObjValAs? Nat "nHead"
+      halfHeadDim := ← j.getObjValAs? Nat "halfHeadDim"
+      maxSeqLen
+      blockSize := ← j.getObjValAs? Nat "blockSize"
+      ropeBase := ← j.getObjValAs? Float "ropeBase"
+      numValueEmbeds := ← j.getObjValAs? Nat "numValueEmbeds"
+      softcapValue := ← j.getObjValAs? Float "softcapValue"
+      windowPattern := ← j.getObjValAs? String "windowPattern"
+      vocabPos := hVocab
+      maxSeqLenPos := hSeq
+    }
+
+/-- Head dimension -/
+def Config.headDim (cfg : Config) : Nat := 2 * cfg.halfHeadDim
+
+/-- Model dimension: `nHead` heads of `headDim` channels -/
+def Config.modelDim (cfg : Config) : Nat := cfg.nHead * (2 * cfg.halfHeadDim)
 
 /-- Default modded-nanogpt configuration -/
 def Config.default : Config := {}
@@ -103,23 +142,22 @@ def computeWindowSizes (cfg : Config) : Array (Option Nat) := Id.run do
     by interpolating rotary frequencies. We use half-truncated RoPE
     where only the first half of head dimensions get rotation.
 -/
-structure YarnRotary (headDim maxSeqLen : Nat) where
-  /-- Cosine frequencies [maxSeqLen, headDim/2] for half-truncated RoPE -/
-  cos : Tensor { shape := #[maxSeqLen, headDim / 2], dtype := .Float32, device := device }
-  /-- Sine frequencies [maxSeqLen, headDim/2] for half-truncated RoPE -/
-  sin : Tensor { shape := #[maxSeqLen, headDim / 2], dtype := .Float32, device := device }
-  /-- Base angular frequencies [headDim/2] -/
-  angularFreq : Tensor { shape := #[headDim / 2], dtype := .Float32, device := device }
+structure YarnRotary (half maxSeqLen : Nat) where
+  /-- Cosine frequencies [maxSeqLen, half] for half-truncated RoPE -/
+  cos : Tensor { shape := #[maxSeqLen, half], dtype := .Float32, device := device }
+  /-- Sine frequencies [maxSeqLen, half] for half-truncated RoPE -/
+  sin : Tensor { shape := #[maxSeqLen, half], dtype := .Float32, device := device }
+  /-- Base angular frequencies [half] -/
+  angularFreq : Tensor { shape := #[half], dtype := .Float32, device := device }
   /-- Attention scale factor -/
   attnScale : Float := 0.1
   deriving Repr
 
 /-- Initialize YaRN rotary embeddings -/
-def YarnRotary.init (headDim maxSeqLen : Nat) (base : Float := 500000.0) (device : Device := .CPU)
-    : IO (YarnRotary (device := device) headDim maxSeqLen) := do
-  -- computeFreqs returns [maxSeqLen, headDim/2]
-  let (cosHalf, sinHalf) := Tensor.rotaryFreqs maxSeqLen headDim base
-  let angularFreq := Tensor.zeros (device := device) #[headDim / 2]
+def YarnRotary.init (half maxSeqLen : Nat) (base : Float := 500000.0) (device : Device := .CPU)
+    : IO (YarnRotary (device := device) half maxSeqLen) := do
+  let (cosHalf, sinHalf) := Tensor.rotaryFreqs maxSeqLen half base
+  let angularFreq := Tensor.zeros (device := device) #[half]
   return {
     cos := cosHalf.to device
     sin := sinHalf.to device
@@ -132,8 +170,8 @@ def YarnRotary.init (headDim maxSeqLen : Nat) (base : Float := 500000.0) (device
     When extending to longer sequences, we interpolate the
     rotary frequencies to maintain position information.
 -/
-def YarnRotary.applyExtension (yarn : YarnRotary (device := device) headDim maxSeqLen)
-    (_oldWindow _newWindow : Nat) : YarnRotary (device := device) headDim maxSeqLen :=
+def YarnRotary.applyExtension (yarn : YarnRotary (device := device) half maxSeqLen)
+    (_oldWindow _newWindow : Nat) : YarnRotary (device := device) half maxSeqLen :=
   -- YaRN frequency interpolation would go here
   -- For now, return unchanged
   yarn
@@ -245,12 +283,13 @@ def rmsNorm3d {batch seq dim : Nat} (x : Tensor { shape := #[batch, seq, dim], d
 /-- Forward pass for attention with rotary embeddings and QK norm.
     x: [batch, seq, dim]
     Returns: [batch, seq, dim] -/
-def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : Nat}
-    (attn : CausalSelfAttention (device := device) dim headDim numHeads)
+def CausalSelfAttention.forward {batch seq dim half numHeads rotaryLen : Nat}
+    (attn : CausalSelfAttention (device := device) dim (2 * half) numHeads)
     (x : Tensor { shape := #[batch, seq, dim], dtype := .Float32, device := device })
-    (yarn : YarnRotary (device := device) headDim rotaryLen)
+    (yarn : YarnRotary (device := device) half rotaryLen)
+    (hrot : seq ≤ rotaryLen)
     (windowSize : Option Nat := none)
-    (valueEmbed : Option (Tensor { shape := #[batch, seq, numHeads * headDim], dtype := .Float32, device := device }) := none)
+    (valueEmbed : Option (Tensor { shape := #[batch, seq, numHeads * (2 * half)], dtype := .Float32, device := device }) := none)
     (valueMix : Tensor { shape := #[], dtype := .Float32, device := device } := Tensor.zeros (device := device) #[])
     : Tensor { shape := #[batch, seq, dim], dtype := .Float32, device := device } :=
   -- Project to Q, K, V: [batch, seq, numHeads * headDim]
@@ -264,20 +303,20 @@ def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : Nat}
       let mix := Tensor.sigmoid valueMix
       let one : Tensor { shape := #[], dtype := .Float32, device := device } := (Tensor.ones (device := device) #[]).to mix.device
       let oneMinus := one - mix
-      let mixExpanded := Tensor.expand mix #[batch, seq, numHeads * headDim]
-      let oneMinusExpanded := Tensor.expand oneMinus #[batch, seq, numHeads * headDim]
+      let mixExpanded := Tensor.broadcastTo mix #[batch, seq, numHeads * (2 * half)]
+      let oneMinusExpanded := Tensor.broadcastTo oneMinus #[batch, seq, numHeads * (2 * half)]
       (vBase * oneMinusExpanded) + (ve * mixExpanded)
     | none =>
       vBase
 
   -- Reshape to [batch, seq, numHeads, headDim] for rotary/attention
-  let q := Tensor.reshape q #[batch, seq, numHeads, headDim]
-  let k := Tensor.reshape k #[batch, seq, numHeads, headDim]
-  let v := Tensor.reshape v #[batch, seq, numHeads, headDim]
+  let q := Tensor.reshape q #[batch, seq, numHeads, 2 * half]
+  let k := Tensor.reshape k #[batch, seq, numHeads, 2 * half]
+  let v := Tensor.reshape v #[batch, seq, numHeads, 2 * half]
 
   -- Slice rotary embeddings to seq length (cos/sin are [rotaryLen, headDim])
-  let cos := Tensor.sliceChecked yarn.cos 0 0 seq #[seq, headDim / 2]
-  let sin := Tensor.sliceChecked yarn.sin 0 0 seq #[seq, headDim / 2]
+  let cos := Tensor.slice yarn.cos 0 0 seq
+  let sin := Tensor.slice yarn.sin 0 0 seq
 
   -- Apply rotary embeddings (uses half-dim rotation)
   let q := Tensor.applyRotary q cos sin
@@ -302,7 +341,7 @@ def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : Nat}
   let attnOut := Tensor.joinHeads attnOut
 
   -- Reshape to [batch, seq, numHeads * headDim] and project
-  let attnOut := Tensor.reshape attnOut #[batch, seq, numHeads * headDim]
+  let attnOut := Tensor.reshape attnOut #[batch, seq, numHeads * (2 * half)]
   let output := Tensor.linear3d attnOut attn.wO
 
   output
@@ -408,17 +447,17 @@ def Scalars.init (nLayer : Nat) (device : Device := .CPU) : IO (Scalars (device 
 /-! ## Scalar/Value Helper Utilities -/
 
 /-- Extract scalar tensor at `idx` from a 1D tensor. -/
-private def scalarAt {n : Nat} (values : Tensor { shape := #[n], dtype := .Float32, device := device }) (idx : Nat) : Tensor { shape := #[], dtype := .Float32, device := device } :=
-  let oneElem : Tensor { shape := #[1], dtype := .Float32, device := device } := Tensor.sliceChecked values 0 idx 1 #[1]
+private def scalarAt {n : Nat} (values : Tensor { shape := #[n], dtype := .Float32, device := device }) (idx : Nat) (h : idx < n) : Tensor { shape := #[], dtype := .Float32, device := device } :=
+  let oneElem : Tensor { shape := #[1], dtype := .Float32, device := device } := Tensor.slice values 0 idx 1
   Tensor.reshape oneElem #[]
 
 /-- Extract scalar at `idx` and squash to (0, 1). -/
-private def scalarSigmoidAt {n : Nat} (values : Tensor { shape := #[n], dtype := .Float32, device := device }) (idx : Nat) : Tensor { shape := #[], dtype := .Float32, device := device } :=
-  Tensor.sigmoid (scalarAt values idx)
+private def scalarSigmoidAt {n : Nat} (values : Tensor { shape := #[n], dtype := .Float32, device := device }) (idx : Nat) (h : idx < n := by omega) : Tensor { shape := #[], dtype := .Float32, device := device } :=
+  Tensor.sigmoid (scalarAt values idx h)
 
 /-- Scale a tensor by a scalar tensor, keeping gradient flow through the scalar. -/
 private def scaleByScalar {s : Shape} (x : Tensor { shape := s, dtype := .Float32, device := device }) (scalar : Tensor { shape := #[], dtype := .Float32, device := device }) : Tensor { shape := s, dtype := .Float32, device := device } :=
-  let expanded := Tensor.expand scalar s
+  let expanded := Tensor.broadcastTo scalar s
   x * expanded
 
 /-- Blend two tensors with scalar weights. -/
@@ -512,39 +551,38 @@ def ModdedGPTParams.init (cfg : Config) (device : Device := .CPU) : IO (ModdedGP
 -/
 def forward {cfg : Config} {batch seq : Nat}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
     (inputSeq : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
+    (hseq : seq ≤ cfg.maxSeqLen)
     (_training : Bool := true)
     : IO (Tensor { shape := #[batch, seq, cfg.vocabSize], dtype := .Float32, device := device }) := do
-  if cfg.modelDim < 12 then
+  let ⟨hDim⟩ ← if h : 12 ≤ cfg.modelDim then pure (PLift.up h) else
     throw (IO.userError "ModdedGPT requires modelDim >= 12 for the smear gate")
-  let ⟨hHeads⟩ ← if h : cfg.modelDim = cfg.nHead * cfg.headDim then pure (PLift.up h) else
-    throw (IO.userError s!"ModdedGPT requires modelDim = nHead * headDim, got {cfg.modelDim} vs {cfg.nHead} * {cfg.headDim}")
+  have hHeads : cfg.modelDim = cfg.nHead * cfg.headDim := rfl
   -- 1) Token embedding + lightweight smear-style modulation.
   let tokEmb := Tensor.embedding inputSeq params.embed
-  let smearIn : Tensor { shape := #[batch, seq, 12], dtype := .Float32, device := device } := Tensor.sliceChecked tokEmb 2 0 12 #[batch, seq, 12]
+  let smearIn : Tensor { shape := #[batch, seq, 12], dtype := .Float32, device := device } := Tensor.slice tokEmb 2 0 12
   let smearGate := Tensor.sigmoid (params.smearGate.forward smearIn)
-  let smearGateExpanded := Tensor.expand smearGate #[batch, seq, cfg.modelDim]
+  let smearGateExpanded := Tensor.broadcastTo smearGate #[batch, seq, cfg.modelDim]
   let x0 := Tensor.rmsNorm (tokEmb + (tokEmb * smearGateExpanded))
 
   -- Precompute token value embeddings and global scalar controls.
   let valueEmbeds := params.valueEmbeds.map (Tensor.embedding inputSeq ·)
-  let scalarBaseGlobal := cfg.nLayer * 4
-  let valueMix := scalarSigmoidAt params.scalars.values scalarBaseGlobal
-  let skipMix := scalarSigmoidAt params.scalars.values (scalarBaseGlobal + 1)
-  let finalScale := scalarSigmoidAt params.scalars.values (scalarBaseGlobal + 2)
+  let valueMix := scalarSigmoidAt params.scalars.values (cfg.nLayer * 4)
+  let skipMix := scalarSigmoidAt params.scalars.values (cfg.nLayer * 4 + 1)
+  let finalScale := scalarSigmoidAt params.scalars.values (cfg.nLayer * 4 + 2)
 
   -- 2) Apply transformer blocks with value embeddings and scalar-gated residuals.
   let mut x := x0
   let mut skipConnection : Option (Tensor { shape := #[batch, seq, cfg.modelDim], dtype := .Float32, device := device }) := none
 
-  for i in [:cfg.nLayer] do
+  for hL : i in [:cfg.nLayer] do
+    have hi : i < cfg.nLayer := by have := hL.upper; simpa using this
     let block : Block (device := device) cfg.modelDim cfg.headDim cfg.nHead := params.blocks[i]!
-    let scalarBase := (i) * 4
-    let lamX := scalarSigmoidAt params.scalars.values scalarBase
-    let lamX0 := scalarSigmoidAt params.scalars.values (scalarBase + 1)
-    let lamAttn := scalarSigmoidAt params.scalars.values (scalarBase + 2)
-    let lamMlp := scalarSigmoidAt params.scalars.values (scalarBase + 3)
+    let lamX := scalarSigmoidAt params.scalars.values (i * 4)
+    let lamX0 := scalarSigmoidAt params.scalars.values (i * 4 + 1)
+    let lamAttn := scalarSigmoidAt params.scalars.values (i * 4 + 2)
+    let lamMlp := scalarSigmoidAt params.scalars.values (i * 4 + 3)
     let xIn := blendByScalars x x0 lamX lamX0
 
     -- Skip connection: save layer 3 output for layer 6
@@ -563,7 +601,7 @@ def forward {cfg : Config} {batch seq : Nat}
       let layerVE := (layerValueEmbed (cfg := cfg) valueEmbeds i).map
         (fun t => t.reshape #[batch, seq, cfg.nHead * cfg.headDim] (by simp [hHeads]))
       -- Apply attention with rotary embeddings/window and optional value embedding.
-      let attnOut := attn.forward xNormed yarn windowSize layerVE valueMix
+      let attnOut := attn.forward xNormed yarn hseq windowSize layerVE valueMix
       -- Residual connection
       let x' := xIn + scaleByScalar attnOut lamAttn
       -- Pre-norm before MLP
@@ -599,22 +637,23 @@ def forward {cfg : Config} {batch seq : Nat}
 /-- Compute cross-entropy loss -/
 def loss {cfg : Config} {batch seq : Nat}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
     (inputSeq : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
     (targets : Tensor { shape := #[batch, seq], dtype := .Int64, device := device })
+    (hseq : seq ≤ cfg.maxSeqLen)
     (training : Bool := true)
     : IO (Tensor { shape := #[], dtype := .Float32, device := device }) := do
-  let logits ← forward params yarn inputSeq training
+  let logits ← forward params yarn inputSeq hseq training
   -- Reshape for cross-entropy: (batch*seq, vocab) vs (batch*seq,)
   let logitsFlat := Tensor.reshape logits #[batch * seq, cfg.vocabSize]
   let targetsFlat := Tensor.reshape targets #[batch * seq]
-  IO.ofExcept (Tensor.crossEntropy? logitsFlat targetsFlat)
+  pure (Tensor.crossEntropy! logitsFlat targetsFlat)
 
 
 /-! Device transfers are type-directed across every model leaf. -/
 
-derive_tensor_tree_cast {source target : Device} {headDim maxSeqLen : Nat} :
-  YarnRotary (device := source) headDim maxSeqLen => YarnRotary (device := target) headDim maxSeqLen
+derive_tensor_tree_cast {source target : Device} {half maxSeqLen : Nat} :
+  YarnRotary (device := source) half maxSeqLen => YarnRotary (device := target) half maxSeqLen
 
 derive_tensor_tree_cast {source target : Device} {batch maxSeq nHead headDim : Nat} :
   AttnArgs (device := source) batch maxSeq nHead headDim => AttnArgs (device := target) batch maxSeq nHead headDim

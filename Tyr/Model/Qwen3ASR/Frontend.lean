@@ -460,9 +460,6 @@ private def buildFeatureAttentionMask
     (validSamples targetSamples hopLength : Nat)
     (returnAttentionMask : Bool)
     : Array Int64 :=
-  if hopLength == 0 then
-    #[]
-  else
     let frames := targetSamples / hopLength
     let validFrames := validSamples / hopLength
     Id.run do
@@ -498,12 +495,10 @@ def waveformToWhisperFeatures
     : IO (WhisperFrontendOutput (device := .CPU) cfg.featureSize (PreprocessorConfig.expectedFrames cfg)) := do
   let targetSamples := PreprocessorConfig.expectedSampleCount cfg
   let expectedFrames := PreprocessorConfig.expectedFrames cfg
-  let nFft := if cfg.nFft == 0 then 400 else cfg.nFft
-  let hop := if cfg.hopLength == 0 then 160 else cfg.hopLength
+  let nFft := cfg.nFft
+  let hop := cfg.hopLength
   let melBins := cfg.featureSize
-
-  if melBins == 0 then
-    throw <| IO.userError "Preprocessor config has feature_size=0"
+  have melPos : 0 < melBins := cfg.featureSizePos
   if targetSamples == 0 then
     throw <| IO.userError "Preprocessor config has n_samples=0"
 
@@ -524,16 +519,14 @@ def waveformToWhisperFeatures
       pure (wav0 + noise * cfg.dither)
 
   let window : Tensor { device := .CPU, shape := #[nFft], dtype := .Float32 } := Tensor.hannWindow nFft
-  let ⟨_, stftDyn⟩ ← Tensor.stft wav nFft hop window true false
-  let stftShape := stftDyn.runtimeShape
-  if stftShape.size < 3 then
-    throw <| IO.userError s!"Unexpected STFT rank {stftShape.size}, expected 3"
-
-  let freqBins := stftShape.getD 0 0
-  let stftFrames := stftShape.getD 1 0
-  let packed := stftShape.getD 2 0
-  if packed != 2 then
-    throw <| IO.userError s!"Unexpected STFT packed size {packed}, expected 2"
+  let ⟨hStft⟩ ← if h : Tensor.StftValid targetSamples nFft hop nFft true then pure (PLift.up h) else
+    throw <| IO.userError s!"STFT parameters n_fft={nFft} hop_length={hop} do not fit {targetSamples} samples"
+  let stftDyn := Tensor.stft wav nFft hop window true false hStft
+  let freqBins := nFft / 2 + 1
+  let stftFrames := Tensor.stftFrames targetSamples nFft hop true
+  let packed := 2
+  if stftDyn.runtimeShape != #[freqBins, stftFrames, packed] then
+    throw <| IO.userError s!"Unexpected STFT shape {stftDyn.runtimeShape}, expected {#[freqBins, stftFrames, packed]}"
 
   let droppedFrames := if stftFrames > 0 then stftFrames - 1 else 0
   if droppedFrames != expectedFrames then
@@ -565,7 +558,7 @@ def waveformToWhisperFeatures
     Tensor.mm (Tensor.transpose2d melFilter) powerSpec
   let logSpec : Tensor { device := .CPU, shape := #[melBins, expectedFrames], dtype := .Float32 } :=
     Tensor.log10 (Tensor.clampFloat melPower (1e-10 : Float) (1e10 : Float))
-  let maxVal := Tensor.item (Tensor.maxAllChecked logSpec)
+  let maxVal := Tensor.item (Tensor.maxAll logSpec)
   let floored : Tensor { device := .CPU, shape := #[melBins, expectedFrames], dtype := .Float32 } :=
     Tensor.clampFloat logSpec (maxVal - (8.0 : Float)) (1e10 : Float)
   let normalized : Tensor { device := .CPU, shape := #[melBins, expectedFrames], dtype := .Float32 } := (floored + (4.0 : Float)) / (4.0 : Float)
@@ -588,14 +581,10 @@ def waveformToWhisperFeaturesDynamic
     (maxSeconds : Option Float := none)
     (device : Device := Device.CPU)
     : IO (Sigma (fun frames => WhisperFrontendOutput (device := device) cfg.featureSize frames)) := do
-  let nFft := if cfg.nFft == 0 then 400 else cfg.nFft
-  let hop := if cfg.hopLength == 0 then 160 else cfg.hopLength
+  let nFft := cfg.nFft
+  let hop := cfg.hopLength
   let melBins := cfg.featureSize
-
-  if melBins == 0 then
-    throw <| IO.userError "Preprocessor config has feature_size=0"
-  if cfg.samplingRate == 0 then
-    throw <| IO.userError "Preprocessor config has sampling_rate=0"
+  have melPos : 0 < melBins := cfg.featureSizePos
 
   let minSamplesRaw := ((minSeconds * cfg.samplingRate.toFloat) + 0.5).toUInt64.toNat
   let minSamples := if minSamplesRaw == 0 then 1 else minSamplesRaw
@@ -647,30 +636,23 @@ def waveformToWhisperFeaturesDynamic
     let windowCpu : Tensor { device := .CPU, shape := #[nFft], dtype := .Float32 } := Tensor.hannWindow nFft
     let window : Tensor { device := runDevice, shape := #[nFft], dtype := .Float32 } :=
       windowCpu.to runDevice
-    let ⟨stftSpecShape, stftDyn⟩ ← Tensor.stft wav nFft hop window true false
-    let stftShape := stftDyn.runtimeShape
-    if stftShape.size < 3 then
-      throw <| IO.userError s!"Unexpected STFT rank {stftShape.size}, expected 3"
-
-    let freqBins := stftShape.getD 0 0
-    let stftFrames := stftShape.getD 1 0
-    let packed := stftShape.getD 2 0
-    if packed != 2 then
-      throw <| IO.userError s!"Unexpected STFT packed size {packed}, expected 2"
+    let ⟨hStft⟩ ← if h : Tensor.StftValid targetSamples nFft hop nFft true then pure (PLift.up h) else
+      throw <| IO.userError s!"STFT parameters n_fft={nFft} hop_length={hop} do not fit {targetSamples} samples"
+    let stft := Tensor.stft wav nFft hop window true false hStft
+    let freqBins := nFft / 2 + 1
+    let stftFrames := Tensor.stftFrames targetSamples nFft hop true
+    if stft.runtimeShape != #[freqBins, stftFrames, 2] then
+      throw <| IO.userError s!"Unexpected STFT shape {stft.runtimeShape}, expected {#[freqBins, stftFrames, 2]}"
 
     let frames := if stftFrames > 0 then stftFrames - 1 else 0
     let ⟨framesPos⟩ ← if h : 0 < frames then pure (PLift.up h) else
       throw <| IO.userError s!"Audio too short for Whisper features: {targetSamples} samples yield no frames"
-    let ⟨hStft⟩ ← if h : stftSpecShape = #[freqBins, stftFrames, 2] then pure (PLift.up h) else
-      throw <| IO.userError s!"Unexpected STFT shape {stftSpecShape}, expected {#[freqBins, stftFrames, 2]}"
-    let stft : Tensor { device := runDevice, shape := #[freqBins, stftFrames, 2], dtype := .Float32 } :=
-      Tensor.reshape stftDyn #[freqBins, stftFrames, 2] (by simp [hStft])
     let stftTrim : Tensor { device := runDevice, shape := #[freqBins, frames, 2], dtype := .Float32 } :=
-      Tensor.sliceChecked stft 1 0 frames #[freqBins, frames, 2]
+      Tensor.slice stft 1 0 frames (_bounds := by simp only [frames]; split <;> simp <;> omega)
     let re3 : Tensor { device := runDevice, shape := #[freqBins, frames, 1], dtype := .Float32 } :=
-      Tensor.sliceChecked stftTrim 2 0 1 #[freqBins, frames, 1]
+      Tensor.slice stftTrim 2 0 1
     let im3 : Tensor { device := runDevice, shape := #[freqBins, frames, 1], dtype := .Float32 } :=
-      Tensor.sliceChecked stftTrim 2 1 1 #[freqBins, frames, 1]
+      Tensor.slice stftTrim 2 1 1
     let re : Tensor { device := runDevice, shape := #[freqBins, frames], dtype := .Float32 } := Tensor.reshape re3 #[freqBins, frames]
     let im : Tensor { device := runDevice, shape := #[freqBins, frames], dtype := .Float32 } := Tensor.reshape im3 #[freqBins, frames]
     let powerSpec : Tensor { device := runDevice, shape := #[freqBins, frames], dtype := .Float32 } := re * re + im * im
@@ -684,7 +666,7 @@ def waveformToWhisperFeaturesDynamic
       Tensor.mm (Tensor.transpose2d melFilter) powerSpec
     let logSpec : Tensor { device := runDevice, shape := #[melBins, frames], dtype := .Float32 } :=
       Tensor.log10 (Tensor.clampFloat melPower (1e-10 : Float) (1e10 : Float))
-    let maxVal := Tensor.item (Tensor.maxAllChecked logSpec)
+    let maxVal := Tensor.item (Tensor.maxAll logSpec)
     let floored : Tensor { device := runDevice, shape := #[melBins, frames], dtype := .Float32 } :=
       Tensor.clampFloat logSpec (maxVal - (8.0 : Float)) (1e10 : Float)
     let normalized : Tensor { device := runDevice, shape := #[melBins, frames], dtype := .Float32 } := (floored + (4.0 : Float)) / (4.0 : Float)
@@ -719,7 +701,7 @@ def wavToWhisperFeatures
     : IO (WhisperFrontendOutput (device := .CPU) cfg.featureSize (PreprocessorConfig.expectedFrames cfg)) := do
   let (sr, wav) ← loadMonoPcm16Wav path
   let wavTarget ←
-    if sr == cfg.samplingRate || sr == 0 || cfg.samplingRate == 0 then
+    if sr == cfg.samplingRate || sr == 0 then
       pure wav
     else
       data.resampleSoxrHQ wav sr cfg.samplingRate
@@ -736,7 +718,7 @@ def wavToWhisperFeaturesDynamic
     : IO (Sigma (fun frames => WhisperFrontendOutput (device := device) cfg.featureSize frames)) := do
   let (sr, wav) ← loadMonoPcm16Wav path
   let wavTarget ←
-    if sr == cfg.samplingRate || sr == 0 || cfg.samplingRate == 0 then
+    if sr == cfg.samplingRate || sr == 0 then
       pure wav
     else
       data.resampleSoxrHQ wav sr cfg.samplingRate
@@ -746,9 +728,11 @@ def wavToWhisperFeaturesDynamic
     This now runs the faithful Whisper-style frontend instead of pseudo-mel. -/
 def wavToPseudoMel {melBins frames : Nat} (path : String) :
     IO (Tensor { device := .CPU, shape := #[1, melBins, frames], dtype := .Float32 }) := do
+  let ⟨hMel⟩ ← if h : 0 < melBins then pure (PLift.up h) else
+    throw <| IO.userError "Pseudo-mel framing needs at least one mel bin"
   let cfg : PreprocessorConfig := {
     featureSize := melBins
-    samplingRate := 16000
+    featureSizePos := hMel
     hopLength := 160
     nFft := 400
     nSamples := frames * 160

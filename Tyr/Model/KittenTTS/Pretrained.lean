@@ -1,4 +1,5 @@
 import Tyr.SafeTensors.Schema
+import Tyr.SafeTensors.Source
 /-
   Tyr/Model/KittenTTS/Pretrained.lean
 
@@ -64,7 +65,7 @@ private def converterScriptPath : IO String := do
   | none =>
     throw <| IO.userError "Could not locate Tyr repo root from current working directory."
 
-private def runProcessChecked (cmd : String) (args : Array String) : IO Unit := do
+private def runProcess (cmd : String) (args : Array String) : IO Unit := do
   let out ← IO.Process.output { cmd, args }
   if out.exitCode != 0 then
     throw <| IO.userError s!"Command failed: {cmd} {String.intercalate " " args.toList}\n{out.stderr}"
@@ -75,7 +76,7 @@ private def ensureConvertedCheckpoint (modelDir rawPath : String) : IO Unit := d
     pure ()
   else
     let script ← converterScriptPath
-    runProcessChecked "uv"
+    runProcess "uv"
       #[
         "run", "--with", "torch", "--with", "safetensors",
         "python", script,
@@ -93,7 +94,7 @@ private def ensureConvertedVoice (voicePtPath : String) : IO String := do
     pure voiceStPath
   else
     let script ← converterScriptPath
-    runProcessChecked "uv"
+    runProcess "uv"
       #[
         "run", "--with", "torch", "--with", "safetensors",
         "python", script,
@@ -202,9 +203,10 @@ def loadVoiceStyle (bundle : PretrainedBundle) (voice : String) (phonemeCount : 
     : IO (Tensor { shape := #[1, KittenTTSConfig.fullStyleDim bundle.cfg], dtype := .Float32, device := bundle.device }) := do
   let voicePath ← hub.ensureVoiceSafetensors bundle.source bundle.revision bundle.modelDir voice
   let table : Tensor { shape := #[510, 1, KittenTTSConfig.fullStyleDim bundle.cfg], dtype := .Float32, device := bundle.device } ←
-    safetensors.loadTensorWithSpec voicePath "voice" ⟨#[510, 1, KittenTTSConfig.fullStyleDim bundle.cfg], .Float32⟩ bundle.device
+    (← safetensors.Source.open voicePath).loadAs "voice" ⟨#[510, 1, KittenTTSConfig.fullStyleDim bundle.cfg], .Float32⟩ bundle.device
   let idx := voiceIndexOfPhonemeCount phonemeCount
-  let style : Tensor { shape := #[1, 1, KittenTTSConfig.fullStyleDim bundle.cfg], dtype := .Float32, device := bundle.device } := sliceTensor table 0 idx 1
+  let style : Tensor { shape := #[1, 1, KittenTTSConfig.fullStyleDim bundle.cfg], dtype := .Float32, device := bundle.device } :=
+    Tensor.slice table 0 idx 1 (_bounds := by simp [idx, voiceIndexOfPhonemeCount]; omega)
   pure (Tensor.reshape style #[1, KittenTTSConfig.fullStyleDim bundle.cfg])
 
 def synthesizePhonemes (bundle : PretrainedBundle) (phonemes : String) (voice : String) (speed : Float := 1.0)
@@ -249,7 +251,7 @@ def predictPhonemeDurations (bundle : PretrainedBundle) (phonemes : String) (voi
   bundle.model.predictDurations inputIds refStyle speed
 
 def debugPhonemes (bundle : PretrainedBundle) (phonemes : String) (voice : String) (speed : Float := 1.0)
-    : IO (KittenTTSDebugOutput (device := bundle.device)) := do
+    : IO (KittenTTSDebugOutput (device := bundle.device) bundle.cfg) := do
   let ids := bundle.inputIdsFromPhonemes phonemes
   let seq := ids.size
   let inputIds : Tensor { shape := #[1, seq], dtype := .Int64, device := bundle.device } := (Tensor.reshape (Tensor.fromInt64Array (ids.map (·.toInt64))) #[1, seq]).to bundle.device
@@ -269,9 +271,9 @@ def loadFromPretrained
     : IO PretrainedBundle := do
   let modelDir ← hub.resolvePretrainedDir source { revision := revision, cacheDir := cacheDir }
   let cfg0 ← KittenTTSConfig.loadFromPretrainedDir modelDir defaults
-  let vocab ← loadVocabFromPretrainedDir modelDir
   let loaded ← Model.loadAutoConfig s!"{modelDir}/model.safetensors" cfg0 (log := log)
   let cfg := loaded.cfg
+  let vocab ← loadVocabFromPretrainedDir modelDir cfg.nToken
   let model := loaded.model
   pure { cfg, device := loaded.device, model, vocab, modelDir, source, revision, cacheDir }
 

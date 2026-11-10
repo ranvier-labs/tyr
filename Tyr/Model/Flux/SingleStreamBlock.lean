@@ -66,17 +66,16 @@ def init (hidden_size num_heads head_dim mlp_hidden : Nat)
     pe: RoPE embeddings
     mod: [batch, 3, hidden_size] - shift/scale/gate modulation
     Returns: [batch, seq, hidden_size] -/
-def forward {batch seq hidden_size num_heads head_dim mlp_hidden : Nat}
-    (block : SingleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads head_dim mlp_hidden)
-    (heven : 2 ∣ head_dim)
+def forward {batch seq hidden_size num_heads half mlp_hidden : Nat}
+    (block : SingleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads (2 * half) mlp_hidden)
     (x : Tensor { dtype := dtype, device := device, shape := #[batch, seq, hidden_size] })
-    (pe : Tensor { device := device, shape := #[batch, 1, seq, head_dim / 2, 2, 2], dtype := .Float32 })  -- Shape depends on RoPE implementation
+    (pe : Tensor { device := device, shape := #[batch, 1, seq, half, 2, 2], dtype := .Float32 })  -- Shape depends on RoPE implementation
     (mod : Tensor { dtype := dtype, device := device, shape := #[batch, 3, hidden_size] })
     : Tensor { dtype := dtype, device := device, shape := #[batch, seq, hidden_size] } :=
   -- Extract shift, scale, gate from modulation
-  let mod_shift := Tensor.reshape (sliceTyped mod 1 0 1) #[batch, hidden_size]
-  let mod_scale := Tensor.reshape (sliceTyped mod 1 1 1) #[batch, hidden_size]
-  let mod_gate := Tensor.reshape (sliceTyped mod 1 2 1) #[batch, hidden_size]
+  let mod_shift := modChunk mod 0
+  let mod_scale := modChunk mod 1
+  let mod_gate := modChunk mod 2
 
   -- Pre-norm with modulation
   let x_norm := block.pre_norm.forward3d x
@@ -86,22 +85,22 @@ def forward {batch seq hidden_size num_heads head_dim mlp_hidden : Nat}
   let qkv_mlp := Tensor.linear3d x_mod block.linear1  -- [batch, seq, qkv_dim + mlp_in]
 
   -- Split into QKV and MLP parts
-  let qkv_dim := num_heads * head_dim * 3
-  let qkv := sliceTyped qkv_mlp 2 0 qkv_dim
-  let mlp := sliceTyped qkv_mlp 2 qkv_dim (mlp_hidden * 2)
+  let qkv_dim := num_heads * (2 * half) * 3
+  let qkv := Tensor.slice qkv_mlp 2 0 qkv_dim
+  let mlp := Tensor.slice qkv_mlp 2 qkv_dim (mlp_hidden * 2)
 
   -- Reshape QKV
-  let qkv := Tensor.reshape qkv #[batch, seq, 3, num_heads, head_dim]
-  let q := Tensor.reshape (sliceTyped qkv 2 0 1) #[batch, seq, num_heads, head_dim]
-  let k := Tensor.reshape (sliceTyped qkv 2 1 1) #[batch, seq, num_heads, head_dim]
-  let v := Tensor.reshape (sliceTyped qkv 2 2 1) #[batch, seq, num_heads, head_dim]
+  let qkv := Tensor.reshape qkv #[batch, seq, 3, num_heads, 2 * half]
+  let q := Tensor.reshape (Tensor.slice qkv 2 0 1) #[batch, seq, num_heads, 2 * half]
+  let k := Tensor.reshape (Tensor.slice qkv 2 1 1) #[batch, seq, num_heads, 2 * half]
+  let v := Tensor.reshape (Tensor.slice qkv 2 2 1) #[batch, seq, num_heads, 2 * half]
 
   -- QK normalization
   let (q, k) := block.norm.forward q k
 
   -- Apply RoPE
-  let q := flux.applyRope q heven pe
-  let k := flux.applyRope k heven pe
+  let q := flux.applyRope q pe
+  let k := flux.applyRope k pe
 
   -- Transpose for attention: [batch, num_heads, seq, head_dim]
   let q := transposeAttention q
@@ -113,23 +112,22 @@ def forward {batch seq hidden_size num_heads head_dim mlp_hidden : Nat}
 
   -- Transpose back and reshape
   let attn := fromAttention attn
-  let attn := Tensor.reshape attn #[batch, seq, num_heads * head_dim]
+  let attn := Tensor.reshape attn #[batch, seq, num_heads * (2 * half)]
 
   -- MLP: SwiGLU
   let mlp := Tensor.reshape mlp #[batch, seq, 2, mlp_hidden]
-  let gate := Tensor.reshape (sliceTyped mlp 2 0 1) #[batch, seq, mlp_hidden]
-  let up := Tensor.reshape (sliceTyped mlp 2 1 1) #[batch, seq, mlp_hidden]
+  let gate := Tensor.reshape (Tensor.slice mlp 2 0 1) #[batch, seq, mlp_hidden]
+  let up := Tensor.reshape (Tensor.slice mlp 2 1 1) #[batch, seq, mlp_hidden]
   let mlp_out := Tensor.mul (Tensor.silu gate) up
 
   -- Concatenate attention and MLP outputs
-  let combined : Tensor { dtype := dtype, device := device, shape := #[batch, seq, num_heads * head_dim + mlp_hidden] } := qwen35.typedCat attn mlp_out 2  -- [batch, seq, hidden + mlp_hidden]
+  let combined : Tensor { dtype := dtype, device := device, shape := #[batch, seq, num_heads * (2 * half) + mlp_hidden] } := Tensor.cat attn mlp_out 2  -- [batch, seq, hidden + mlp_hidden]
 
   -- Final projection
   let out := Tensor.linear3d combined block.linear2  -- [batch, seq, hidden_size]
 
   -- Apply gate and residual
-  let mod_gate := Tensor.unsqueeze mod_gate 1
-  let mod_gate := Tensor.expand mod_gate #[batch, seq, hidden_size]
+  let mod_gate := expandOverSeq seq mod_gate
   Tensor.add x (Tensor.mul mod_gate out)
 
 end SingleStreamBlock

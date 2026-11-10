@@ -18,27 +18,19 @@ private def tinyDenseCfg : Config := {
   num_key_value_heads := 2
   head_dim := 8
   rope_theta := 10000.0
-  partial_rotary_factor := 1.0
+  half_rotary_dim := 4
   rms_norm_eps := 1e-6
-  max_position_embeddings := 128
-  attention_bias := false
-  attention_dropout := 0.0
-  hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 4
   linear_value_head_dim := 4
   linear_num_key_heads := 2
   linear_num_value_heads := 4
   layer_types := #[.linearAttention, .fullAttention, .linearAttention]
-  full_attention_interval := 2
   moe_intermediate_size := 16
   shared_expert_intermediate_size := 16
   num_experts_per_tok := 2
   num_experts := 0
-  use_cache := true
   tie_word_embeddings := false
-  pad_token_id := some 0
-  bos_token_id := some 1
   eos_token_id := some 2
 }
 
@@ -49,6 +41,7 @@ private def tinyMoeCfg : Config := {
   shared_expert_intermediate_size := 16
   num_experts_per_tok := 2
   num_experts := 4
+  expertsValid := by decide
 }
 
 private def tinyBatchedEosCfg : Config := {
@@ -60,27 +53,19 @@ private def tinyBatchedEosCfg : Config := {
   num_key_value_heads := 1
   head_dim := 4
   rope_theta := 10000.0
-  partial_rotary_factor := 1.0
+  half_rotary_dim := 2
   rms_norm_eps := 1e-6
-  max_position_embeddings := 16
-  attention_bias := false
-  attention_dropout := 0.0
-  hidden_act := "silu"
   linear_conv_kernel_dim := 1
   linear_key_head_dim := 1
   linear_value_head_dim := 1
   linear_num_key_heads := 1
   linear_num_value_heads := 1
   layer_types := #[]
-  full_attention_interval := 1
   moe_intermediate_size := 4
   shared_expert_intermediate_size := 4
   num_experts_per_tok := 1
   num_experts := 0
-  use_cache := true
   tie_word_embeddings := false
-  pad_token_id := some 0
-  bos_token_id := some 1
   eos_token_id := some 2
 }
 
@@ -93,27 +78,19 @@ private def tinyAttentionCfg : Config := {
   num_key_value_heads := 2
   head_dim := 2
   rope_theta := 10000.0
-  partial_rotary_factor := 1.0
+  half_rotary_dim := 1
   rms_norm_eps := 1e-6
-  max_position_embeddings := 16
-  attention_bias := false
-  attention_dropout := 0.0
-  hidden_act := "silu"
   linear_conv_kernel_dim := 1
   linear_key_head_dim := 1
   linear_value_head_dim := 1
   linear_num_key_heads := 1
   linear_num_value_heads := 1
   layer_types := #[.fullAttention]
-  full_attention_interval := 1
   moe_intermediate_size := 4
   shared_expert_intermediate_size := 4
   num_experts_per_tok := 1
   num_experts := 0
-  use_cache := true
   tie_word_embeddings := false
-  pad_token_id := some 0
-  bos_token_id := some 1
   eos_token_id := some 2
 }
 
@@ -146,7 +123,7 @@ private def rowTokenIds {seq : Nat}
     (tokens : Tensor { shape := #[2, seq], dtype := .Int64, device := .CPU })
     (row : Nat)
     : IO (Array UInt64) := do
-  let row2d : Tensor { shape := #[1, seq], dtype := .Int64, device := .CPU } := typedSlice tokens 0 row 1
+  let row2d : Tensor { shape := #[1, seq], dtype := .Int64, device := .CPU } := Tensor.slice! tokens 0 row 1
   let flat : Tensor { shape := #[seq], dtype := .Int64, device := .CPU } := Tensor.reshape (id row2d) #[seq]
   Tensor.toUInt64Array flat
 
@@ -157,6 +134,17 @@ def testQwen35DenseInitAndForward : IO Unit := do
   let logits := model.forward tinyDenseCfg ids
   LeanTest.assertEqual logits.runtimeShape #[1, 5, tinyDenseCfg.vocab_size]
     "dense forward should return [batch, seq, vocab]"
+
+@[test]
+def testQwen35GreedyCachedEmptyPromptThrows : IO Unit := do
+  let model ← Qwen35ForCausalLM.init tinyDenseCfg
+  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let rejected ←
+    try
+      let _ ← model.generateGreedy tinyDenseCfg ids 1 #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generate should reject an empty prompt before sizing its cache"
 
 @[test]
 def testQwen35DenseGreedyCachedUncachedParity : IO Unit := do
@@ -218,7 +206,7 @@ def testQwen35AttentionUsesPerHeadQGateLayout : IO Unit := do
   }
   let x : Tensor { shape := #[1, 1, cfg.hidden_size], device := .CPU, dtype := .Float32 } :=
     Tensor.reshape (floatArrayDynamic #[1.0, 2.0, 3.0, 4.0]) #[1, 1, cfg.hidden_size]
-  let (cos, sin) := Tensor.rotaryFreqs 1 (Config.rotaryDim cfg) cfg.rope_theta x.device
+  let (cos, sin) := Tensor.rotaryFreqs 1 (Config.rotaryHalfDim cfg) cfg.rope_theta x.device
   let out : Tensor { shape := #[1, 1, cfg.hidden_size], device := .CPU, dtype := .Float32 } := attn.forward cfg x cos sin true
   let vals ← Tensor.toFloatArray (id out)
   LeanTest.assertTrue (approxEq vals[0]! (1.0 / (1.0 + Float.exp (-10.0))) 1e-4)
@@ -320,6 +308,7 @@ def testQwen35BFloat16ExpertsFloat32Routing : IO Unit := do
     num_experts := 2
     num_experts_per_tok := 2
     moe_intermediate_size := 1
+    expertsValid := by decide
   }
   -- Both experts compute SiLU(1). Float32 routing weights sum to one,
   -- so weighting must preserve that value rather than sum unweighted experts.
@@ -341,7 +330,7 @@ def testQwen35BFloat16IntegerPaddingMask : IO Unit := do
   let net ← Qwen35GatedDeltaNet.init tinyDenseCfg (dtype := .BFloat16)
   let hidden := (Tensor.ones #[2, 2, tinyDenseCfg.hidden_size]).toBFloat16
   let mask := (Tensor.fromInt64Array #[1, 0, 0, 1]).reshape #[2, 2]
-  let expanded := Tensor.expand (mask.reshape #[2, 2, 1]) #[2, 2, tinyDenseCfg.hidden_size]
+  let expanded := Tensor.broadcastTo (mask.reshape #[2, 2, 1]) #[2, 2, tinyDenseCfg.hidden_size]
   let masked := Tensor.mul hidden expanded
   let (expected, _, _) := net.forward tinyDenseCfg masked
   let (actual, _, _) := net.forward tinyDenseCfg hidden (some mask)
@@ -362,8 +351,7 @@ def testQwen35ConfigLoad : IO Unit := do
     "\"head_dim\":8,\"linear_num_key_heads\":3,\"linear_num_value_heads\":6," ++
     "\"linear_key_head_dim\":4,\"linear_value_head_dim\":4," ++
     "\"attn_output_gate\":true,\"mamba_ssm_dtype\":\"float32\"," ++
-    "\"mlp_only_layers\":[1,3]," ++
-    "\"moe_intermediate_size\":12,\"shared_expert_intermediate_size\":24," ++
+        "\"moe_intermediate_size\":12,\"shared_expert_intermediate_size\":24," ++
     "\"num_experts\":8,\"num_experts_per_tok\":2," ++
     "\"layer_types\":[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"]," ++
     "\"rope_parameters\":{\"rope_theta\":500000.0,\"partial_rotary_factor\":0.5," ++
@@ -377,20 +365,13 @@ def testQwen35ConfigLoad : IO Unit := do
   LeanTest.assertEqual cfg.num_experts 8 "num_experts should load"
   LeanTest.assertEqual cfg.layer_types.size 4 "layer_types should parse"
   LeanTest.assertEqual cfg.rope_theta 500000.0 "rope theta should load from rope_parameters"
-  LeanTest.assertEqual cfg.attn_output_gate true "attention output gate flag should load"
-  LeanTest.assertEqual cfg.mamba_ssm_dtype "float32" "mamba ssm dtype should load"
-  LeanTest.assertEqual cfg.mlp_only_layers #[1, 3] "mlp-only layers should load"
-  LeanTest.assertEqual cfg.mrope_interleaved true "mrope interleaving flag should load"
-  LeanTest.assertEqual cfg.mrope_section #[2, 2, 2] "mrope section should load"
-  LeanTest.assertEqual cfg.mtp_num_hidden_layers 1 "mtp hidden layer count should load"
-  LeanTest.assertEqual cfg.mtp_use_dedicated_embeddings false "mtp embedding flag should load"
 
 @[test]
 def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
   let path := "/tmp/qwen35_config_test_nested.json"
   let json :=
     "{\"tie_word_embeddings\":true,\"text_config\":{" ++
-    "\"vocab_size\":32000,\"hidden_size\":64,\"intermediate_size\":128," ++
+    "\"vocab_size\":152000,\"hidden_size\":64,\"intermediate_size\":128," ++
     "\"num_hidden_layers\":6,\"num_attention_heads\":8,\"num_key_value_heads\":2," ++
     "\"head_dim\":8,\"linear_num_key_heads\":4,\"linear_num_value_heads\":8," ++
     "\"linear_key_head_dim\":4,\"linear_value_head_dim\":4," ++
@@ -404,24 +385,19 @@ def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
   IO.FS.writeFile path json
 
   let cfg ← Config.loadFromFile path
-  LeanTest.assertEqual cfg.vocab_size 32000 "nested text_config vocab_size should load"
+  LeanTest.assertEqual cfg.vocab_size 152000 "nested text_config vocab_size should load"
   LeanTest.assertEqual cfg.hidden_size 64 "nested text_config hidden_size should load"
   LeanTest.assertEqual cfg.tie_word_embeddings true "tie_word_embeddings should load from top level"
   LeanTest.assertEqual cfg.num_experts 16 "nested text_config num_experts should load"
   LeanTest.assertEqual cfg.eos_token_id (some 151645) "nested text_config eos token should load"
-  LeanTest.assertEqual cfg.attn_output_gate true "nested text_config attention gate should load"
-  LeanTest.assertEqual cfg.mrope_interleaved true "nested mrope interleaving flag should load"
-  LeanTest.assertEqual cfg.mrope_section #[11, 11, 10] "nested mrope section should load"
-  LeanTest.assertEqual cfg.mtp_num_hidden_layers 1 "nested mtp hidden layer count should load"
-  LeanTest.assertEqual cfg.mtp_use_dedicated_embeddings false "nested mtp embedding flag should load"
 
 @[test] def testQwen35BFloat16HybridCache : IO Unit := do
   let model ← Qwen35ForCausalLM.init tinyDenseCfg false (dtype := .BFloat16)
   let ids := (Tensor.fromInt64Array #[1, 2, 3, 4]).reshape #[1, 4]
   let embeds := model.embedTokens ids
-  let (cos, sin) := Tensor.rotaryFreqs 4 (Config.rotaryDim tinyDenseCfg) tinyDenseCfg.rope_theta
+  let (cos, sin) := Tensor.rotaryFreqs 4 (Config.rotaryHalfDim tinyDenseCfg) tinyDenseCfg.rope_theta
   let cache := Qwen35Model.initCache tinyDenseCfg model.model 8 .CPU
-  let (hidden, cache) ← Qwen35Model.forwardWithCache tinyDenseCfg model.model embeds cos sin cache
+  let (hidden, cache) ← Qwen35Model.forwardWithCache tinyDenseCfg model.model embeds cos sin cache (by decide)
   LeanTest.assertEqual hidden.actualSpec.dtype DType.BFloat16
   LeanTest.assertTrue ((← hidden.toFloatArray).all Float.isFinite)
   for state in cache.recurrentStates do
@@ -440,7 +416,7 @@ private def qwen35CheckpointEntries (cfg : Config) (optionalWeights : Bool) : Ar
     let p := s!"model.layers.{i}."
     let mut localEntries := #[ ("input_layernorm.weight", #[cfg.hidden_size]),
       ("post_attention_layernorm.weight", #[cfg.hidden_size]) ]
-    match (Config.normalizedLayerTypes cfg).getD i .linearAttention with
+    match cfg.layer_types.getD i .linearAttention with
     | .fullAttention =>
       localEntries := localEntries ++ #[
         ("self_attn.q_proj.weight", #[cfg.num_attention_heads * cfg.head_dim * 2, cfg.hidden_size]),
@@ -516,8 +492,7 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
         for optionalWeights in #[false, true] do
           IO.FS.withTempDir fun dir => do
             writeQwen35Fixture dir cfg bf16 sharded optionalWeights
-            let model ← if sharded then Qwen35ForCausalLM.loadSharded dir.toString cfg
-              else Qwen35ForCausalLM.load (dir / "model.safetensors").toString cfg
+            let model ← Qwen35ForCausalLM.load (if sharded then dir.toString else (dir / "model.safetensors").toString) cfg
             let selectedDType := model.1
             let model := TensorStruct.detach model.2
             let support ← selectedDType.val.acquireConstantSupport .CPU
@@ -527,9 +502,10 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
             LeanTest.assertEqual model.model.embed_tokens.actualSpec.dtype dtype
             LeanTest.assertEqual model.lmHead.actualSpec.dtype dtype
             LeanTest.assertEqual model.tieWordEmbeddings (!optionalWeights)
-            for layer in model.model.layers do
-              if let some linear := layer.linear_attn then
-                LeanTest.assertEqual linear.conv1d_bias.actualSpec.dtype dtype
+            model.model.layers.foldlM (fun _ i layer =>
+              match cfg.isFullAttentionLayer i, layer.mixer with
+              | false, .linear linear => LeanTest.assertEqual linear.conv1d_bias.actualSpec.dtype dtype
+              | true, .full _ => pure ()) ()
             let ids := (Tensor.fromInt64Array #[1, 2, 3]).reshape #[1, 3]
             let logits := model.forward cfg ids
             LeanTest.assertEqual logits.actualSpec.dtype dtype
@@ -544,8 +520,7 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
     IO.FS.withTempDir fun dir => do
       writeQwen35Fixture dir tinyDenseCfg true sharded true
         (some ("model.norm.weight", false))
-      let ⟨dtype, model⟩ ← if sharded then Qwen35ForCausalLM.loadSharded dir.toString tinyDenseCfg
-        else Qwen35ForCausalLM.load (dir / "model.safetensors").toString tinyDenseCfg
+      let ⟨dtype, model⟩ ← Qwen35ForCausalLM.load (if sharded then dir.toString else (dir / "model.safetensors").toString) tinyDenseCfg
       let support ← dtype.val.acquireConstantSupport .CPU
       let _ := support.down
       LeanTest.assertEqual dtype.val DType.BFloat16
@@ -563,8 +538,7 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
       writeQwen35Fixture dir tinyDenseCfg true sharded true
         (some ("model.layers.1.self_attn.q_proj.weight", false))
       Tests.assertThrows (do
-        if sharded then discard <| Qwen35ForCausalLM.loadSharded dir.toString tinyDenseCfg
-        else discard <| Qwen35ForCausalLM.load (dir / "model.safetensors").toString tinyDenseCfg)
+        discard <| Qwen35ForCausalLM.load (if sharded then dir.toString else (dir / "model.safetensors").toString) tinyDenseCfg)
         (some "Expected dtype")
 
 @[test] def testQwen35LoaderRejectsMalformedOptionalWeights : IO Unit := do
@@ -577,6 +551,5 @@ private def writeQwen35Fixture (dir : System.FilePath) (cfg : Config)
           (if isScale then none else some name)
           (if isScale then #[(name, #[1])] else #[])
         Tests.assertThrows (do
-          if sharded then discard <| Qwen35ForCausalLM.loadSharded dir.toString tinyDenseCfg
-          else discard <| Qwen35ForCausalLM.load (dir / "model.safetensors").toString tinyDenseCfg)
+          discard <| Qwen35ForCausalLM.load (if sharded then dir.toString else (dir / "model.safetensors").toString) tinyDenseCfg)
           (some "shape")

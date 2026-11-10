@@ -8,7 +8,7 @@
   - Final speech-probability head
 -/
 import Tyr.Typed
-import Tyr.SafeTensors.Exact
+import Tyr.SafeTensors.Source
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -34,13 +34,13 @@ local macro "vad_sizes" : tactic =>
 private def addBias2d {n d : Nat}
     (x : Tensor { device := device, shape := #[n, d], dtype := .Float32 }) (b : Tensor { device := device, shape := #[d], dtype := .Float32 })
     : Tensor { device := device, shape := #[n, d], dtype := .Float32 } :=
-  x + (b.reshape #[1, d]).expand #[n, d]
+  x + (b.reshape #[1, d]).broadcastTo #[n, d]
 
 private def addBias3d {batch channels frames : Nat}
     (x : Tensor { device := device, shape := #[batch, channels, frames], dtype := .Float32 })
     (b : Tensor { device := device, shape := #[channels], dtype := .Float32 })
     : Tensor { device := device, shape := #[batch, channels, frames], dtype := .Float32 } :=
-  x + (b.reshape #[1, channels, 1]).expand #[batch, channels, frames]
+  x + (b.reshape #[1, channels, 1]).broadcastTo #[batch, channels, frames]
 
 private def linear2d {batch inDim outDim : Nat}
     (x : Tensor { device := device, shape := #[batch, inDim], dtype := .Float32 })
@@ -50,10 +50,10 @@ private def linear2d {batch inDim outDim : Nat}
 
 private def loadWeight (path name : String) (shape : Shape) (device : Device := .CPU) : IO (Tensor { device := device, shape := shape, dtype := .Float32 }) := do
   try
-    let stored ← safetensors.loadTensorExact path name shape device
+    let stored ← (← safetensors.Source.open path).load name shape device
     -- The checkpoint retains its exact dtype until this model's explicit
     -- Float32 inference policy is applied through the checked conversion.
-    IO.ofExcept (stored.2.castDType? .Float32)
+    pure (stored.2.castDType .Float32)
   catch error =>
     throw <| IO.userError s!"SileroVAD tensor '{name}': {error}"
 

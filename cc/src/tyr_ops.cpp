@@ -13,7 +13,7 @@
 #include <torch/torch.h>
 #include <ATen/ATen.h>
 #include "tyr_attention.h"
-#include "tyr_checked_result.h"
+#include "tyr_try_result.h"
 
 #ifndef TYR_OPS_HAS_CUDA_TOOLKIT
 #define TYR_OPS_HAS_CUDA_TOOLKIT 0
@@ -800,17 +800,15 @@ static torch::Tensor flashAttentionFromLean(
 extern "C" LEAN_EXPORT lean_object* lean_torch_tyr_flash_attn_4d(
     b_lean_obj_arg query, b_lean_obj_arg key, b_lean_obj_arg value,
     lean_obj_arg attn_mask, uint8_t is_causal, lean_obj_arg scale, uint8_t enable_gqa) {
-  return tyr::checkedCall("flashAttention", [&] {
-    return fromTorchTensor(flashAttentionFromLean(
-        query, key, value, attn_mask, 0.0, is_causal, scale, enable_gqa));
-  });
+  return fromTorchTensor(flashAttentionFromLean(
+      query, key, value, attn_mask, 0.0, is_causal, scale, enable_gqa));
 }
 
 extern "C" LEAN_EXPORT lean_object* lean_torch_tyr_flash_attn_4d_io(
     b_lean_obj_arg query, b_lean_obj_arg key, b_lean_obj_arg value,
     lean_obj_arg attn_mask, double dropout_p, uint8_t is_causal,
     lean_obj_arg scale, uint8_t enable_gqa) {
-  return tyr::checkedIoCall("flashAttentionIO", [&] {
+  return tyr::ioCall("flashAttentionIO", [&] {
     return lean_io_result_mk_ok(fromTorchTensor(flashAttentionFromLean(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa)));
   });

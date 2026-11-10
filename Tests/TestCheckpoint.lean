@@ -43,8 +43,7 @@ def testCheckpointCreation : IO Unit := do
     vocabSize := 128
     nLayer := 2
     nHead := 2
-    headDim := 16
-    modelDim := 32
+    halfHeadDim := 8
     maxSeqLen := 64
     blockSize := 32
     numValueEmbeds := 1
@@ -107,7 +106,7 @@ def testDistAdamCheckpointing : IO Unit := do
 
   -- Verify map works
   let stateOnes := FloatingTensorStruct.map (fun t => Tensor.addScalar t 1.0) state
-  let sumOnes := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item (Tensor.sumAll t)) 0.0 stateOnes
+  let sumOnes := TensorStruct.fold (fun {_s} t acc => acc + Tensor.item! (Tensor.sumAll t)) 0.0 stateOnes
   LeanTest.assertEqual sumOnes 200.0 "Mapped state should sum to 200"
 
 @[test]

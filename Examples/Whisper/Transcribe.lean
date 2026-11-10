@@ -1,6 +1,7 @@
 import Tyr.Model.Whisper
 
 open torch.whisper
+open torch (TopK PosNat)
 
 namespace Examples.Whisper
 
@@ -8,26 +9,26 @@ structure Args where
   modelDir : String := "weights/whisper-base.en"
   wavPath : String := "MLKDream.wav"
   language : String := "en"
-  maxNewTokens : UInt64 := 0
+  maxNewTokens : Option Nat := none
   noTimestamps : Bool := true
-  beamSize : UInt64 := 1
-  bestOf : UInt64 := 1
+  beamSize : Nat := 1
+  bestOf : Nat := 1
   temperature : Float := 0.0
   temperatureInc : Float := 0.2
   noFallback : Bool := true
-  topK : UInt64 := 0
+  topK : TopK := none
   topP : Float := 1.0
   logprobThreshold : Float := -1.0
   noSpeechThreshold : Float := 0.6
   compressionRatioThreshold : Float := 2.4
   noContext : Bool := false
-  maxContextTokens : UInt64 := 0
+  maxContextTokens : Option Nat := none
   chunkOverlapSec : Float := 2.0
   deriving Inhabited
 
-private def parseNatArg (name : String) (v : String) : IO UInt64 := do
+private def parseNatArg (name : String) (v : String) : IO Nat := do
   match v.toNat? with
-  | some n => pure n.toUInt64
+  | some n => pure n
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
 private def parseFloatLit? (s : String) : Option Float :=
@@ -47,21 +48,35 @@ private def parseFloatArg (name : String) (v : String) : IO Float := do
   | some x => pure x
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
-private def toDecodeOptions (args : Args) : WhisperDecodeOptions := {
-  beamSize := args.beamSize
-  bestOf := args.bestOf
-  temperature := args.temperature
-  temperatureInc := args.temperatureInc
-  topK := args.topK.toNat
-  topP := args.topP
-  logprobThreshold := args.logprobThreshold
-  noSpeechThreshold := args.noSpeechThreshold
-  compressionRatioThreshold := args.compressionRatioThreshold
-  conditionOnPreviousText := !args.noContext
-  maxContextTokens := args.maxContextTokens
-  chunkOverlapSeconds := args.chunkOverlapSec
-  noFallback := args.noFallback
-}
+private def requirePositive (flag : String) (n : Nat) : IO (PLift (0 < n)) :=
+  if h : 0 < n then pure ⟨h⟩ else throw <| IO.userError s!"{flag} must be positive"
+
+private def requirePositive? (flag : String) (o : Option Nat) : IO (PLift (∀ n ∈ o, 0 < n)) :=
+  if h : ∀ n ∈ o, 0 < n then pure ⟨h⟩ else throw <| IO.userError s!"{flag} must be positive"
+
+private def toDecodeOptions (args : Args) : IO WhisperDecodeOptions := do
+  let ⟨hBeam⟩ ← requirePositive "--beam-size" args.beamSize
+  let ⟨hBestOf⟩ ← requirePositive "--best-of" args.bestOf
+  let ⟨hMaxNew⟩ ← requirePositive? "--max-new-tokens" args.maxNewTokens
+  pure {
+    beamSize := args.beamSize
+    beamSizePos := hBeam
+    bestOf := args.bestOf
+    bestOfPos := hBestOf
+    temperature := args.temperature
+    temperatureInc := args.temperatureInc
+    topK := args.topK
+    topP := args.topP
+    logprobThreshold := args.logprobThreshold
+    noSpeechThreshold := args.noSpeechThreshold
+    compressionRatioThreshold := args.compressionRatioThreshold
+    conditionOnPreviousText := !args.noContext
+    maxContextTokens := args.maxContextTokens
+    maxNewTokens := args.maxNewTokens
+    maxNewTokensPos := hMaxNew
+    chunkOverlapSeconds := args.chunkOverlapSec
+    noFallback := args.noFallback
+  }
 
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
   match xs with
@@ -75,7 +90,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
   | "--language" :: v :: rest =>
       parseArgsLoop rest { acc with language := v }
   | "--max-new-tokens" :: v :: rest =>
-      parseArgsLoop rest { acc with maxNewTokens := (← parseNatArg "--max-new-tokens" v) }
+      parseArgsLoop rest { acc with maxNewTokens := some (← parseNatArg "--max-new-tokens" v) }
   | "--beam-size" :: v :: rest =>
       parseArgsLoop rest { acc with beamSize := (← parseNatArg "--beam-size" v) }
   | "--best-of" :: v :: rest =>
@@ -89,7 +104,9 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
   | "--fallback" :: rest =>
       parseArgsLoop rest { acc with noFallback := false }
   | "--top-k" :: v :: rest =>
-      parseArgsLoop rest { acc with topK := (← parseNatArg "--top-k" v) }
+      match PosNat.parseOrNone? v with
+      | some topK => parseArgsLoop rest { acc with topK }
+      | none => throw <| IO.userError s!"Invalid --top-k: {v} (expected a positive count or none)"
   | "--top-p" :: v :: rest =>
       parseArgsLoop rest { acc with topP := (← parseFloatArg "--top-p" v) }
   | "--logprob-thold" :: v :: rest =>
@@ -101,7 +118,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
   | "--no-context" :: rest =>
       parseArgsLoop rest { acc with noContext := true }
   | "--max-context" :: v :: rest =>
-      parseArgsLoop rest { acc with maxContextTokens := (← parseNatArg "--max-context" v) }
+      parseArgsLoop rest { acc with maxContextTokens := some (← parseNatArg "--max-context" v) }
   | "--chunk-overlap-sec" :: v :: rest =>
       parseArgsLoop rest { acc with chunkOverlapSec := (← parseFloatArg "--chunk-overlap-sec" v) }
   | "--no-timestamps" :: rest =>
@@ -114,14 +131,14 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --source <path>          Alias for --model-dir"
       IO.println "  --wav-path <path>        WAV file path"
       IO.println "  --language <code>        Language code/name (default: en)"
-      IO.println "  --max-new-tokens <n>     Max generated decoder tokens (default: 0 = model max)"
+      IO.println "  --max-new-tokens <n>     Max generated decoder tokens (default: model max)"
       IO.println "  --beam-size <n>          Beam size at temperature=0 (default: 1)"
       IO.println "  --best-of <n>            Best-of samples at temperature>0 (default: 1)"
       IO.println "  --temperature <x>        Initial decoding temperature (default: 0.0)"
       IO.println "  --temperature-inc <x>    Temperature fallback increment (default: 0.2)"
       IO.println "  --no-fallback            Disable temperature fallback retries (default: true)"
       IO.println "  --fallback               Enable temperature fallback retries"
-      IO.println "  --top-k <n>              Top-k filter for stochastic passes (default: 0 = disabled)"
+      IO.println "  --top-k <n>              Top-k filter for stochastic passes (default: disabled)"
       IO.println "  --top-p <x>              Top-p filter for stochastic passes (default: 1.0)"
       IO.println "  --logprob-thold <x>      Avg logprob fallback threshold (default: -1.0)"
       IO.println "  --no-speech-thold <x>    No-speech probability threshold (default: 0.6)"
@@ -141,6 +158,7 @@ private def parseArgs (xs : List String) : IO Args :=
 def runMain (argv : List String) : IO UInt32 := do
   let args ← parseArgs argv
   if argv.contains "--help" then return 0
+  let decodeOpts ← toDecodeOptions args
   let bundle ← loadFromPretrainedDir args.modelDir
   let out ←
     transcribeWav
@@ -150,9 +168,8 @@ def runMain (argv : List String) : IO UInt32 := do
       bundle.melBinsMatch
       args.wavPath
       args.language
-      args.maxNewTokens
       args.noTimestamps
-      (toDecodeOptions args)
+      decodeOpts
   IO.println s!"LANG={out.language}"
   IO.println "TEXT_BEGIN"
   IO.println out.text

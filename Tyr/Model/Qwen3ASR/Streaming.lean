@@ -141,6 +141,12 @@ private def dropChars (s : String) (n : Nat) : String :=
 private def minU64 (a b : Nat) : Nat :=
   if a <= b then a else b
 
+private theorem minU64_le_left (a b : Nat) : minU64 a b ≤ a := by
+  unfold minU64; split <;> omega
+
+private theorem minU64_le_right (a b : Nat) : minU64 a b ≤ b := by
+  unfold minU64; split <;> omega
+
 private def appendRepeatedTokenId (ids : Array UInt32) (tokId : UInt32) (n : Nat) : Array UInt32 :=
   Id.run do
     let mut out := ids
@@ -292,7 +298,7 @@ private def buildInputIdsWithPromptDeviceCache
     if seqFromPrompt == 0 then
       throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
     let dynParts := parts.map (fun p => p.2.packShape)
-    let ids1d := Tensor.catManyChecked dynParts 0 #[seqFromPrompt]
+    let ids1d := Tensor.catMany! dynParts 0 #[seqFromPrompt]
     let inputIds : Tensor { device := device, shape := #[1, seqFromPrompt], dtype := .Int64 } := Tensor.reshape ids1d #[1, seqFromPrompt]
     pure (⟨seqFromPrompt, inputIds⟩, some devCache)
   | none =>
@@ -378,7 +384,6 @@ private def buildStreamingFrontendPackWithCache
     decodeMode == .fullAccumulation &&
     preprocessor.doNormalize == false &&
     preprocessor.dither == 0.0 &&
-    (if preprocessor.hopLength == 0 then (160 : Nat) else preprocessor.hopLength) > 0 &&
     audio16k.size > 0
 
   if !canTryIncremental then
@@ -390,8 +395,8 @@ private def buildStreamingFrontendPackWithCache
       if audio16k.size <= fc.audioSamples then
         fullFallback
       else
-        let hopNat := (if preprocessor.hopLength == 0 then (160 : Nat) else preprocessor.hopLength)
-        let nFftNat := (if preprocessor.nFft == 0 then (400 : Nat) else preprocessor.nFft)
+        let hopNat := preprocessor.hopLength
+        let nFftNat := preprocessor.nFft
         let halfWindow := nFftNat / 2
         let contextFrames := ceilDivNat halfWindow hopNat + 1
         let prevFramesNat := fc.frames
@@ -420,7 +425,7 @@ private def buildStreamingFrontendPackWithCache
               (device := device)
           let suffixFrames := suffixPack.1
           let dropFrames := dropFramesNat
-          if dropFrames > suffixFrames then
+          if hDrop : dropFrames > suffixFrames then
             fullFallback
           else
             let prevFeatures : Tensor { device := device, shape := #[1, preprocessor.featureSize, fc.frames], dtype := .Float32 } :=
@@ -429,14 +434,16 @@ private def buildStreamingFrontendPackWithCache
               Tensor.reshape fc.featureAttentionMaskDyn #[1, fc.frames]
             let prefixFrames := replaceStartFrameNat
             let prefixFeatures : Tensor { device := device, shape := #[1, preprocessor.featureSize, prefixFrames], dtype := .Float32 } :=
-              Tensor.sliceChecked prevFeatures 2 0 prefixFrames #[1, preprocessor.featureSize, prefixFrames]
+              Tensor.slice prevFeatures 2 0 prefixFrames
+                (_bounds := by simp only [prefixFrames, replaceStartFrameNat, prevFramesNat]; split <;> simp <;> omega)
             let prefixMask : Tensor { device := device, shape := #[1, prefixFrames], dtype := .Int64 } :=
-              Tensor.sliceChecked prevMask 1 0 prefixFrames #[1, prefixFrames]
+              Tensor.slice prevMask 1 0 prefixFrames
+                (_bounds := by simp only [prefixFrames, replaceStartFrameNat, prevFramesNat]; split <;> simp <;> omega)
             let suffixKeepFrames := suffixFrames - dropFrames
             let suffixFeatures : Tensor { device := device, shape := #[1, preprocessor.featureSize, suffixKeepFrames], dtype := .Float32 } :=
-              Tensor.sliceChecked suffixPack.2.inputFeatures 2 dropFrames suffixKeepFrames #[1, preprocessor.featureSize, suffixKeepFrames]
+              Tensor.slice suffixPack.2.inputFeatures 2 dropFrames suffixKeepFrames
             let suffixMask : Tensor { device := device, shape := #[1, suffixKeepFrames], dtype := .Int64 } :=
-              Tensor.sliceChecked suffixPack.2.featureAttentionMask 1 dropFrames suffixKeepFrames #[1, suffixKeepFrames]
+              Tensor.slice suffixPack.2.featureAttentionMask 1 dropFrames suffixKeepFrames
             let mergedFrames := prefixFrames + suffixKeepFrames
             let mergedFeaturesDyn := Tensor.cat prefixFeatures suffixFeatures 2
             let mergedMaskDyn := Tensor.cat prefixMask suffixMask 1
@@ -849,7 +856,7 @@ def decodeStreamingChunkWithModelStateCached
     (audio16k : Array Float)
     (cache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (String × Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg)) := do
   if audio16k.isEmpty then
     pure ("", cache)
@@ -870,6 +877,8 @@ def decodeStreamingChunkWithModelStateCached
       let frontendOut := frontendPack.2
       let validFramesTensor := Tensor.sumAll frontendOut.featureAttentionMask
       let validFrames := (Tensor.itemInt validFramesTensor).toInt.toNat
+      let ⟨hValid⟩ ← if h : validFrames ≤ frames then pure (PLift.up h) else
+        throw <| IO.userError s!"feature attention mask counts {validFrames} valid frames of {frames}"
       let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
       let audioLenCap :=
         AudioEncoderConfig.framesAfterConv3
@@ -885,7 +894,7 @@ def decodeStreamingChunkWithModelStateCached
           basePrompt
           prompt
           audioLen
-          cfg.thinkerConfig.audioTokenId.toUInt32
+          cfg.thinkerConfig.audioTokenId
           cache0.promptTokenCache
 
       let (inputIdsPack, promptDeviceCache') ←
@@ -894,7 +903,7 @@ def decodeStreamingChunkWithModelStateCached
           promptTokenCache'
           cache0.promptDeviceCache
           audioLen
-          cfg.thinkerConfig.audioTokenId.toUInt32
+          cfg.thinkerConfig.audioTokenId
       let seq := inputIdsPack.1
       let inputIds := inputIdsPack.2
       let mkFrontendCacheWithDev
@@ -926,14 +935,14 @@ def decodeStreamingChunkWithModelStateCached
                 let prevMaskDev : Tensor { device := device, shape := #[1, prevCache.frames], dtype := .Int64 } :=
                   Tensor.reshape prevMaskDyn #[1, prevCache.frames]
                 let prefixFeatDev : Tensor { device := device, shape := #[1, preprocessor.featureSize, prefixFrames], dtype := .Float32 } :=
-                  Tensor.sliceChecked prevFeatDev 2 0 prefixFrames #[1, preprocessor.featureSize, prefixFrames]
+                  Tensor.slice prevFeatDev 2 0 prefixFrames
                 let prefixMaskDev : Tensor { device := device, shape := #[1, prefixFrames], dtype := .Int64 } :=
-                  Tensor.sliceChecked prevMaskDev 1 0 prefixFrames #[1, prefixFrames]
+                  Tensor.slice prevMaskDev 1 0 prefixFrames
                 let suffixFrames := frames - prefixFrames
                 let suffixFeatCpu : Tensor { device := device, shape := #[1, preprocessor.featureSize, suffixFrames], dtype := .Float32 } :=
-                  Tensor.sliceChecked frontendOut.inputFeatures 2 prefixFrames suffixFrames #[1, preprocessor.featureSize, suffixFrames]
+                  Tensor.slice frontendOut.inputFeatures 2 prefixFrames suffixFrames
                 let suffixMaskCpu : Tensor { device := device, shape := #[1, suffixFrames], dtype := .Int64 } :=
-                  Tensor.sliceChecked frontendOut.featureAttentionMask 1 prefixFrames suffixFrames #[1, suffixFrames]
+                  Tensor.slice frontendOut.featureAttentionMask 1 prefixFrames suffixFrames
                 let suffixFeatDev : Tensor { device := device, shape := #[1, preprocessor.featureSize, suffixFrames], dtype := .Float32 } := suffixFeatCpu.to dev
                 let suffixMaskDev : Tensor { device := device, shape := #[1, suffixFrames], dtype := .Int64 } := suffixMaskCpu.to dev
                 let mergedFeatDyn := Tensor.cat prefixFeatDev suffixFeatDev 2
@@ -961,14 +970,13 @@ def decodeStreamingChunkWithModelStateCached
         | some ac =>
           let canReuse :=
             decodeMode == .fullAccumulation &&
-            fullStepFeature > 0 &&
             ac.validFeatureLen <= validFrames
           if !canReuse then
             let audioRaw : Tensor { dtype := dtype, device := device, shape := #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] } :=
               model.thinker.encodeAudioVarLen ((Tensor.reshape inputFeaturesDev #[1, cfg.thinkerConfig.audioConfig.numMelBins, frames] (by simp [hMel]))) #[validFrames]
             let audioProj : Tensor { dtype := dtype, device := device, shape := #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] } :=
               model.thinker.projectAudio audioRaw
-            let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.sliceChecked audioProj 1 0 audioLen #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+            let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.slice audioProj 1 0 audioLen (_bounds := by simpa [audioLen] using minU64_le_right audioLenRaw audioLenCap)
             let nextAudioCache :=
               if decodeMode == .fullAccumulation then
                 some {
@@ -992,14 +1000,15 @@ def decodeStreamingChunkWithModelStateCached
             let reuseAudioLen := minU64 (minU64 reuseAudioLenRaw ac.validAudioLen) audioLen
             let prevAudio : Tensor { dtype := dtype, device := device, shape := #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
               Tensor.reshape ac.audioEmbedsValidDyn #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-            let prefixAudio : Tensor { dtype := dtype, device := device, shape := #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.sliceChecked prevAudio 1 0 reuseAudioLen #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+            let prefixAudio : Tensor { dtype := dtype, device := device, shape := #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.slice prevAudio 1 0 reuseAudioLen
+              (_bounds := by simpa [reuseAudioLen] using Nat.le_trans (minU64_le_left _ _) (minU64_le_right reuseAudioLenRaw ac.validAudioLen))
             let tailFeatureLen := validFrames - reuseFeatureLen
             if tailFeatureLen == 0 then
               let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
                 if hEq : reuseAudioLen = audioLen then
                   Tensor.reshape prefixAudio #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] (by simp [hEq])
                 else if hGt : reuseAudioLen > audioLen then
-                  Tensor.sliceChecked prefixAudio 1 0 audioLen #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                  Tensor.slice prefixAudio 1 0 audioLen
                 else
                   let padLen := audioLen - reuseAudioLen
                   let pad : Tensor { dtype := dtype, device := device, shape := #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
@@ -1019,9 +1028,14 @@ def decodeStreamingChunkWithModelStateCached
                   none
               pure (audioValid, nextAudioCache)
             else
+              have hReuse : reuseFeatureLen ≤ frames := by
+                have hBase := minU64_le_right prevFull curFull
+                have hCur : curFull ≤ validFrames := Nat.div_mul_le_self _ _
+                simp only [reuseFeatureLen, reuseBase]
+                split <;> omega
               let tailFrames := frames - reuseFeatureLen
               let tailInput : Tensor { device := device, shape := #[1, preprocessor.featureSize, tailFrames], dtype := .Float32 } :=
-                Tensor.sliceChecked inputFeaturesDev 2 reuseFeatureLen tailFrames #[1, preprocessor.featureSize, tailFrames]
+                Tensor.slice inputFeaturesDev 2 reuseFeatureLen tailFrames
               let tailAudioRaw : Tensor { dtype := dtype, device := device, shape := #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.audioConfig.outputDim] } :=
                 model.thinker.encodeAudioVarLen ((Tensor.reshape tailInput #[1, cfg.thinkerConfig.audioConfig.numMelBins, tailFrames] (by simp [hMel]))) #[tailFeatureLen]
               let tailAudioProj : Tensor { dtype := dtype, device := device, shape := #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.textConfig.hiddenSize] } :=
@@ -1030,7 +1044,8 @@ def decodeStreamingChunkWithModelStateCached
               let tailAudioCap := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames
               let tailAudioLen := minU64 tailAudioLenRaw tailAudioCap
               let tailValid : Tensor { dtype := dtype, device := device, shape := #[1, tailAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
-                Tensor.sliceChecked tailAudioProj 1 0 tailAudioLen #[1, tailAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                Tensor.slice tailAudioProj 1 0 tailAudioLen
+                  (_bounds := by simpa [tailAudioLen] using minU64_le_right tailAudioLenRaw tailAudioCap)
               let combinedDyn := Tensor.cat prefixAudio tailValid 1
               let combinedLen := reuseAudioLen + tailAudioLen
               let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
@@ -1039,7 +1054,7 @@ def decodeStreamingChunkWithModelStateCached
                 else if hGt : combinedLen > audioLen then
                   let combined : Tensor { dtype := dtype, device := device, shape := #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
                     Tensor.reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
-                  Tensor.sliceChecked combined 1 0 audioLen #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                  Tensor.slice combined 1 0 audioLen
                 else
                   let combined : Tensor { dtype := dtype, device := device, shape := #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
                     Tensor.reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
@@ -1065,7 +1080,7 @@ def decodeStreamingChunkWithModelStateCached
             model.thinker.encodeAudioVarLen ((Tensor.reshape inputFeaturesDev #[1, cfg.thinkerConfig.audioConfig.numMelBins, frames] (by simp [hMel]))) #[validFrames]
           let audioProj : Tensor { dtype := dtype, device := device, shape := #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] } :=
             model.thinker.projectAudio audioRaw
-          let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.sliceChecked audioProj 1 0 audioLen #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+          let audioValid : Tensor { dtype := dtype, device := device, shape := #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] } := Tensor.slice audioProj 1 0 audioLen (_bounds := by simpa [audioLen] using minU64_le_right audioLenRaw audioLenCap)
           let nextAudioCache :=
             if decodeMode == .fullAccumulation then
               some {
@@ -1082,23 +1097,21 @@ def decodeStreamingChunkWithModelStateCached
         if audioLen == 0 then
           pure inputsEmbeds0
         else
-          match findSingleContiguousAudioSpanStart promptIds cfg.thinkerConfig.audioTokenId.toUInt32 audioLen with
+          match findSingleContiguousAudioSpanStart promptIds cfg.thinkerConfig.audioTokenId audioLen with
           | some spanStart =>
-            if spanStart + audioLen > seq then
+            if hSpan : spanStart + audioLen > seq then
               throw <| IO.userError
                 s!"decodeStreamingChunkWithModel placeholder span overflow: start={spanStart}, audio_len={audioLen}, seq={seq}"
             else do
+              have hle : spanStart + audioLen ≤ seq := by omega
               let prefixEmbeds : Tensor { dtype := dtype, device := device, shape := #[1, spanStart, cfg.thinkerConfig.textConfig.hiddenSize] } :=
-                Tensor.sliceChecked inputsEmbeds0 1 0 spanStart #[1, spanStart, cfg.thinkerConfig.textConfig.hiddenSize]
+                Tensor.slice inputsEmbeds0 1 0 spanStart
               let suffixStart := spanStart + audioLen
               let suffixLen := seq - suffixStart
               let suffixEmbeds : Tensor { dtype := dtype, device := device, shape := #[1, suffixLen, cfg.thinkerConfig.textConfig.hiddenSize] } :=
-                Tensor.sliceChecked inputsEmbeds0 1 suffixStart suffixLen #[1, suffixLen, cfg.thinkerConfig.textConfig.hiddenSize]
-              let mergedDyn :=
-                Tensor.catManyChecked
-                  #[prefixEmbeds.packShape, audioEmbedsValid.packShape, suffixEmbeds.packShape]
-                  1 #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize]
-              pure (Tensor.reshape mergedDyn #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize])
+                Tensor.slice inputsEmbeds0 1 suffixStart suffixLen
+              pure ((Tensor.cat (Tensor.cat prefixEmbeds audioEmbedsValid 1) suffixEmbeds 1).reshape
+                #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] (by simp [suffixLen, suffixStart, Nat.add_sub_cancel' hle]))
           | none =>
             throw <| IO.userError
               s!"decodeStreamingChunkWithModel expected one contiguous audio-token span of length {audioLen}, but prompt ids were not span-compatible"
@@ -1122,11 +1135,11 @@ def decodeStreamingChunkWithModelStateCached
 
       let outSeq := generated.1
       let outIds := generated.2
-      if outSeq <= seq then
+      if hOut : outSeq ≤ seq then
         pure ("", some nextCache)
       else
         let newSeq := outSeq - seq
-        let newOnly : Tensor { device := device, shape := #[1, newSeq], dtype := .Int64 } := Tensor.sliceChecked outIds 1 seq newSeq #[1, newSeq]
+        let newOnly : Tensor { device := device, shape := #[1, newSeq], dtype := .Int64 } := Tensor.slice outIds 1 seq newSeq
         let flat : Tensor { device := device, shape := #[newSeq], dtype := .Int64 } := Tensor.reshape newOnly #[newSeq]
         let idsU64 ← Tensor.toUInt64Array flat
         let ids := idsU64.map (fun x => x.toUInt32)
@@ -1144,7 +1157,7 @@ def decodeStreamingChunkWithModelCached
     (audio16k : Array Float)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (String × Option (StreamingPromptCache (device := device) (dtype := dtype) cfg)) := do
   let stateCache : StreamingDecodeCache (device := device) (dtype := dtype) cfg := { promptCache := prefixCache }
   let (text, cache') ←
@@ -1171,7 +1184,7 @@ def decodeStreamingChunkWithModel
     (prompt : String)
     (audio16k : Array Float)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO String := do
   let out ← decodeStreamingChunkWithModelCached
     model
@@ -1195,7 +1208,7 @@ def streamingTranscribeWithModelStateCached
     (state : ASRStreamingState)
     (cache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg)) := do
   let cacheRef ← IO.mkRef cache
   let basePrompt := state.promptRaw
@@ -1231,7 +1244,7 @@ def streamingTranscribeWithModelCached
     (state : ASRStreamingState)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache (device := device) (dtype := dtype) cfg)) := do
   let stateCache : StreamingDecodeCache (device := device) (dtype := dtype) cfg := { promptCache := prefixCache }
   let (next, cache') ←
@@ -1256,7 +1269,7 @@ def streamingTranscribeWithModel
     (pcm16k : Array Float)
     (state : ASRStreamingState)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRStreamingState := do
   let (next, _cache) ←
     streamingTranscribeWithModelCached
@@ -1280,7 +1293,7 @@ def finishStreamingTranscribeWithModelStateCached
     (state : ASRStreamingState)
     (cache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg)) := do
   let cacheRef ← IO.mkRef cache
   let basePrompt := state.promptRaw
@@ -1315,7 +1328,7 @@ def finishStreamingTranscribeWithModelCached
     (state : ASRStreamingState)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache (device := device) (dtype := dtype) cfg)) := do
   let stateCache : StreamingDecodeCache (device := device) (dtype := dtype) cfg := { promptCache := prefixCache }
   let (next, cache') ←
@@ -1338,7 +1351,7 @@ def finishStreamingTranscribeWithModel
     (hMel : preprocessor.featureSize = cfg.thinkerConfig.audioConfig.numMelBins)
     (state : ASRStreamingState)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRStreamingState := do
   let (next, _cache) ←
     finishStreamingTranscribeWithModelCached
@@ -1378,7 +1391,7 @@ def streamingTranscribeStateCached
     (state : ASRStreamingState)
     (cache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg)) :=
   streamingTranscribeWithModelStateCached
     m
@@ -1400,7 +1413,7 @@ def streamingTranscribeCached
     (state : ASRStreamingState)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache (device := device) (dtype := dtype) cfg)) :=
   streamingTranscribeWithModelCached
     m
@@ -1421,7 +1434,7 @@ def streamingTranscribe
     (pcm16k : Array Float)
     (state : ASRStreamingState)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRStreamingState :=
   streamingTranscribeWithModel m tok preprocessor hMel pcm16k state maxNewTokens eosTokenIds
 
@@ -1434,7 +1447,7 @@ def finishStreamingTranscribeStateCached
     (state : ASRStreamingState)
     (cache : Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingDecodeCache (device := device) (dtype := dtype) cfg)) :=
   finishStreamingTranscribeWithModelStateCached
     m
@@ -1454,7 +1467,7 @@ def finishStreamingTranscribeCached
     (state : ASRStreamingState)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache (device := device) (dtype := dtype) cfg)) :=
   finishStreamingTranscribeWithModelCached
     m
@@ -1473,7 +1486,7 @@ def finishStreamingTranscribe
     (hMel : preprocessor.featureSize = cfg.thinkerConfig.audioConfig.numMelBins)
     (state : ASRStreamingState)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRStreamingState :=
   finishStreamingTranscribeWithModel m tok preprocessor hMel state maxNewTokens eosTokenIds
 

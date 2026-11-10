@@ -13,8 +13,8 @@ namespace Tests.Gemma4Typed
 private def cfg : Config := {
   vocab_size := 16, hidden_size := 8, intermediate_size := 12
   num_hidden_layers := 4, num_attention_heads := 2, num_key_value_heads := 1
-  head_dim := 4, global_head_dim := 8, num_global_key_value_heads := 1
-  sliding_window := 3, full_partial_rotary_factor := 1.0
+  half_head_dim := 2, global_half_head_dim := .distinct 4, num_global_key_value_heads := .distinct 1
+  sliding_window := 3, half_full_rotary_dim := 4
   num_kv_shared_layers := 2
   layer_types := #[.fullAttention, .slidingAttention, .slidingAttention, .fullAttention]
   hidden_size_per_layer_input := 2, vocab_size_per_layer_input := 16
@@ -26,31 +26,30 @@ private def weight (s : Shape) (offset : Float := 0.0) (dtype : DType := .Float3
   ((Tensor.fromFloatArray vals).reshape s).castDType dtype
 
 private def norm (n : Nat) (dtype : DType := .Float32) : Gemma4RMSNorm (device := .CPU) n :=
-  { weight := packExactTensor ((Tensor.ones #[n]).castDType dtype) }
+  { weight := ⟨dtype, (Tensor.ones #[n]).castDType dtype⟩ }
 
 private def textModel (c : Config) (dtype : DType := .Float32) : Gemma4ForCausalLM (device := .CPU) c dtype := Id.run do
-  let mut layers := #[]
-  for i in [:c.num_hidden_layers] do
-    let layer : Gemma4Layer c dtype := {
-      layerIdx := i, layerType := Config.layerTypeAt c i
-      self_attn := {
-        q_proj := weight #[Config.maxAttentionDim c, c.hidden_size] 0.1 dtype
-        k_proj := weight #[Config.maxKVProjDim c, c.hidden_size] 0.3 dtype
-        v_proj := weight #[Config.maxKVProjDim c, c.hidden_size] 0.5 dtype
-        o_proj := weight #[c.hidden_size, Config.maxAttentionDim c] 0.7 dtype
-        q_norm := norm (Config.maxHeadDim c) dtype, k_norm := norm (Config.maxHeadDim c) dtype }
-      mlp := {
-        gate_proj := weight #[Config.maxIntermediateSize c, c.hidden_size] 0.2 dtype
-        up_proj := weight #[Config.maxIntermediateSize c, c.hidden_size] 0.4 dtype
-        down_proj := weight #[c.hidden_size, Config.maxIntermediateSize c] 0.6 dtype }
-      input_layernorm := norm c.hidden_size dtype, post_attention_layernorm := norm c.hidden_size dtype
-      pre_feedforward_layernorm := norm c.hidden_size dtype, post_feedforward_layernorm := norm c.hidden_size dtype
-      layer_scalar := (Tensor.ones #[1]).castDType dtype
-      per_layer_input := some {
-        per_layer_input_gate := weight #[c.hidden_size_per_layer_input, c.hidden_size] 0.8 dtype
-        per_layer_projection := weight #[c.hidden_size, c.hidden_size_per_layer_input] 0.9 dtype
-        post_per_layer_input_norm := norm c.hidden_size dtype } }
-    layers := layers.push layer
+  let layer (i : Nat) : Gemma4Layer c dtype := {
+    layerIdx := i, layerType := Config.layerTypeAt c i
+    self_attn := {
+      q_proj := weight #[Config.maxAttentionDim c, c.hidden_size] 0.1 dtype
+      k_proj := weight #[Config.maxKVProjDim c, c.hidden_size] 0.3 dtype
+      v_proj := weight #[Config.maxKVProjDim c, c.hidden_size] 0.5 dtype
+      o_proj := weight #[c.hidden_size, Config.maxAttentionDim c] 0.7 dtype
+      q_norm := norm (Config.maxHeadDim c) dtype, k_norm := norm (Config.maxHeadDim c) dtype }
+    mlp := {
+      gate_proj := weight #[Config.maxIntermediateSize c, c.hidden_size] 0.2 dtype
+      up_proj := weight #[Config.maxIntermediateSize c, c.hidden_size] 0.4 dtype
+      down_proj := weight #[c.hidden_size, Config.maxIntermediateSize c] 0.6 dtype }
+    input_layernorm := norm c.hidden_size dtype, post_attention_layernorm := norm c.hidden_size dtype
+    pre_feedforward_layernorm := norm c.hidden_size dtype, post_feedforward_layernorm := norm c.hidden_size dtype
+    layer_scalar := (Tensor.ones #[1]).castDType dtype
+    per_layer_input := some {
+      per_layer_input_gate := weight #[c.hidden_size_per_layer_input, c.hidden_size] 0.8 dtype
+      per_layer_projection := weight #[c.hidden_size, c.hidden_size_per_layer_input] 0.9 dtype
+      post_per_layer_input_norm := norm c.hidden_size dtype } }
+  let layers : Vector c.num_hidden_layers (Gemma4Layer c dtype) :=
+    ⟨(Array.range c.num_hidden_layers).map layer, by simp⟩
   return {
     model := {
       embed_tokens := weight #[c.vocab_size, c.hidden_size] 1.0 dtype
@@ -73,20 +72,21 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
 
 @[test] def testGemma4SharedCacheAndPerLayerInputs : IO Unit := do
   let m := textModel cfg
-  LeanTest.assertEqual (Config.sharedSourceLayer? cfg 2) (some 1)
-  LeanTest.assertEqual (Config.sharedSourceLayer? cfg 3) (some 0)
+  LeanTest.assertEqual ((Config.sharedSourceLayer? cfg 2).map (·.val)) (some 1)
+  LeanTest.assertEqual ((Config.sharedSourceLayer? cfg 3).map (·.val)) (some 0)
   let expected := m.model.forward cfg ids
   let perLayer := m.model.computePerLayerInputs cfg ids (m.embedTokens cfg ids)
   LeanTest.assertTrue perLayer.isSome
-  let (sc, ss) := Tensor.rotaryFreqs 7 cfg.head_dim cfg.sliding_rope_theta
-  let (fc, fs) := Tensor.rotaryFreqs 7 (Config.fullHeadDim cfg) cfg.full_rope_theta
+  let (sc, ss) := Tensor.rotaryFreqs 7 cfg.half_head_dim cfg.sliding_rope_theta
+  let (fc, fs) := Tensor.rotaryFreqs 7 (Config.fullHalfHeadDim cfg) cfg.full_rope_theta
   let cache := m.model.initCache cfg 7 .CPU
-  let (prefill, initial) := m.model.forwardWithCache cfg (ids.sliceChecked 1 0 3 #[1, 3]) cache sc ss fc fs
-  close prefill (expected.sliceChecked 1 0 3 #[1, 3, cfg.hidden_size])
+  let (prefill, initial) := m.model.forwardWithCache cfg (ids.slice 1 0 3) cache (by decide) sc ss fc fs
+  close prefill (expected.slice 1 0 3)
   let mut cache := initial
-  for pos in [3:7] do
-    let (out, next) := m.model.forwardStep cfg (ids.sliceChecked 1 pos 1 #[1, 1]) pos cache sc ss fc fs
-    close out (expected.sliceChecked 1 pos 1 #[1, 1, cfg.hidden_size])
+  for hp : pos in [3:7] do
+    let (out, next) := m.model.forwardStep cfg (ids.slice! 1 pos 1) pos
+      (by have := hp.upper; simp at this; omega) cache sc ss fc fs
+    close out (expected.slice! 1 pos 1)
     cache := next
 
 @[test] def testGemma4GenerationDTypesAndStreaming : IO Unit := do
@@ -108,6 +108,24 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
     LeanTest.assertEqual (← plain.2.toUInt64Array) (← streamed.2.toUInt64Array)
     LeanTest.assertEqual (← steps.get).size 3
 
+@[test] def testGemma4EmptyPromptAndEmptyForward : IO Unit := do
+  let m := textModel cfg
+  let empty : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let rejected ←
+    try
+      let _ ← m.generate cfg empty 1 .greedy #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generate should reject an empty prompt before sizing its cache"
+  -- Shared-KV layers have no source K/V to share in an empty sequence.
+  LeanTest.assertEqual (m.forward cfg empty).runtimeShape #[1, 0, cfg.vocab_size]
+  let embeds := m.embedTokens cfg empty
+  let perLayer := m.model.computePerLayerInputs cfg empty embeds
+  let noMask : Tensor { shape := #[1, 0, 0], dtype := .Int64, device := .CPU } := Tensor.fullInt #[1, 0, 0] 0
+  LeanTest.assertEqual
+    (m.forwardEmbedsWithPerLayerInputsBidirectionalVision cfg empty embeds perLayer noMask noMask).runtimeShape
+    #[1, 0, cfg.vocab_size]
+
 @[noinline, nospecialize]
 private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String) : IO α := do
   checkpoint.saveParams params dir
@@ -119,17 +137,17 @@ private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String)
   close (m.forward cfg ids) (restored.forward cfg ids) 0.0
 
 @[test] def testGemma4BFloat16Router : IO Unit := do
-  let c := { cfg with num_experts := 3, top_k_experts := 2 }
+  let c : Config := { cfg with num_experts := 3, top_k_experts := 2, topKValid := (by decide), moeValid := (by decide) }
   let router : Gemma4TextRouter c := {
-    proj := packExactTensor (weight #[3, 8] 0.3 .BFloat16)
-    scale := packExactTensor (weight #[8] 0.5 .BFloat16)
-    per_expert_scale := packExactTensor ((Tensor.ones #[3]).toBFloat16) }
+    proj := weight #[3, 8] 0.3
+    scale := weight #[8] 0.5
+    per_expert_scale := Tensor.ones #[3] }
   let x := (weight #[2, 8] 0.7).toBFloat16
   let (probs, weights, indices) := router.forward c x
   LeanTest.assertEqual probs.actualSpec.dtype .Float32
-  LeanTest.assertEqual weights.1 .Float32
+  LeanTest.assertEqual weights.actualSpec.dtype .Float32
   LeanTest.assertEqual indices.actualSpec.dtype .Int64
-  for v in (← weights.2.toFloatArray) do LeanTest.assertTrue v.isFinite
+  for v in (← weights.toFloatArray) do LeanTest.assertTrue v.isFinite
   let rows ← probs.toFloatArray
   for row in [:2] do
     let total := rows[row * 3]! + rows[row * 3 + 1]! + rows[row * 3 + 2]!
@@ -145,28 +163,29 @@ private def roundTrip {α : Type} [TensorStruct α] (params : α) (dir : String)
   let mut expected := qwen35.zerosDynamic #[2, 4]
   let expertIds ← indices.toUInt64Array
   let scales ← weights.toFloatArray
-  for token in [:2] do
-    let row := x.sliceChecked 0 token 1 #[1, 4]
+  for ht : token in [:2] do
+    let row := x.slice! 0 token 1
     let mut sum := qwen35.zerosDynamic #[1, 4]
     for slot in [:2] do
       let e := expertIds[token * 2 + slot]!.toNat
-      let gu := (gate.sliceChecked 0 e 1 #[1, 12, 4]).reshape #[12, 4]
-      let g := Tensor.linear row (gu.sliceChecked 0 0 6 #[6, 4])
-      let u := Tensor.linear row (gu.sliceChecked 0 6 6 #[6, 4])
-      let dw := (down.sliceChecked 0 e 1 #[1, 4, 6]).reshape #[4, 6]
+      let gu := (gate.slice! 0 e 1).reshape #[12, 4]
+      let g := Tensor.linear row (gu.slice! 0 0 6)
+      let u := Tensor.linear row (gu.slice! 0 6 6)
+      let dw := (down.slice! 0 e 1).reshape #[4, 6]
       sum := Tensor.add sum (Tensor.mulScalar
         (Tensor.linear (Tensor.mul (Tensor.gelu g) u) dw) scales[token * 2 + slot]!)
     expected := Tensor.sliceScatter expected 0 token sum
+      (_bound := by have := ht.upper; simp at this ⊢; omega)
   close actual expected 1e-6
 
 private def vlCfg : VLConfig := {
-  text_config := { cfg with use_bidirectional_attention := "vision" }
+  text_config := { cfg with use_bidirectional_attention := "vision", bidirectionalSupported := (by decide) }
   vision_config := {
     hidden_size := 8, intermediate_size := 12, num_hidden_layers := 1
-    num_attention_heads := 2, num_key_value_heads := 2, head_dim := 4
+    num_attention_heads := 2, num_key_value_heads := 2, quarter_head_dim := 1
     patch_size := 2, pooling_kernel_size := 2, position_embedding_size := 8 }
   image_processor := { patch_size := 2, pooling_kernel_size := 2, max_soft_tokens := 4 }
-  image_token_id := 15 }
+  boi_token_id := 12, image_token_id := 15, eoi_token_id := 13, video_token_id := 14, audio_token_id := 11 }
 
 private def visionLinear (outDim inDim : Nat) (phase : Float) (dtype : DType := .Float32) :
     Gemma4VisionLinear (device := .CPU) outDim inDim dtype :=
@@ -178,7 +197,7 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
   vision_tower := {
     patch_embedder := {
       input_proj := visionLinear 8 12 0.2 dtype
-      position_embedding_table := packExactTensor (weight #[2, 8, 8] 0.3 dtype) }
+      position_embedding_table := weight #[2, 8, 8] 0.3 }
     blocks := #[{
       input_layernorm := norm 8 dtype, post_attention_layernorm := norm 8 dtype
       pre_feedforward_layernorm := norm 8 dtype, post_feedforward_layernorm := norm 8 dtype
@@ -189,8 +208,8 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
       mlp := {
         gate_proj := visionLinear 12 8 0.9 dtype, up_proj := visionLinear 12 8 1.0 dtype
         down_proj := visionLinear 8 12 1.1 dtype } }]
-    std_bias := some (packExactTensor (weight #[8] 1.2 dtype))
-    std_scale := some (packExactTensor ((Tensor.ones #[8]).castDType dtype)) } }
+    std_bias := some (weight #[8] 1.2)
+    std_scale := some (Tensor.ones #[8]) } }
 
 @[test] def testGemma4VisionClippingAndFeatureBatching : IO Unit := do
   let clipped : Gemma4VisionLinear 2 2 := {
@@ -222,7 +241,7 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
     let out ← m.forwardWithImageFeatures vlCfg prompt features
     LeanTest.assertEqual out.runtimeShape #[1, 7, 16]
     for value in (← out.toFloatArray) do LeanTest.assertTrue value.isFinite
-    let wrong := features.sliceChecked 0 0 3 #[3, 8]
+    let wrong := features.slice 0 0 3
     Tests.assertThrows (m.forwardWithImageFeatures vlCfg prompt wrong) (some "placeholder token count mismatch")
     let generated ← m.generate vlCfg prompt 2 .greedy #[] (some ⟨4, features⟩)
     LeanTest.assertEqual generated.1 9
@@ -242,28 +261,12 @@ private def multimodalModel (dtype : DType := .Float32) : Gemma4ForConditionalGe
     Tests.assertThrows (media.loadImagePatchGrid vlCfg path.toString) (some "requires macOS")
 
 
-@[test] def testGemma4RouterRetainsFloat64Scale : IO Unit := do
-  let c := { cfg with num_experts := 3, top_k_experts := 2 }
-  let router : Gemma4TextRouter c := {
-    proj := packExactTensor (weight #[3, 8] 0.3 .BFloat16)
-    scale := packExactTensor (weight #[8] 0.5 .Float32)
-    per_expert_scale := packExactTensor ((Tensor.ones #[3]).castDType .Float64) }
-  let (probs, selected, _) := router.forward c (weight #[2, 8] 0.7 .BFloat16)
-  LeanTest.assertEqual probs.actualSpec.dtype .Float32
-  LeanTest.assertEqual selected.1 .Float64
-  LeanTest.assertTrue ((← selected.2.toFloatArray).all Float.isFinite)
-
-@[test] def testGemma4VisionRetainsPromotedResidualDType : IO Unit := do
-  let base := multimodalModel .BFloat16
-  let vision := { base.vision_tower with
-    patch_embedder := { base.vision_tower.patch_embedder with
-      position_embedding_table := packExactTensor (weight #[2, 8, 8] 0.3 .Float32) }
-    std_bias := some (packExactTensor (weight #[8] 1.2 .Float32))
-    std_scale := some (packExactTensor (Tensor.ones #[8])) }
+@[test] def testGemma4VisionResidualIsFloat32 : IO Unit := do
+  let vision := (multimodalModel .BFloat16).vision_tower
   let features := vision.forward vlCfg (weight #[4, 4, 12] 0.1)
-  LeanTest.assertEqual features.1 .Float32
+  LeanTest.assertEqual features.actualSpec.dtype .Float32
   LeanTest.assertEqual vision.patch_embedder.input_proj.weight.actualSpec.dtype .BFloat16
-  LeanTest.assertTrue ((← features.2.toFloatArray).all Float.isFinite)
+  LeanTest.assertTrue ((← features.toFloatArray).all Float.isFinite)
 
 private def writeTensorEntries (directory : System.FilePath)
     (entries : Array (String × Shape × Bool)) (sharded : Bool) : IO Unit := do
@@ -297,12 +300,18 @@ private def writeDTypeFixture (directory : System.FilePath) (c : Config)
     ("lm_head.weight", headShape, !mixedHead)] sharded
 
 @[test] def testGemma4LoaderChecksRoleDTypes : IO Unit := do
-  let c := { cfg with num_hidden_layers := 0, hidden_size_per_layer_input := 0 }
+  let c : Config := { cfg with
+    num_hidden_layers := 0
+    hidden_size_per_layer_input := 0
+    layer_types := #[]
+    num_kv_shared_layers := 0
+    layerTypesValid := by decide
+    kvSharing := by decide
+    perLayerVocab := by decide }
   for sharded in #[false, true] do
     IO.FS.withTempDir fun directory => do
       writeDTypeFixture directory c false sharded
-      let ⟨selected, model⟩ ← if sharded then Gemma4ForCausalLM.loadSharded directory.toString c
-        else Gemma4ForCausalLM.load (directory / "model.safetensors").toString c
+      let ⟨selected, model⟩ ← Gemma4ForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) c
       let support ← selected.val.acquireConstantSupport .CPU
       let _ := support.down
       LeanTest.assertEqual selected.val .BFloat16
@@ -315,21 +324,24 @@ private def writeDTypeFixture (directory : System.FilePath) (c : Config)
     IO.FS.withTempDir fun directory => do
       writeDTypeFixture directory c true sharded
       Tests.assertThrows (do
-        if sharded then discard <| Gemma4ForCausalLM.loadSharded directory.toString c
-        else discard <| Gemma4ForCausalLM.load (directory / "model.safetensors").toString c)
+        discard <| Gemma4ForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) c)
         (some "Expected dtype")
 
 @[test] def testGemma4LoaderRejectsMalformedOptionalHead : IO Unit := do
   let c := { cfg with
     num_hidden_layers := 0
     hidden_size_per_layer_input := 0
-    tie_word_embeddings := true }
+    tie_word_embeddings := true
+    layer_types := #[]
+    num_kv_shared_layers := 0
+    layerTypesValid := by decide
+    kvSharing := by decide
+    perLayerVocab := by decide }
   for sharded in #[false, true] do
     IO.FS.withTempDir fun directory => do
       writeDTypeFixture directory c false sharded true
       Tests.assertThrows (do
-        if sharded then discard <| Gemma4ForCausalLM.loadSharded directory.toString c
-        else discard <| Gemma4ForCausalLM.load (directory / "model.safetensors").toString c)
+        discard <| Gemma4ForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) c)
         (some "shape")
 
 @[test] def testGemma4VisionRejectsMalformedOptionalParameters : IO Unit := do
@@ -337,7 +349,12 @@ private def writeDTypeFixture (directory : System.FilePath) (c : Config)
     text_config := { vlCfg.text_config with
       num_hidden_layers := 0
       hidden_size_per_layer_input := 0
-      tie_word_embeddings := true }
+      tie_word_embeddings := true
+      layer_types := #[]
+      num_kv_shared_layers := 0
+      layerTypesValid := by decide
+      kvSharing := by decide
+      perLayerVocab := by decide }
     vision_config := { vlCfg.vision_config with num_hidden_layers := 0 } }
   let required := #[
     ("model.vision_tower.patch_embedder.input_proj.weight",
@@ -356,14 +373,12 @@ private def writeDTypeFixture (directory : System.FilePath) (c : Config)
     -- Truly absent optional entries still load successfully.
     IO.FS.withTempDir fun directory => do
       writeTensorEntries directory required sharded
-      if sharded then discard <| Gemma4ForConditionalGeneration.loadSharded directory.toString c
-      else discard <| Gemma4ForConditionalGeneration.load (directory / "model.safetensors").toString c
+      discard <| Gemma4ForConditionalGeneration.load (if sharded then directory.toString else (directory / "model.safetensors").toString) c
     for name in optionalNames do
       IO.FS.withTempDir fun directory => do
         writeTensorEntries directory (required.push (name, #[1], false)) sharded
         Tests.assertThrows (do
-          if sharded then discard <| Gemma4ForConditionalGeneration.loadSharded directory.toString c
-          else discard <| Gemma4ForConditionalGeneration.load (directory / "model.safetensors").toString c)
+          discard <| Gemma4ForConditionalGeneration.load (if sharded then directory.toString else (directory / "model.safetensors").toString) c)
           (some "shape")
 
 end Tests.Gemma4Typed

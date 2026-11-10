@@ -12,10 +12,9 @@ private def tinyCfg : Config := {
   num_hidden_layers := 2
   num_attention_heads := 4
   num_key_value_heads := 2
-  head_dim := 8
+  half_head_dim := 4
   rope_theta := 10000.0
   rms_norm_eps := 1e-6
-  max_position_embeddings := 128
 }
 
 private def flattenIds {batch seq : Nat} (ids : Tensor { shape := #[batch, seq], dtype := .Int64, device := .CPU }) : IO (Array UInt64) := do
@@ -96,6 +95,23 @@ def testQwen3GreedyUncachedEmptyPromptThrows : IO Unit := do
   LeanTest.assertTrue threw "generateGreedyUncached should reject empty prompt"
 
 @[test]
+def testQwen3GreedyCachedEmptyPromptThrows : IO Unit := do
+  let model ← Qwen3ForCausalLM.init tinyCfg
+  let ids : Tensor { shape := #[1, 0], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[]) #[1, 0]
+  let rejected ←
+    try
+      let _ ← model.generateGreedy ids 1 #[]
+      pure false
+    catch e => pure ((toString e).contains "non-empty prompt")
+  LeanTest.assertTrue rejected "cached generateGreedy should reject an empty prompt before sizing its cache"
+
+set_option linter.unusedVariables false in
+example : True := by
+  fail_if_success
+    have := qwen.QwenAttention.initKVCache (batch := 1) (num_kv_heads := 1) (head_dim := 4) 0
+  trivial
+
+@[test]
 def testQwen3GreedyZeroNewTokensIdentity : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
   let ids : Tensor { shape := #[1, 3], dtype := .Int64, device := .CPU } := Tensor.reshape (Tensor.fromInt64Array #[4, 5, 6]) #[1, 3]
@@ -143,8 +159,8 @@ def testQwen3BatchedEosIsRowAware : IO Unit := do
     LeanTest.assertTrue false
       "failed to find a deterministic prompt pair for batched row-aware EOS validation"
   | some (ids, eosTok) =>
-    let ⟨seqCached, outCached⟩ ← model.generateGreedy ids 4 #[eosTok]
-    let ⟨seqUncached, outUncached⟩ ← model.generateGreedyUncached ids 4 #[eosTok]
+    let ⟨seqCached, outCached⟩ ← model.generateGreedy ids 4 #[eosTok.toUInt32]
+    let ⟨seqUncached, outUncached⟩ ← model.generateGreedyUncached ids 4 #[eosTok.toUInt32]
     LeanTest.assertEqual seqCached seqUncached
       "cached and uncached EOS-aware decode should stop at same sequence length"
 

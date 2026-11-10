@@ -59,13 +59,6 @@ private def clampRange {s : Shape}
   | some hi => clampMax x1 hi
   | none => x1
 
-private def linear2d {tokens inDim outDim : Nat}
-    (x : Tensor { device := device, shape := #[tokens, inDim], dtype := dtype })
-    (w : Tensor { device := device, shape := #[outDim, inDim], dtype := dtype })
-    : Tensor { device := device, shape := #[tokens, outDim], dtype := dtype } :=
-  let yDyn : Tensor { device := device, shape := #[tokens, outDim], dtype := dtype } := einsumChecked "oh,th->to" w x
-  Tensor.reshape yDyn #[tokens, outDim]
-
 private def countMask2d {batch seq : Nat} (mask : Tensor { device := device, shape := #[batch, seq], dtype := .Bool }) : IO Nat := do
   let row : Tensor { device := device, shape := #[batch], dtype := .Int64 } := Tensor.reshape (Tensor.sumDim (Tensor.toInt64 mask) 1 false) #[batch]
   let counts ← Tensor.toUInt64Array row
@@ -85,7 +78,7 @@ private def rmsNormNoScale2d {n dim : Nat}
   let xf : Tensor { device := device, shape := #[n, dim], dtype := .Float32 } := floatDynamic x
   let var : Tensor { device := device, shape := #[n, 1], dtype := .Float32 } := Tensor.meanDim (Tensor.mul xf xf) 1 true
   let inv : Tensor { device := device, shape := #[n, 1], dtype := .Float32 } := rsqrtDynamic (Tensor.addScalar var eps)
-  let inv : Tensor { device := device, shape := #[n, dim], dtype := .Float32 } := Tensor.expand inv #[n, dim]
+  let inv : Tensor { device := device, shape := #[n, dim], dtype := .Float32 } := Tensor.broadcastTo inv #[n, dim]
   Tensor.castLike x (Tensor.mul xf inv)
 
 private def rmsNormNoScale4d {a b c dim : Nat}
@@ -95,31 +88,31 @@ private def rmsNormNoScale4d {a b c dim : Nat}
   let flat : Tensor { device := device, shape := #[a * b * c, dim], dtype := dtype } := Tensor.reshape x #[a * b * c, dim]
   Tensor.reshape (rmsNormNoScale2d flat eps) #[a, b, c, dim]
 
-private def apply2dRotaryEmb {nHead headDim : Nat}
+private def apply2dRotaryEmb {nHead quarter : Nat}
     (patchRows patchCols : Nat)
-    (x : Tensor { device := device, shape := #[1, patchRows * patchCols, nHead, headDim], dtype := dtype })
+    (x : Tensor { device := device, shape := #[1, patchRows * patchCols, nHead, 4 * quarter], dtype := dtype })
     (ropeTheta : Float)
-    : Tensor { device := device, shape := #[1, tokens, nHead, headDim], dtype := dtype } :=
+    : Tensor { device := device, shape := #[1, patchRows * patchCols, nHead, 4 * quarter], dtype := dtype } :=
   let tokens := patchRows * patchCols
-  let perDim := headDim / 2
-  let xPart : Tensor { device := device, shape := #[1, tokens, nHead, perDim], dtype := dtype } := sliceTyped x 3 0 perDim
-  let yPart : Tensor { device := device, shape := #[1, tokens, nHead, perDim], dtype := dtype } := sliceTyped x 3 perDim perDim
+  let xPart : Tensor { device := device, shape := #[1, tokens, nHead, 2 * quarter], dtype := dtype } := Tensor.slice x 3 0 (2 * quarter)
+  let yPart : Tensor { device := device, shape := #[1, tokens, nHead, 2 * quarter], dtype := dtype } := Tensor.slice x 3 (2 * quarter) (2 * quarter)
   let (xIdsCpu, yIdsCpu) := positionIds patchRows patchCols
-  let (xCosTable, xSinTable) := Tensor.rotaryFreqs patchCols perDim ropeTheta x.device
-  let (yCosTable, ySinTable) := Tensor.rotaryFreqs patchRows perDim ropeTheta x.device
+  let (xCosTable, xSinTable) := Tensor.rotaryFreqs patchCols quarter ropeTheta x.device
+  let (yCosTable, ySinTable) := Tensor.rotaryFreqs patchRows quarter ropeTheta x.device
   let xIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := xIdsCpu.to x.device
   let yIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := yIdsCpu.to x.device
-  let xCos : Tensor { device := device, shape := #[tokens, perDim / 2], dtype := .Float32 } := Tensor.embedding1d xIds xCosTable
-  let xSin : Tensor { device := device, shape := #[tokens, perDim / 2], dtype := .Float32 } := Tensor.embedding1d xIds xSinTable
-  let yCos : Tensor { device := device, shape := #[tokens, perDim / 2], dtype := .Float32 } := Tensor.embedding1d yIds yCosTable
-  let ySin : Tensor { device := device, shape := #[tokens, perDim / 2], dtype := .Float32 } := Tensor.embedding1d yIds ySinTable
-  let xRot : Tensor { device := device, shape := #[1, tokens, nHead, perDim], dtype := dtype } := Tensor.applyRotary xPart xCos xSin
-  let yRot : Tensor { device := device, shape := #[1, tokens, nHead, perDim], dtype := dtype } := Tensor.applyRotary yPart yCos ySin
-  typedCat xRot yRot 3
+  let xCos : Tensor { device := device, shape := #[tokens, quarter], dtype := .Float32 } := Tensor.embedding1d xIds xCosTable
+  let xSin : Tensor { device := device, shape := #[tokens, quarter], dtype := .Float32 } := Tensor.embedding1d xIds xSinTable
+  let yCos : Tensor { device := device, shape := #[tokens, quarter], dtype := .Float32 } := Tensor.embedding1d yIds yCosTable
+  let ySin : Tensor { device := device, shape := #[tokens, quarter], dtype := .Float32 } := Tensor.embedding1d yIds ySinTable
+  let xRot := Tensor.applyRotary xPart xCos xSin
+  let yRot := Tensor.applyRotary yPart yCos ySin
+  have hQuarters : 2 * quarter + 2 * quarter = 4 * quarter := by omega
+  (Tensor.cat xRot yRot 3).reshape #[1, tokens, nHead, 4 * quarter] (by simp [hQuarters])
 
 private def replaceTokenId {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
-    (fromId toId : UInt64)
+    (fromId toId : tokenizer.TokenId)
     : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 } :=
   let mask : Tensor { device := device, shape := #[batch, seq], dtype := .Bool } := Tensor.eqScalar inputIds (Int64.ofNat fromId.toNat)
   let repl : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 } := (Tensor.fullInt #[batch, seq] (Int64.ofNat toId.toNat)).to inputIds.device
@@ -141,14 +134,14 @@ def forward2d {tokens outDim inDim : Nat}
     (x : Tensor { device := device, shape := #[tokens, inDim], dtype := inputDType })
     : Tensor { device := device, shape := #[tokens, outDim], dtype := dtype } :=
   let x' := clampRange (Tensor.castLike m.weight x) m.input_min m.input_max
-  let y := linear2d x' m.weight
+  let y := Tensor.linear x' m.weight
   clampRange y m.output_min m.output_max
 
 end Gemma4VisionLinear
 
 structure Gemma4VisionPatchEmbedder (cfg : VLConfig) (dtype : DType := .Float32) where
   input_proj : Gemma4VisionLinear (dtype := dtype) (device := device) cfg.vision_config.hidden_size (VisionConfig.patchDim cfg.vision_config)
-  position_embedding_table : SomeDTypeTensor #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size] device
+  position_embedding_table : Tensor { device := device, shape := #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := .Float32 }
   deriving TensorStruct
 
 namespace Gemma4VisionPatchEmbedder
@@ -157,24 +150,24 @@ def forward {patchRows patchCols : Nat}
     (cfg : VLConfig)
     (m : Gemma4VisionPatchEmbedder (dtype := dtype) (device := device) cfg)
     (patchGrid : Tensor { device := device, shape := #[patchRows, patchCols, VisionConfig.patchDim cfg.vision_config], dtype := inputDType })
-    : SomeDTypeTensor #[patchRows * patchCols, cfg.vision_config.hidden_size] device :=
+    : Tensor { device := device, shape := #[patchRows * patchCols, cfg.vision_config.hidden_size], dtype := .Float32 } :=
   let tokens := patchRows * patchCols
   let flat : Tensor { device := device, shape := #[tokens, VisionConfig.patchDim cfg.vision_config], dtype := inputDType } :=
     Tensor.reshape patchGrid #[tokens, VisionConfig.patchDim cfg.vision_config]
   let flat := Tensor.mulScalar (Tensor.addScalar flat (-0.5)) 2.0
   let hidden : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := dtype } := m.input_proj.forward2d flat
-  let xTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } :=
-    Tensor.reshape (sliceTyped m.position_embedding_table.2 0 0 1)
+  let xTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := .Float32 } :=
+    Tensor.reshape (Tensor.slice m.position_embedding_table 0 0 1)
       #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
-  let yTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } :=
-    Tensor.reshape (sliceTyped m.position_embedding_table.2 0 1 1)
+  let yTable : Tensor { device := device, shape := #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size], dtype := .Float32 } :=
+    Tensor.reshape (Tensor.slice m.position_embedding_table 0 1 1)
       #[cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
   let (xIdsCpu, yIdsCpu) := positionIds patchRows patchCols
   let xIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := xIdsCpu.to hidden.device
   let yIds : Tensor { device := device, shape := #[tokens], dtype := .Int64 } := yIdsCpu.to hidden.device
-  let xPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } := Tensor.embedding1d xIds xTable
-  let yPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := m.position_embedding_table.1 } := Tensor.embedding1d yIds yTable
-  promotedAdd (promotedAdd hidden xPos).2 yPos
+  let xPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := .Float32 } := Tensor.embedding1d xIds xTable
+  let yPos : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := .Float32 } := Tensor.embedding1d yIds yTable
+  Tensor.add (Tensor.add (floatDynamic hidden) xPos) yPos
 
 end Gemma4VisionPatchEmbedder
 
@@ -219,11 +212,11 @@ def forward {patchRows patchCols : Nat}
   let v0 : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } := m.v_proj.forward2d x
 
   let q1 : Tensor { device := device, shape := #[1, tokens, cfg.num_attention_heads, cfg.head_dim], dtype := dtype } :=
-    Tensor.reshape q0 #[1, tokens, cfg.num_attention_heads, cfg.head_dim] (by simp [Nat.mul_assoc, cfg.queryHeadsSplit])
+    Tensor.reshape q0 #[1, tokens, cfg.num_attention_heads, cfg.head_dim] (by simp [Nat.mul_assoc, Gemma4VisionConfig.head_dim, cfg.queryHeadsSplit])
   let k1 : Tensor { device := device, shape := #[1, tokens, cfg.num_key_value_heads, cfg.head_dim], dtype := dtype } :=
-    Tensor.reshape k0 #[1, tokens, cfg.num_key_value_heads, cfg.head_dim] (by simp [Nat.mul_assoc, cfg.keyValueHeadsSplit])
+    Tensor.reshape k0 #[1, tokens, cfg.num_key_value_heads, cfg.head_dim] (by simp [Nat.mul_assoc, Gemma4VisionConfig.head_dim, cfg.keyValueHeadsSplit])
   let v1 : Tensor { device := device, shape := #[1, tokens, cfg.num_key_value_heads, cfg.head_dim], dtype := dtype } :=
-    Tensor.reshape v0 #[1, tokens, cfg.num_key_value_heads, cfg.head_dim] (by simp [Nat.mul_assoc, cfg.keyValueHeadsSplit])
+    Tensor.reshape v0 #[1, tokens, cfg.num_key_value_heads, cfg.head_dim] (by simp [Nat.mul_assoc, Gemma4VisionConfig.head_dim, cfg.keyValueHeadsSplit])
 
   let q2 := m.q_norm.forward4d q1
   let k2 := m.k_norm.forward4d k1
@@ -239,9 +232,9 @@ def forward {patchRows patchCols : Nat}
   let kh : Tensor { device := device, shape := #[1, cfg.num_key_value_heads, tokens, cfg.head_dim], dtype := dtype } := transposeAttention k3
   let vh : Tensor { device := device, shape := #[1, cfg.num_key_value_heads, tokens, cfg.head_dim], dtype := dtype } := transposeAttention v2
   let attn : Tensor { device := device, shape := #[1, cfg.num_attention_heads, tokens, cfg.head_dim], dtype := dtype } :=
-    Tensor.attentionGQA qh kh vh false true
+    Tensor.attentionGQA qh kh vh false true (_heads := .ofDvd cfg.kvHeadsDivide)
   let out : Tensor { device := device, shape := #[tokens, cfg.hidden_size], dtype := dtype } :=
-    Tensor.reshape (transposeAttention attn) #[tokens, cfg.hidden_size] (by simp [Nat.mul_assoc, cfg.queryHeadsSplit])
+    Tensor.reshape (transposeAttention attn) #[tokens, cfg.hidden_size] (by simp [Nat.mul_assoc, Gemma4VisionConfig.head_dim, cfg.queryHeadsSplit])
   m.o_proj.forward2d out
 
 end Gemma4VisionAttention
@@ -260,72 +253,68 @@ namespace Gemma4VisionBlock
 def forward {patchRows patchCols : Nat}
     (cfg : VisionConfig)
     (m : Gemma4VisionBlock (dtype := dtype) (device := device) cfg)
-    (x : Tensor { device := device, shape := #[patchRows * patchCols, cfg.hidden_size], dtype := inputDType })
-    : SomeDTypeTensor #[patchRows * patchCols, cfg.hidden_size] device :=
-  let residual1 := x
+    (x : Tensor { device := device, shape := #[patchRows * patchCols, cfg.hidden_size], dtype := .Float32 })
+    : Tensor { device := device, shape := #[patchRows * patchCols, cfg.hidden_size], dtype := .Float32 } :=
   let h1 := m.input_layernorm.forward2d x
   let attn := m.self_attn.forward (patchRows := patchRows) (patchCols := patchCols) cfg h1
-  let h2 := promotedAdd residual1 (m.post_attention_layernorm.forward2d attn)
-  let residual2 := h2.2
-  let h3 := m.pre_feedforward_layernorm.forward2d h2.2
+  let h2 := Tensor.add x (floatDynamic (m.post_attention_layernorm.forward2d attn))
+  let h3 := m.pre_feedforward_layernorm.forward2d h2
   let mlp := m.mlp.forward cfg h3
-  promotedAdd residual2 (m.post_feedforward_layernorm.forward2d mlp)
+  Tensor.add h2 (floatDynamic (m.post_feedforward_layernorm.forward2d mlp))
 
 end Gemma4VisionBlock
 
 structure Gemma4VisionModel (cfg : VLConfig) (dtype : DType := .Float32) where
   patch_embedder : Gemma4VisionPatchEmbedder (dtype := dtype) (device := device) cfg
   blocks : Array (Gemma4VisionBlock (dtype := dtype) (device := device) cfg.vision_config)
-  std_bias : Option (SomeDTypeTensor #[cfg.vision_config.hidden_size] device) := none
-  std_scale : Option (SomeDTypeTensor #[cfg.vision_config.hidden_size] device) := none
+  std_bias : Option (Tensor { device := device, shape := #[cfg.vision_config.hidden_size], dtype := .Float32 }) := none
+  std_scale : Option (Tensor { device := device, shape := #[cfg.vision_config.hidden_size], dtype := .Float32 }) := none
   deriving TensorStruct
 
 namespace Gemma4VisionModel
 
 private def poolFeatures {patchRows patchCols : Nat}
     (cfg : VLConfig)
-    (x : Tensor { device := device, shape := #[patchRows * patchCols, cfg.vision_config.hidden_size], dtype := dtype })
-    : SomeDTypeTensor #[(patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size),
-        cfg.vision_config.hidden_size] device :=
+    (x : Tensor { device := device, shape := #[patchRows * patchCols, cfg.vision_config.hidden_size], dtype := .Float32 })
+    : Tensor { device := device, shape := #[(patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size),
+        cfg.vision_config.hidden_size], dtype := .Float32 } :=
   let pool := cfg.vision_config.pooling_kernel_size
   let pooledRows := patchRows / pool
   let pooledCols := patchCols / pool
-  let xGrid : Tensor { device := device, shape := #[1, patchRows, patchCols, cfg.vision_config.hidden_size], dtype := dtype } :=
+  let xGrid : Tensor { device := device, shape := #[1, patchRows, patchCols, cfg.vision_config.hidden_size], dtype := .Float32 } :=
     Tensor.reshape x #[1, patchRows, patchCols, cfg.vision_config.hidden_size]
-  let xNchw : Tensor { device := device, shape := #[1, cfg.vision_config.hidden_size, patchRows, patchCols], dtype := dtype } := (Tensor.permute xGrid #[0, 3, 1, 2]).reshape #[1, cfg.vision_config.hidden_size, patchRows, patchCols]
-  let pooled : Tensor { device := device, shape := #[1, cfg.vision_config.hidden_size, pooledRows, pooledCols], dtype := dtype } :=
+  let xNchw : Tensor { device := device, shape := #[1, cfg.vision_config.hidden_size, patchRows, patchCols], dtype := .Float32 } := (Tensor.permute xGrid #[0, 3, 1, 2]).reshape #[1, cfg.vision_config.hidden_size, patchRows, patchCols]
+  let pooled : Tensor { device := device, shape := #[1, cfg.vision_config.hidden_size, pooledRows, pooledCols], dtype := .Float32 } :=
     avgPool2d xNchw pool
-  let pooledNhwc : Tensor { device := device, shape := #[1, pooledRows, pooledCols, cfg.vision_config.hidden_size], dtype := dtype } :=
+  let pooledNhwc : Tensor { device := device, shape := #[1, pooledRows, pooledCols, cfg.vision_config.hidden_size], dtype := .Float32 } :=
     (Tensor.permute pooled #[0, 2, 3, 1]).reshape #[1, pooledRows, pooledCols, cfg.vision_config.hidden_size]
-  match Tensor.Promoting.mulScalar?
-      (Tensor.reshape pooledNhwc #[pooledRows * pooledCols, cfg.vision_config.hidden_size])
-      (Float.sqrt cfg.vision_config.hidden_size.toFloat) with
-  | .ok result => packExactTensor result.tensor
-  | .error message => nativeInvariantFailure s!"Gemma4 vision pooling: {message}"
+  Tensor.mulScalar
+    (Tensor.reshape pooledNhwc #[pooledRows * pooledCols, cfg.vision_config.hidden_size])
+    (Float.sqrt cfg.vision_config.hidden_size.toFloat)
 
 def forward {patchRows patchCols : Nat}
     (cfg : VLConfig)
     (m : Gemma4VisionModel (dtype := dtype) (device := device) cfg)
     (patchGrid : Tensor { device := device, shape := #[patchRows, patchCols, VisionConfig.patchDim cfg.vision_config], dtype := inputDType })
-    : SomeDTypeTensor #[(patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size),
-        cfg.vision_config.hidden_size] device :=
+    : Tensor { device := device, shape := #[(patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size),
+        cfg.vision_config.hidden_size], dtype := .Float32 } :=
   Id.run do
     let mut hidden := m.patch_embedder.forward cfg patchGrid
     for i in [:m.blocks.size] do
       match m.blocks[i]? with
       | some blk =>
-        hidden := blk.forward (patchRows := patchRows) (patchCols := patchCols) cfg.vision_config hidden.2
+        hidden := blk.forward (patchRows := patchRows) (patchCols := patchCols) cfg.vision_config hidden
       | none =>
         pure ()
-    let pooled := poolFeatures cfg hidden.2
+    let pooled := poolFeatures cfg hidden
     match m.std_bias, m.std_scale with
     | some bias, some scale =>
       let nTok := (patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size)
-      let bias : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := bias.1 } :=
-        Tensor.expand (Tensor.reshape bias.2 #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
-      let scale : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := scale.1 } :=
-        Tensor.expand (Tensor.reshape scale.2 #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
-      promotedMul (promotedSub pooled.2 bias).2 scale
+      let bias : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := .Float32 } :=
+        Tensor.broadcastTo (Tensor.reshape bias #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
+      let scale : Tensor { device := device, shape := #[nTok, cfg.vision_config.hidden_size], dtype := .Float32 } :=
+        Tensor.broadcastTo (Tensor.reshape scale #[1, cfg.vision_config.hidden_size]) #[nTok, cfg.vision_config.hidden_size]
+      Tensor.mul (Tensor.sub pooled bias) scale
     | _, _ =>
       pooled
 
@@ -343,11 +332,7 @@ def forward {tokens : Nat}
     (inputsEmbeds : Tensor { device := device, shape := #[tokens, cfg.vision_config.hidden_size], dtype := inputDType })
     : Tensor { device := device, shape := #[tokens, cfg.text_config.hidden_size], dtype := dtype } :=
   let normalized := rmsNormNoScale2d inputsEmbeds cfg.text_config.rms_norm_eps
-  let admitted : Tensor ⟨#[tokens, cfg.vision_config.hidden_size], dtype, device⟩ :=
-    match Tensor.ofRaw normalized.raw with
-    | .ok tensor => tensor
-    | .error message => nativeInvariantFailure s!"Gemma4 projector dtype: {message}"
-  linear2d admitted m.embedding_projection
+  Tensor.linear (normalized.castDType dtype) m.embedding_projection
 
 end Gemma4MultimodalEmbedder
 
@@ -367,7 +352,7 @@ def getImageFeatures {patchRows patchCols : Nat}
     : Tensor { device := device, shape := #[(patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size),
         cfg.text_config.hidden_size], dtype := projectorDType } :=
   let visionFeatures := m.vision_tower.forward cfg patchGrid
-  m.embed_vision.forward cfg visionFeatures.2
+  m.embed_vision.forward cfg visionFeatures
 
 def getImageFeaturesMany
     (cfg : VLConfig)
@@ -385,7 +370,7 @@ def getImageFeaturesMany
         | none =>
           some ⟨nTok, feats⟩
         | some ⟨nPrev, prev⟩ =>
-          some ⟨nPrev + nTok, typedCat prev feats 0⟩
+          some ⟨nPrev + nTok, Tensor.cat prev feats 0⟩
   pure acc?
 
 def repeatFeaturesForBatch {batch tokens : Nat}
@@ -395,29 +380,28 @@ def repeatFeaturesForBatch {batch tokens : Nat}
   Id.run do
     if batch <= 1 then
       return ⟨tokens, features⟩
-    let repeated := Tensor.expand (features.reshape #[1, tokens, cfg.text_config.hidden_size])
+    let repeated := Tensor.broadcastTo (features.reshape #[1, tokens, cfg.text_config.hidden_size])
       #[batch, tokens, cfg.text_config.hidden_size]
     return ⟨batch * tokens, repeated.reshape #[batch * tokens, cfg.text_config.hidden_size]⟩
 
-private def scatterFeaturesIntoToken {batch seq hidden featTokens featDim : Nat}
+private def scatterFeaturesIntoToken {batch seq hidden featTokens : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (inputsEmbeds : Tensor { device := device, shape := #[batch, seq, hidden], dtype := dtype })
-    (tokenId : UInt64)
-    (features : Tensor { device := device, shape := #[featTokens, featDim], dtype := projectorDType })
+    (tokenId : tokenizer.TokenId)
+    (features : Tensor { device := device, shape := #[featTokens, hidden], dtype := projectorDType })
     : IO (Tensor { device := device, shape := #[batch, seq, hidden], dtype := dtype }) := do
-  if featDim != hidden then
-    throw <| IO.userError
-      s!"Gemma4 feature hidden size ({featDim}) does not match text hidden size ({hidden})"
   let tokenMask2d : Tensor { device := device, shape := #[batch, seq], dtype := .Bool } := Tensor.eqScalar inputIds (Int64.ofNat tokenId.toNat)
   let nTokens ← countMask2d tokenMask2d
   if nTokens != featTokens then
     throw <| IO.userError
       s!"Gemma4 placeholder token count mismatch for token={tokenId}: ids={nTokens} features={featTokens}"
   let tokenMask : Tensor { device := device, shape := #[batch, seq, hidden], dtype := .Bool } :=
-    Tensor.expand (Tensor.reshape tokenMask2d #[batch, seq, 1]) #[batch, seq, hidden]
-  let src ← IO.ofExcept (Tensor.ofRaw (σ := ⟨#[featTokens * featDim], dtype, device⟩)
-    (Tensor.reshape features #[featTokens * featDim]).raw)
-  pure (Tensor.maskedScatter inputsEmbeds tokenMask src)
+    Tensor.broadcastTo (Tensor.reshape tokenMask2d #[batch, seq, 1]) #[batch, seq, hidden]
+  let flat := Tensor.reshape features #[featTokens * hidden]
+  if h : projectorDType = dtype then
+    pure (Tensor.maskedScatter inputsEmbeds tokenMask (h ▸ flat))
+  else
+    throw <| IO.userError s!"Gemma4 feature dtype {projectorDType} differs from text dtype {dtype}"
 
 private def buildInputEmbedsWithFeatures {batch seq : Nat}
     (cfg : VLConfig)
@@ -425,7 +409,7 @@ private def buildInputEmbedsWithFeatures {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (imageFeatures : Option (ImageFeatures (dtype := projectorDType) (device := device) cfg) := none)
     : IO (Tensor { device := device, shape := #[batch, seq, cfg.text_config.hidden_size], dtype := dtype } × PerLayerInputs (dtype := dtype) (device := device) cfg batch seq) := do
-  let padId := cfg.text_config.pad_token_id.getD 0
+  let padId := cfg.text_config.pad_token_id.get cfg.padPresent
   let llmInputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 } := replaceTokenId inputIds cfg.image_token_id padId
   let llmInputsEmbeds : Tensor { device := device, shape := #[batch, seq, cfg.text_config.hidden_size], dtype := dtype } :=
     m.language_model.embedTokens cfg.text_config llmInputIds
@@ -447,13 +431,14 @@ private def buildVisionBidirectionalPrefillMasks {batch seq : Nat}
     (cfg : VLConfig)
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     : IO (Tensor { device := device, shape := #[batch, seq, seq], dtype := .Int64 } × Tensor { device := device, shape := #[batch, seq, seq], dtype := .Int64 }) := do
-  let padId := cfg.text_config.pad_token_id.getD 0
+  let padId := cfg.text_config.pad_token_id.get cfg.padPresent
   let slidingWindow := cfg.text_config.sliding_window
   let mut slidingFlat : Array Int64 := #[]
   let mut fullFlat : Array Int64 := #[]
 
-  for b in [:batch] do
-    let row2 : Tensor { device := device, shape := #[1, seq], dtype := .Int64 } := sliceTyped inputIds 0 b 1
+  for hb : b in [:batch] do
+    let row2 : Tensor { device := device, shape := #[1, seq], dtype := .Int64 } :=
+      Tensor.slice inputIds 0 b 1 (_bounds := by have := hb.upper; simp at this ⊢; omega)
     let row1 : Tensor { device := device, shape := #[seq], dtype := .Int64 } := Tensor.reshape (Tensor.toInt64 row2) #[seq]
     let ids ← Tensor.toUInt64Array row1
     let mut groupIds : Array Int64 := Array.replicate ids.size (-1)
@@ -461,9 +446,9 @@ private def buildVisionBidirectionalPrefillMasks {batch seq : Nat}
 
     for i in [:ids.size] do
       let tok := ids[i]!
-      if tok == cfg.image_token_id then
+      if tok == cfg.image_token_id.toUInt64 then
         let prevIsImage :=
-          i > 0 && ids[i - 1]! == cfg.image_token_id
+          i > 0 && ids[i - 1]! == cfg.image_token_id.toUInt64
         if prevIsImage then
           groupIds := groupIds.set! i (nextGroup - 1)
         else
@@ -472,15 +457,15 @@ private def buildVisionBidirectionalPrefillMasks {batch seq : Nat}
 
     for q in [:ids.size] do
       let qTok := ids[q]!
-      let qValid := qTok != padId
+      let qValid := qTok != padId.toUInt64
       let qGroup := groupIds[q]!
       for k in [:ids.size] do
         let kTok := ids[k]!
-        let kValid := kTok != padId
+        let kValid := kTok != padId.toUInt64
         let baseFull := qValid && kValid && k <= q
         let baseSliding :=
           baseFull &&
-          (slidingWindow == 0 || (q - k) < slidingWindow)
+          (q - k) < slidingWindow
         let sameVisionGroup := qGroup >= 0 && qGroup == groupIds[k]!
         fullFlat := fullFlat.push (if baseFull || sameVisionGroup then 1 else 0)
         slidingFlat := slidingFlat.push (if baseSliding || sameVisionGroup then 1 else 0)
@@ -539,7 +524,7 @@ def generate {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (maxNewTokens : Nat := 256)
     (strategy : SamplingStrategy := .greedy)
-    (eosTokenIds : Array UInt64 := #[])
+    (eosTokenIds : Array tokenizer.TokenId := #[])
     (imageFeatures : Option (ImageFeatures (dtype := projectorDType) (device := device) cfg) := none)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
   let (inputsEmbeds, perLayerInputs) ← buildInputEmbedsWithFeatures cfg m inputIds imageFeatures
@@ -561,7 +546,7 @@ def generateStream {batch seq : Nat}
     (onStep : StreamCallback (device := device) batch)
     (maxNewTokens : Nat := 256)
     (strategy : SamplingStrategy := .greedy)
-    (eosTokenIds : Array UInt64 := #[])
+    (eosTokenIds : Array tokenizer.TokenId := #[])
     (imageFeatures : Option (ImageFeatures (dtype := projectorDType) (device := device) cfg) := none)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
   let (inputsEmbeds, perLayerInputs) ← buildInputEmbedsWithFeatures cfg m inputIds imageFeatures

@@ -31,22 +31,22 @@ example (_x : Tensor { shape := #[2, 3], dtype := .Float32, device := .CPU }) (_
     have _ : Tensor { shape := #[6], dtype := .Float32, device := .CPU } := { raw := _x.raw }
   trivial
 
+-- Reshape requires equal element counts by proof; a wrapped negative extent
+-- cannot match one either, so it never reaches native shape inference.
+example (t : Tensor ⟨#[2, 2], .Float32, .CPU⟩) : True := by
+  have _ := t.reshape #[4]
+  fail_if_success
+    have _ := t.reshape #[3]
+  fail_if_success
+    have _ := t.reshape #[18446744073709551615]
+  trivial
+
 @[test]
-def testRawAdmissionRejectsFalseClaims : IO Unit := do
+def testOfTensorAdmitsOnlyTheExactShapeAndDType : IO Unit := do
   let raw := (Tensor.full #[2, 3] 7).raw
-  let rejected : Array StaticSpec := #[
-    { shape := #[6], dtype := .Float32, device := .CPU },
-    { shape := #[2, 3], dtype := .Int64, device := .CPU }]
-  for device in ← Tests.acceleratorDevices do
-    LeanTest.assertTrue (Tensor.ofRaw (σ := ⟨raw.runtimeShape, raw.dtype, device⟩) raw).toOption.isNone
-      "A CPU handle cannot be admitted at an acquired accelerator placement"
-  for spec in rejected do
-    LeanTest.assertTrue ((Tensor.ofRaw (σ := spec) raw).toOption.isNone)
-      s!"Raw admission must reject {reprStr spec}"
-  match Tensor.ofRaw (σ := { shape := #[2, 3], dtype := .Float32, device := .CPU }) raw with
+  match Tensor.ofTensor (shape := #[2, 3]) .Float32 raw with
   | .error message => LeanTest.fail message
-  | .ok tensor =>
-      LeanTest.assertEqual (← tensor.toFloatArray) #[7, 7, 7, 7, 7, 7]
+  | .ok tensor => LeanTest.assertEqual (← tensor.toFloatArray) #[7, 7, 7, 7, 7, 7]
   LeanTest.assertTrue ((Tensor.ofTensor (shape := #[6]) .Float32 raw).toOption.isNone)
     "Checked raw conversion must not reshape equal-size storage"
   LeanTest.assertTrue ((Tensor.ofTensor (shape := #[2, 3]) .Int64 raw).toOption.isNone)
@@ -58,16 +58,9 @@ example (_destination : Tensor ⟨#[2], .Int64, .CPU⟩)
   trivial
 
 @[test]
-def testErasedDTypeCopyRejectsBeforeMutation : IO Unit := do
+def testCopyIntoAfterExplicitConversion : IO Unit := do
   let destination := Tensor.fullInt #[2] 9
   let source := Tensor.fromFloatArray #[1.75, 2.25]
-  match Tensor.ofRaw (σ := destination.staticSpec) source.raw with
-  | .error error =>
-    LeanTest.assertTrue (error.containsSubstr "dtype")
-      "Copy rejection must explain the dtype mismatch"
-  | .ok _ => LeanTest.fail "Raw admission must reject an implicit converting copy"
-  LeanTest.assertEqual (← destination.toFloatArray) #[9, 9]
-    "Rejected copy must leave the destination unchanged"
   let destination ← Tensor.copyInto destination source.toInt64
   LeanTest.assertEqual (← destination.toFloatArray) #[1, 2]
     "Explicit native conversion remains available"
@@ -78,13 +71,7 @@ example (_input : Tensor ⟨#[2, 2], .Int32, .CPU⟩) : True := by
   trivial
 
 @[test]
-def testReplacementChecksExactDType : IO Unit := do
-  let original := (Tensor.fullInt #[2] 9)
-  LeanTest.assertTrue ((original.checkedReplacement? (Tensor.ones #[2]).raw).toOption.isNone)
-    "A preserving adapter must reject dtype drift"
-  match original.checkedReplacement? (Tensor.fullInt #[2] 4).raw with
-  | .error message => LeanTest.fail message
-  | .ok replacement => LeanTest.assertEqual (← replacement.toFloatArray) #[4, 4]
+def testSumDimAccumulatesSmallIntsAsInt64 : IO Unit := do
   let smallInts := ((Tensor.ones #[2, 2]).castDType .Int32)
   let reduced := Tensor.sumDim smallInts 0
   LeanTest.assertEqual reduced.raw.dtype .Int64
@@ -93,21 +80,11 @@ def testReplacementChecksExactDType : IO Unit := do
 @[test]
 def testExplicitConversionsCheckNativeResults : IO Unit := do
   let original := (Tensor.fromFloatArray #[1.25, 2.75, 3.5, 4.5]).reshape #[2, 2]
-  match original.castDType? .Int64 with
-  | .error message => LeanTest.fail message
-  | .ok converted =>
-      LeanTest.assertEqual (← converted.toFloatArray) #[1, 2, 3, 4]
-      LeanTest.assertEqual converted.runtimeShape #[2, 2]
-      LeanTest.assertEqual converted.raw.dtype .Int64
-  LeanTest.assertTrue ((original.castDType? .QInt8).toOption.isNone)
-    "A dtype without a native conversion must return an error"
-  match original.reshapeChecked? #[4] with
-  | .error message => LeanTest.fail message
-  | .ok reshaped => LeanTest.assertEqual reshaped.runtimeShape #[4]
-  LeanTest.assertTrue ((original.reshapeChecked? #[3]).toOption.isNone)
-    "Runtime reshape must reject a different element count"
-  LeanTest.assertTrue ((original.reshapeChecked? #[18446744073709551615]).toOption.isNone)
-    "Wrapped negative extents must not act as native shape inference"
+  let converted := original.castDType .Int64
+  LeanTest.assertEqual (← converted.toFloatArray) #[1, 2, 3, 4]
+  LeanTest.assertEqual converted.runtimeShape #[2, 2]
+  LeanTest.assertEqual converted.raw.dtype .Int64
+  LeanTest.assertEqual (original.reshape #[4]).runtimeShape #[4]
   let pinned := Tensor.onesFor { shape := #[2], dtype := .Float32, device := .CPU }
   let converted ← TensorStruct.castTo (Tensor ⟨#[2], .BFloat16, .CPU⟩) pinned
   LeanTest.assertEqual converted.raw.dtype .BFloat16
@@ -122,9 +99,6 @@ def testFoundationTypedOperationsAndRawMetadata : IO Unit := do
   let a := Tensor.full #[2, 3] 2.0
   let b := Tensor.full #[3, 4] 3.0
   let product : Tensor { shape := #[2, 4], dtype := .Float32, device := .CPU } := Tensor.mm a b
-  match product.validate with
-  | .ok () => pure ()
-  | .error message => LeanTest.fail message
   LeanTest.assertEqual (Tensor.item (Tensor.sumAll product)) 144.0
     "Standalone typed imports must execute native matrix operations"
   LeanTest.assertTrue (!(toString product.raw).isEmpty)
@@ -137,17 +111,12 @@ def testExistentialTensorPreservesFullSpec : IO Unit := do
   let packed : Sigma Tensor := (Tensor.onesFor spec).toSome
   LeanTest.assertTrue (packed.fst == spec)
     "Existential tensors must retain shape, dtype, and concrete device"
-  match packed.snd.validate with
-  | .ok () => pure ()
-  | .error message => LeanTest.fail message
   LeanTest.assertEqual (← packed.snd.toFloatArray) #[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-  match (Tensor.onesFor spec).reifyDType with
-  | .error message => LeanTest.fail message
-  | .ok ⟨dtype, tensor⟩ =>
-      LeanTest.assertEqual dtype .Float64
-      LeanTest.assertEqual tensor.runtimeShape #[2, 3]
-      LeanTest.assertTrue (tensor.staticSpec.device == .CPU)
-        "Recovering the native dtype must retain the concrete device"
+  let ⟨dtype, tensor⟩ := (Tensor.onesFor spec).packDType
+  LeanTest.assertEqual dtype .Float64
+  LeanTest.assertEqual tensor.runtimeShape #[2, 3]
+  LeanTest.assertTrue (tensor.staticSpec.device == .CPU)
+    "Packing the dtype must retain the concrete device"
 
 end Tests.TypedStandalone
 

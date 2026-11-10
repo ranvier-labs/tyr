@@ -50,7 +50,7 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
   let down : Downsample 1 := { conv := {
     weight := (Tensor.ones #[1, 1, 3, 3])
     bias := (Tensor.zeros #[1]) } }
-  let odd := down.forward ((Tensor.ones #[1, 1, 3, 5]))
+  let odd := down.forward ((Tensor.ones #[1, 1, 3, 5])) (by decide) (by decide)
   LeanTest.assertEqual odd.runtimeShape #[1, 1, 2, 3]
   close odd ((Tensor.fromFloatArray #[4, 6, 4, 4, 6, 4]).reshape #[1, 1, 2, 3])
 
@@ -134,7 +134,7 @@ private def writeConvCheckpoint (path : System.FilePath) (bf16 wrongShape : Bool
   let mixedPath := dir / "mixed.safetensors"
   writeConvCheckpoint mixedPath false false true
   Tests.assertThrows (loadConv2d mixedPath.toString "conv" 1 1 3 1)
-    (some "VAE tensor 'conv.bias'")
+    (some "Expected dtype")
   -- The sharded reader enumerates every safetensors file in its directory.
   -- Keep this checkpoint separate from the independent single-file fixtures.
   let shardedDir := dir / "wrong-shape-sharded"
@@ -143,7 +143,7 @@ private def writeConvCheckpoint (path : System.FilePath) (bf16 wrongShape : Bool
   IO.FS.writeFile (shardedDir / "model.safetensors.index.json")
     "{\"weight_map\":{\"conv.weight\":\"invalid.safetensors\"}}"
   Tests.assertThrows
-    (safetensors.loadTensorShardedExact shardedDir.toString "conv.weight" #[1, 1, 3, 3])
+    (do discard <| (← safetensors.Source.open shardedDir.toString).load "conv.weight" #[1, 1, 3, 3])
     (some "Expected shape")
 
 @[test] def testVAEGroupNormInitializationFailuresAreRecoverable : IO Unit := do

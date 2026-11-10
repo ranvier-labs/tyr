@@ -33,7 +33,7 @@ abbrev ThinkerLmVocabSize (cfg : ThinkerConfig) : Nat :=
 
 private def tokenInSetMask {batch : Nat}
     (tokens : Tensor { device := device, shape := #[batch], dtype := .Int64 })
-    (allow : Array UInt64)
+    (allow : Array tokenizer.TokenId)
     : Tensor { device := device, shape := #[batch], dtype := .Bool } :=
   Id.run do
     let mut out : Tensor { device := device, shape := #[batch], dtype := .Bool } := Tensor.eqScalar tokens (-1)
@@ -43,7 +43,7 @@ private def tokenInSetMask {batch : Nat}
     out
 
 private def eosVectorOnDevice {batch : Nat}
-    (eosTokenIds : Array UInt64)
+    (eosTokenIds : Array tokenizer.TokenId)
     (device : Device)
     : Option (Tensor { device := device, shape := #[batch], dtype := .Int64 }) :=
   match eosTokenIds[0]? with
@@ -102,7 +102,7 @@ private def gatherRowsByPositions {seq half : Nat}
   let idxVals : Array Int64 := Array.ofFn (n := seq) fun i => Int64.ofNat (clipTo (positions.getD i.val 0) seq)
   let idxCpu : Tensor { device := .CPU, shape := #[seq], dtype := .Int64 } := Tensor.fromInt64ArrayShaped idxVals #[seq] (by simp [idxVals])
   let idx : Tensor { device := device, shape := #[seq], dtype := .Int64 } := idxCpu.to table.device
-  let idx2d : Tensor { device := device, shape := #[seq, half], dtype := .Int64 } := Tensor.expand (Tensor.reshape idx #[seq, 1]) #[seq, half]
+  let idx2d : Tensor { device := device, shape := #[seq, half], dtype := .Int64 } := Tensor.broadcastTo (Tensor.reshape idx #[seq, 1]) #[seq, half]
   Tensor.reshape (Tensor.gather table 0 idx2d) #[seq, half]
 
 /-- Output container mirroring `...CausalLMOutputWithPast` fields that are
@@ -133,16 +133,13 @@ def init (cfg : ThinkerConfig) (device : Device := .CPU) (dtype : DType := .Floa
   let _ := support.down
   let audioTower ← AudioEncoder.init (device := device) (dtype := dtype) cfg.audioConfig
   let textModel ← qwen.Qwen3Model.init (device := device) (TextQwenConfig cfg) dtype
-  let audioProjectionWeight ←
-    if h : cfg.audioConfig.outputDim = cfg.textConfig.hiddenSize then
-      let eye : Tensor { dtype := dtype, device := device, shape := #[cfg.textConfig.hiddenSize, cfg.textConfig.hiddenSize] } ←
-        Tensor.parameter ((Tensor.eyeFor (n := cfg.textConfig.hiddenSize) dtype device))
-      let eye' : Tensor { dtype := dtype, device := device, shape := #[cfg.textConfig.hiddenSize, cfg.audioConfig.outputDim] } := by
-        simpa [h] using eye
-      pure eye'
-    else
-      throw <| IO.userError
-        s!"Qwen3-ASR expects audio output dim == text hidden dim, got {cfg.audioConfig.outputDim} and {cfg.textConfig.hiddenSize}"
+  let audioProjectionWeight ← do
+    have h := cfg.audioMatchesText
+    let eye : Tensor { dtype := dtype, device := device, shape := #[cfg.textConfig.hiddenSize, cfg.textConfig.hiddenSize] } ←
+      Tensor.parameter ((Tensor.eyeFor (n := cfg.textConfig.hiddenSize) dtype device))
+    let eye' : Tensor { dtype := dtype, device := device, shape := #[cfg.textConfig.hiddenSize, cfg.audioConfig.outputDim] } := by
+      simpa [h] using eye
+    pure eye'
   let audioProjectionBias ← initBias (device := device) #[cfg.textConfig.hiddenSize] dtype
   let lmHead ← initWeight (device := device) #[ThinkerLmVocabSize cfg, cfg.textConfig.hiddenSize] cfg.textConfig.hiddenSize dtype
   pure { audioTower, textModel, audioProjectionWeight, audioProjectionBias, lmHead }
@@ -182,17 +179,17 @@ def forwardEmbeds {batch seq : Nat}
   let (cos, sin) :=
     qwen.computeFreqsOnDevice
       seq
-      cfg.textConfig.headDim
+      cfg.textConfig.halfHeadDim
       cfg.textConfig.ropeTheta
       inputsEmbeds.device
   let hidden := match attnMask with
     | some mask =>
       m.textModel.layers.foldl
-        (fun h layer => layer.forwardMasked h cos sin mask true)
+        (fun h layer => layer.forwardMasked cfg.textConfig.headsValid.2.2 h cos sin mask true)
         inputsEmbeds
     | none =>
       m.textModel.layers.foldl
-        (fun h layer => layer.forward h cos sin true)
+        (fun h layer => layer.forward cfg.textConfig.headsValid.2.2 h cos sin true)
         inputsEmbeds
   let hidden := m.textModel.norm.forward3dPreserving hidden
   Tensor.linear3d hidden m.lmHead
@@ -202,11 +199,11 @@ private def forwardEmbedsMaskedWithPositionRows {batch seq : Nat}
     (inputsEmbeds : Tensor { dtype := dtype, device := device, shape := #[batch, seq, cfg.textConfig.hiddenSize] })
     (attnMask : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     : IO (Tensor { dtype := dtype, device := device, shape := #[batch, seq, ThinkerLmVocabSize cfg] }) := do
-  let half := cfg.textConfig.headDim / 2
+  let half := cfg.textConfig.halfHeadDim
   let (baseCos, baseSin) :=
     qwen.computeFreqsOnDevice
       seq
-      cfg.textConfig.headDim
+      cfg.textConfig.halfHeadDim
       cfg.textConfig.ropeTheta
       inputsEmbeds.device
   let rows ← positionRowsFromMask attnMask
@@ -217,20 +214,20 @@ private def forwardEmbedsMaskedWithPositionRows {batch seq : Nat}
     pure (Tensor.zerosFor { shape := #[batch, seq, ThinkerLmVocabSize cfg], dtype, device })
   else
     let mut perBatchHidden : Array (Sigma (fun shape => Tensor { dtype := dtype, device := device, shape := shape })) := #[]
-    for b in [:batch] do
+    for hb : b in [:batch] do
       let row := rows.getD b (Array.replicate seq 0)
       let cosB : Tensor { device := device, shape := #[seq, half], dtype := .Float32 } := gatherRowsByPositions baseCos row
       let sinB : Tensor { device := device, shape := #[seq, half], dtype := .Float32 } := gatherRowsByPositions baseSin row
-      let embB : Tensor { dtype := dtype, device := device, shape := #[1, seq, cfg.textConfig.hiddenSize] } := Tensor.sliceChecked inputsEmbeds 0 b 1 #[1, seq, cfg.textConfig.hiddenSize]
-      let maskB : Tensor { device := device, shape := #[1, seq], dtype := .Int64 } := Tensor.sliceChecked attnMask 0 b 1 #[1, seq]
+      let embB : Tensor { dtype := dtype, device := device, shape := #[1, seq, cfg.textConfig.hiddenSize] } := Tensor.slice inputsEmbeds 0 b 1 (_bounds := by have := hb.upper; simp at this ⊢; omega)
+      let maskB : Tensor { device := device, shape := #[1, seq], dtype := .Int64 } := Tensor.slice attnMask 0 b 1 (_bounds := by have := hb.upper; simp at this ⊢; omega)
       let hiddenB :=
         m.textModel.layers.foldl
-          (fun h layer => layer.forwardMasked h cosB sinB maskB true)
+          (fun h layer => layer.forwardMasked cfg.textConfig.headsValid.2.2 h cosB sinB maskB true)
           embB
       let hiddenB := m.textModel.norm.forward3dPreserving hiddenB
       perBatchHidden := perBatchHidden.push (Tensor.packShape hiddenB)
 
-    let hidden := Tensor.catManyChecked perBatchHidden 0 #[batch, seq, cfg.textConfig.hiddenSize]
+    let hidden := Tensor.catMany! perBatchHidden 0 #[batch, seq, cfg.textConfig.hiddenSize]
     pure (Tensor.linear3d hidden m.lmHead)
 
 def forwardText {batch textSeq : Nat}
@@ -299,7 +296,7 @@ private def getPlaceholderMask (cfg : ThinkerConfig) {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     : Tensor { device := device, shape := #[batch, seq, cfg.textConfig.hiddenSize], dtype := .Bool } :=
   let mask2d := getPlaceholderMask2d cfg inputIds
-  Tensor.expand (Tensor.reshape mask2d #[batch, seq, 1]) #[batch, seq, cfg.textConfig.hiddenSize]
+  Tensor.broadcastTo (Tensor.reshape mask2d #[batch, seq, 1]) #[batch, seq, cfg.textConfig.hiddenSize]
 
 private def audioValidMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq audioSeq : Nat}
     (featureAttentionMask : Tensor { device := device, shape := #[batch, featureSeq], dtype := .Int64 })
@@ -308,7 +305,7 @@ private def audioValidMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSe
   let audioLens := AudioEncoderConfig.featExtractOutputLengths featureLens
   let valid2d : Tensor { device := device, shape := #[batch, audioSeq], dtype := .Int64 } := buildLengthMask audioLens
   let valid2dBool : Tensor { device := device, shape := #[batch, audioSeq], dtype := .Bool } := Tensor.eqScalar valid2d 1
-  pure <| Tensor.expand (Tensor.reshape valid2dBool #[batch, audioSeq, 1]) #[batch, audioSeq, cfg.textConfig.hiddenSize]
+  pure <| Tensor.broadcastTo (Tensor.reshape valid2dBool #[batch, audioSeq, 1]) #[batch, audioSeq, cfg.textConfig.hiddenSize]
 
 private def audioAttentionMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq audioSeq : Nat}
     (featureAttentionMask : Tensor { device := device, shape := #[batch, featureSeq], dtype := .Int64 })
@@ -425,43 +422,44 @@ def getRopeIndex {batch seq : Nat}
   let ropeDeltas : Tensor { device := device, shape := #[batch, 1], dtype := .Int64 } := (← IO.ofExcept (Tensor.fromInt64ArrayAs? deltaVals #[batch, 1])).to device
   pure (positionIds, ropeDeltas)
 
-abbrev LayerKVCache (cfg : ThinkerConfig) (batch : Nat) (dtype : DType := .Float32) :=
-  qwen.QwenAttention.KVCache (device := device) batch cfg.textConfig.numKeyValueHeads cfg.textConfig.headDim dtype
+abbrev LayerKVCache (cfg : ThinkerConfig) (batch cap : Nat) (dtype : DType := .Float32) :=
+  qwen.QwenAttention.KVCache (device := device) batch cfg.textConfig.numKeyValueHeads cfg.textConfig.headDim cap dtype
 
 private def initLayerKVCaches {batch : Nat}
     (m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (maxLen : Nat)
     (device : Device)
     [DType.ConstantSupported dtype device]
-    : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch) :=
+    (h : 0 < maxLen := by omega)
+    : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen) :=
   m.textModel.layers.map (fun _ =>
     qwen.QwenAttention.initKVCache
       maxLen
       (batch := batch)
       (num_kv_heads := cfg.textConfig.numKeyValueHeads)
       (head_dim := cfg.textConfig.headDim)
-      device dtype)
+      device dtype (h := h))
 
 private def precomputeDecodeRotary {maxLen : Nat}
     (_m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
     (device : Device)
-    : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 } × Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 } :=
+    : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 } × Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 } :=
   qwen.computeFreqsOnDevice
     maxLen
-    cfg.textConfig.headDim
+    cfg.textConfig.halfHeadDim
     cfg.textConfig.ropeTheta
     device
 
 private def decodeStepFromEmbedWithCache {batch maxLen : Nat}
     (m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
-    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
+    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
+    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
     (tokenEmbed : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] })
-    (position : Nat)
-    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch))
-    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] } × Array (LayerKVCache (device := device) (dtype := dtype) cfg batch)) := do
-  let cos : Tensor { device := device, shape := #[1, cfg.textConfig.headDim / 2], dtype := .Float32 } := Tensor.sliceChecked cosAll 0 position 1 #[1, cfg.textConfig.headDim / 2]
-  let sin : Tensor { device := device, shape := #[1, cfg.textConfig.headDim / 2], dtype := .Float32 } := Tensor.sliceChecked sinAll 0 position 1 #[1, cfg.textConfig.headDim / 2]
+    (position : Nat) (hpos : position < maxLen)
+    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen))
+    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] } × Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen)) := do
+  let cos : Tensor { device := device, shape := #[1, cfg.textConfig.halfHeadDim], dtype := .Float32 } := Tensor.slice cosAll 0 position 1
+  let sin : Tensor { device := device, shape := #[1, cfg.textConfig.halfHeadDim], dtype := .Float32 } := Tensor.slice sinAll 0 position 1
 
   let mut hidden : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := tokenEmbed
   let mut nextCaches := caches
@@ -475,7 +473,7 @@ private def decodeStepFromEmbedWithCache {batch maxLen : Nat}
       match nextCaches[i]? with
       | some c => pure c
       | none => throw <| IO.userError s!"missing thinker KV cache at index {i}"
-    let (hNext, cNext) := layer.forwardStep hidden cos sin cache
+    let (hNext, cNext) := layer.forwardStep cfg.textConfig.headsValid.2.2 hidden cos sin cache position hpos
     hidden := hNext
     nextCaches := nextCaches.set! i cNext
 
@@ -486,37 +484,39 @@ private def decodeStepFromEmbedWithCache {batch maxLen : Nat}
 
 private partial def prefillCachesFromEmbeds {batch seq maxLen : Nat}
     (m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
-    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
+    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
+    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
     (inputsEmbeds : Tensor { dtype := dtype, device := device, shape := #[batch, seq, cfg.textConfig.hiddenSize] })
-    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch))
+    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen))
     (position : Nat)
     (lastLogits : Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] })
-    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] } × Array (LayerKVCache (device := device) (dtype := dtype) cfg batch)) := do
-  if position >= seq then
+    (hfit : seq ≤ maxLen)
+    : IO (Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] } × Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen)) := do
+  if hp : seq ≤ position then
     pure (lastLogits, caches)
   else
-    let tok : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := Tensor.sliceChecked inputsEmbeds 1 position 1 #[batch, 1, cfg.textConfig.hiddenSize]
-    let (logits, caches') ← decodeStepFromEmbedWithCache m cosAll sinAll tok position caches
-    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches' (position + 1) logits
+    let tok : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := Tensor.slice inputsEmbeds 1 position 1
+    let (logits, caches') ← decodeStepFromEmbedWithCache m cosAll sinAll tok position (by omega) caches
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches' (position + 1) logits hfit
 
 private partial def greedyLoopCached {batch maxLen : Nat}
     (m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
-    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
-    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 })
-    (eosTokenIds : Array UInt64)
+    (cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
+    (sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 })
+    (eosTokenIds : Array tokenizer.TokenId)
     (eosVector : Option (Tensor { device := device, shape := #[batch], dtype := .Int64 }))
     (remaining : Nat)
-    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch))
+    (caches : Array (LayerKVCache (device := device) (dtype := dtype) cfg batch maxLen))
     (lastLogits : Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] })
     (finished : Option (Tensor { device := device, shape := #[batch], dtype := .Bool }))
     {curSeq : Nat}
     (curIds : Tensor { device := device, shape := #[batch, curSeq], dtype := .Int64 })
+    (hfit : curSeq + remaining ≤ maxLen)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
-  if remaining == 0 then
+  let ⟨hr⟩ ← if h : remaining ≠ 0 then pure (PLift.up h) else
     return ⟨curSeq, curIds⟩
 
-  let indices ← IO.ofExcept (Tensor.argmax? lastLogits 1)
+  let indices := Tensor.argmax lastLogits 1 (_nonempty := by simpa using ThinkerConfig.lmHeadOutDim_pos cfg)
   let nextTokRaw : Tensor { device := device, shape := #[batch], dtype := .Int64 } ← pure (indices.reshape #[batch])
   let nextTok : Tensor { device := device, shape := #[batch], dtype := .Int64 } :=
     match eosVector, finished with
@@ -531,8 +531,8 @@ private partial def greedyLoopCached {batch maxLen : Nat}
   | none =>
     let nextEmb : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := m.embedText nextCol
     let (nextLogits, caches') ←
-      decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq caches
-    greedyLoopCached m cosAll sinAll eosTokenIds none (remaining - 1) caches' nextLogits none appended
+      decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq (by omega) caches
+    greedyLoopCached m cosAll sinAll eosTokenIds none (remaining - 1) caches' nextLogits none appended (by omega)
   | some _ =>
     let reachedEos : Tensor { device := device, shape := #[batch], dtype := .Bool } := tokenInSetMask nextTok eosTokenIds
     let finished' : Tensor { device := device, shape := #[batch], dtype := .Bool } :=
@@ -545,8 +545,8 @@ private partial def greedyLoopCached {batch maxLen : Nat}
     else
       let nextEmb : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := m.embedText nextCol
       let (nextLogits, caches') ←
-        decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq caches
-      greedyLoopCached m cosAll sinAll eosTokenIds eosVector (remaining - 1) caches' nextLogits (some finished') appended
+        decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq (by omega) caches
+      greedyLoopCached m cosAll sinAll eosTokenIds eosVector (remaining - 1) caches' nextLogits (some finished') appended (by omega)
 
 private def isUInt32Prefix (pref xs : Array UInt32) : Bool :=
   if pref.size > xs.size then
@@ -566,9 +566,9 @@ structure StreamingPromptCache (cfg : ThinkerConfig) (dtype : DType := .Float32)
   maxLen : Nat
   promptTokenIds : Array UInt32 := #[]
   promptEmbeds : Tensor { dtype := dtype, device := device, shape := #[1, seq, cfg.textConfig.hiddenSize] }
-  cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 }
-  sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.headDim / 2], dtype := .Float32 }
-  kvCaches : Array (LayerKVCache (device := device) (dtype := dtype) cfg 1)
+  cosAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 }
+  sinAll : Tensor { device := device, shape := #[maxLen, cfg.textConfig.halfHeadDim], dtype := .Float32 }
+  kvCaches : Array (LayerKVCache (device := device) (dtype := dtype) cfg 1 maxLen)
   lastLogits : Tensor { dtype := dtype, device := device, shape := #[1, ThinkerLmVocabSize cfg] }
 
 private def buildStreamingPromptCacheFromEmbeds {seq : Nat}
@@ -577,7 +577,7 @@ private def buildStreamingPromptCacheFromEmbeds {seq : Nat}
     (promptTokenIds : Array UInt32)
     (maxNewTokens : Nat)
     : IO (StreamingPromptCache (device := device) (dtype := dtype) cfg) := do
-  if seq == 0 then
+  let ⟨hSeq⟩ ← if h : 0 < seq then pure (PLift.up h) else
     throw <| IO.userError "generateGreedyWithPromptCache requires non-empty prompt sequence"
   let reserve := if maxNewTokens == 0 then 1 else maxNewTokens
   let maxLen : Nat := seq + reserve
@@ -585,11 +585,11 @@ private def buildStreamingPromptCacheFromEmbeds {seq : Nat}
   let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := maxLen) m cacheDevice
   let support ← dtype.acquireConstantSupport cacheDevice
   let _ := support.down
-  let caches0 := initLayerKVCaches m maxLen cacheDevice
-  let tok0 : Tensor { dtype := dtype, device := device, shape := #[1, 1, cfg.textConfig.hiddenSize] } := Tensor.sliceChecked inputsEmbeds 1 0 1 #[1, 1, cfg.textConfig.hiddenSize]
-  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 caches0
+  let caches0 := initLayerKVCaches m maxLen cacheDevice (h := Nat.lt_of_lt_of_le hSeq (Nat.le_add_right _ _))
+  let tok0 : Tensor { dtype := dtype, device := device, shape := #[1, 1, cfg.textConfig.hiddenSize] } := Tensor.slice inputsEmbeds 1 0 1
+  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 (Nat.lt_of_lt_of_le hSeq (Nat.le_add_right _ _)) caches0
   let (lastLogits, cachesPrefill) ←
-    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0 (Nat.le_add_right _ _)
   pure {
     seq := seq
     maxLen := maxLen
@@ -632,6 +632,8 @@ private def extendStreamingPromptCacheFromEmbeds {seq : Nat}
       promptEmbeds := by simpa [h] using inputsEmbeds
     }
   else
+    let ⟨hfit⟩ ← if h : seq ≤ cache.maxLen then pure (PLift.up h) else
+      throw <| IO.userError s!"streaming prompt cache capacity {cache.maxLen} cannot hold {seq} prompt tokens"
     let (lastLogits, kvCaches) ←
       prefillCachesFromEmbeds
         m
@@ -641,6 +643,7 @@ private def extendStreamingPromptCacheFromEmbeds {seq : Nat}
         cache.kvCaches
         cache.seq
         cache.lastLogits
+        hfit
     pure {
       cache with
       seq := seq
@@ -713,7 +716,7 @@ private partial def greedyLoopUncached {batch : Nat}
     (m : Qwen3ASRThinkerForConditionalGeneration (device := device) (dtype := dtype) cfg)
     {promptSeq : Nat}
     (promptEmbeds : Tensor { dtype := dtype, device := device, shape := #[batch, promptSeq, cfg.textConfig.hiddenSize] })
-    (eosTokenIds : Array UInt64)
+    (eosTokenIds : Array tokenizer.TokenId)
     (eosVector : Option (Tensor { device := device, shape := #[batch], dtype := .Int64 }))
     (remaining : Nat)
     (finished : Option (Tensor { device := device, shape := #[batch], dtype := .Bool }))
@@ -722,7 +725,7 @@ private partial def greedyLoopUncached {batch : Nat}
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
   if remaining == 0 then
     return ⟨curSeq, curIds⟩
-  if curSeq == 0 then
+  let ⟨hSeq⟩ ← if h : 0 < curSeq then pure (PLift.up h) else
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
   let ⟨hPrompt⟩ ← if h : promptSeq ≤ curSeq then pure (PLift.up h) else
     throw <| IO.userError
@@ -733,7 +736,7 @@ private partial def greedyLoopUncached {batch : Nat}
       by simpa [h] using promptEmbeds
     else
       let suffixSeq := curSeq - promptSeq
-      let suffixIds : Tensor { device := device, shape := #[batch, suffixSeq], dtype := .Int64 } := Tensor.sliceChecked curIds 1 promptSeq suffixSeq #[batch, suffixSeq]
+      let suffixIds : Tensor { device := device, shape := #[batch, suffixSeq], dtype := .Int64 } := Tensor.slice curIds 1 promptSeq suffixSeq
       let suffixEmbeds : Tensor { dtype := dtype, device := device, shape := #[batch, suffixSeq, cfg.textConfig.hiddenSize] } := m.embedText suffixIds
       (Tensor.cat promptEmbeds suffixEmbeds 1).reshape #[batch, curSeq, cfg.textConfig.hiddenSize]
         (by have : promptSeq + suffixSeq = curSeq := by omega
@@ -741,9 +744,9 @@ private partial def greedyLoopUncached {batch : Nat}
   let logits := m.forwardEmbeds inputsEmbeds none
   let lastPos := curSeq - 1
   let last3 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, ThinkerLmVocabSize cfg] } :=
-    Tensor.reshape (Tensor.sliceChecked logits 1 lastPos 1 #[batch, 1, ThinkerLmVocabSize cfg]) #[batch, 1, ThinkerLmVocabSize cfg]
+    Tensor.reshape (Tensor.slice logits 1 lastPos 1) #[batch, 1, ThinkerLmVocabSize cfg]
   let last2 : Tensor { dtype := dtype, device := device, shape := #[batch, ThinkerLmVocabSize cfg] } := Tensor.reshape last3 #[batch, ThinkerLmVocabSize cfg]
-  let indices ← IO.ofExcept (Tensor.argmax? last2 1)
+  let indices := Tensor.argmax last2 1 (_nonempty := by simpa using ThinkerConfig.lmHeadOutDim_pos cfg)
   let nextTokRaw : Tensor { device := device, shape := #[batch], dtype := .Int64 } ← pure (indices.reshape #[batch])
   let nextTok : Tensor { device := device, shape := #[batch], dtype := .Int64 } :=
     match eosVector, finished with
@@ -786,7 +789,7 @@ def generateGreedyUncached {batch seq frames : Nat}
     (inputFeatures : Option (Tensor { dtype := featureDType, device := device, shape := #[batch, cfg.audioConfig.numMelBins, frames] }) := none)
     (featureAttentionMask : Option (Tensor { device := device, shape := #[batch, frames], dtype := .Int64 }) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
   if seq == 0 then
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
@@ -811,9 +814,9 @@ def generateGreedy {batch seq frames : Nat}
     (inputFeatures : Option (Tensor { dtype := featureDType, device := device, shape := #[batch, cfg.audioConfig.numMelBins, frames] }) := none)
     (featureAttentionMask : Option (Tensor { device := device, shape := #[batch, frames], dtype := .Int64 }) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) := do
-  if seq == 0 then
+  let ⟨hSeq⟩ ← if h : 0 < seq then pure (PLift.up h) else
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
@@ -825,12 +828,12 @@ def generateGreedy {batch seq frames : Nat}
   let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := cacheMaxLen) m cacheDevice
   let support ← dtype.acquireConstantSupport cacheDevice
   let _ := support.down
-  let caches0 := initLayerKVCaches m cacheMaxLen cacheDevice
-  let tok0 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := Tensor.sliceChecked inputsEmbeds 1 0 1 #[batch, 1, cfg.textConfig.hiddenSize]
-  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 caches0
+  let caches0 := initLayerKVCaches m cacheMaxLen cacheDevice (h := Nat.lt_of_lt_of_le hSeq (Nat.le_add_right _ _))
+  let tok0 : Tensor { dtype := dtype, device := device, shape := #[batch, 1, cfg.textConfig.hiddenSize] } := Tensor.slice inputsEmbeds 1 0 1
+  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 (Nat.lt_of_lt_of_le hSeq (Nat.le_add_right _ _)) caches0
   let (lastLogits, cachesPrefill) ←
-    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
-  greedyLoopCached m cosAll sinAll eosTokenIds eosVector maxNewTokens cachesPrefill lastLogits none inputIds
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0 (Nat.le_add_right _ _)
+  greedyLoopCached m cosAll sinAll eosTokenIds eosVector maxNewTokens cachesPrefill lastLogits none inputIds (Nat.le_refl _)
 
 /-- Greedy generation with reusable batch=1 prompt-prefix cache.
     Intended for streaming decode where successive prompts typically extend
@@ -842,7 +845,7 @@ def generateGreedyFromInputsEmbedsWithPromptCache {seq : Nat}
     (promptTokenIds : Array UInt32)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ((Sigma (fun outSeq => Tensor { device := device, shape := #[1, outSeq], dtype := .Int64 })) × StreamingPromptCache (device := device) (dtype := dtype) cfg) := do
   if seq == 0 then
     throw <| IO.userError "generateGreedyWithPromptCache requires non-empty prompt sequence"
@@ -870,6 +873,8 @@ def generateGreedyFromInputsEmbedsWithPromptCache {seq : Nat}
           buildStreamingPromptCacheFromEmbeds m inputsEmbeds promptTokenIds maxNewTokens
       | none =>
         buildStreamingPromptCacheFromEmbeds m inputsEmbeds promptTokenIds maxNewTokens
+    let ⟨hfit⟩ ← if h : seq + maxNewTokens ≤ cache.maxLen then pure (PLift.up h) else
+      throw <| IO.userError s!"streaming prompt cache capacity {cache.maxLen} cannot hold {seq} prompt and {maxNewTokens} new tokens"
     let generated ←
       greedyLoopCached
         m
@@ -882,6 +887,7 @@ def generateGreedyFromInputsEmbedsWithPromptCache {seq : Nat}
         cache.lastLogits
         none
         inputIds
+        hfit
     pure (generated, cache)
 
 /-- Greedy generation with reusable batch=1 prompt-prefix cache.
@@ -895,7 +901,7 @@ def generateGreedyWithPromptCache {seq frames : Nat}
     (promptTokenIds : Array UInt32)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ((Sigma (fun outSeq => Tensor { device := device, shape := #[1, outSeq], dtype := .Int64 })) × StreamingPromptCache (device := device) (dtype := dtype) cfg) := do
   let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
   m.generateGreedyFromInputsEmbedsWithPromptCache
@@ -1002,7 +1008,7 @@ def generateGreedy {batch seq frames : Nat}
     (inputFeatures : Option (Tensor { dtype := featureDType, device := device, shape := #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames] }) := none)
     (featureAttentionMask : Option (Tensor { device := device, shape := #[batch, frames], dtype := .Int64 }) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) :=
   m.thinker.generateGreedy inputIds inputFeatures featureAttentionMask maxNewTokens eosTokenIds
 
@@ -1018,7 +1024,7 @@ def generateGreedyWithPromptCache {seq frames : Nat}
     (promptTokenIds : Array UInt32)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ((Sigma (fun outSeq => Tensor { device := device, shape := #[1, outSeq], dtype := .Int64 })) × StreamingPromptCache (device := device) (dtype := dtype) cfg) :=
   m.thinker.generateGreedyWithPromptCache
     inputIds
@@ -1038,7 +1044,7 @@ def generateGreedyFromInputsEmbedsWithPromptCache {seq : Nat}
     (promptTokenIds : Array UInt32)
     (prefixCache : Option (StreamingPromptCache (device := device) (dtype := dtype) cfg) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ((Sigma (fun outSeq => Tensor { device := device, shape := #[1, outSeq], dtype := .Int64 })) × StreamingPromptCache (device := device) (dtype := dtype) cfg) :=
   m.thinker.generateGreedyFromInputsEmbedsWithPromptCache
     inputIds
@@ -1054,7 +1060,7 @@ def generateGreedyUncached {batch seq frames : Nat}
     (inputFeatures : Option (Tensor { dtype := featureDType, device := device, shape := #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames] }) := none)
     (featureAttentionMask : Option (Tensor { device := device, shape := #[batch, frames], dtype := .Int64 }) := none)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => Tensor { device := device, shape := #[batch, outSeq], dtype := .Int64 })) :=
   m.thinker.generateGreedyUncached inputIds inputFeatures featureAttentionMask maxNewTokens eosTokenIds
 
@@ -1063,7 +1069,7 @@ def alignFromOutputIds {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (outputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (wordLists : Array (Array String))
-    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampTokenId : tokenizer.TokenId := cfg.timestampTokenId)
     (timestampSegmentTime : Float := cfg.timestampSegmentTime)
     : IO (Array ForcedAlignResult) :=
   torch.qwen3asr.alignFromOutputIds inputIds outputIds wordLists timestampTokenId timestampSegmentTime
@@ -1073,10 +1079,11 @@ def alignFromLogits {batch seq : Nat}
     (inputIds : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (logits : Tensor { dtype := dtype, device := device, shape := #[batch, seq, ThinkerLmVocabSize cfg.thinkerConfig] })
     (wordLists : Array (Array String))
-    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampTokenId : tokenizer.TokenId := cfg.timestampTokenId)
     (timestampSegmentTime : Float := cfg.timestampSegmentTime)
     : IO (Array ForcedAlignResult) :=
-  torch.qwen3asr.alignFromLogits inputIds logits wordLists timestampTokenId timestampSegmentTime
+  torch.qwen3asr.alignFromLogits inputIds logits (ThinkerConfig.lmHeadOutDim_pos _) wordLists
+    timestampTokenId timestampSegmentTime
 
 def alignPrepared {batch seq frames : Nat}
     (m : Qwen3ASRForConditionalGeneration (device := device) (dtype := dtype) cfg)
@@ -1085,7 +1092,7 @@ def alignPrepared {batch seq frames : Nat}
     (inputFeatures : Option (Tensor { dtype := featureDType, device := device, shape := #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames] }) := none)
     (featureAttentionMask : Option (Tensor { device := device, shape := #[batch, frames], dtype := .Int64 }) := none)
     (attentionMask : Option (Tensor { device := device, shape := #[batch, seq], dtype := .Int64 }) := none)
-    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampTokenId : tokenizer.TokenId := cfg.timestampTokenId)
     (timestampSegmentTime : Float := cfg.timestampSegmentTime)
     : IO (Array ForcedAlignResult) := do
   let logits ← m.forward inputIds inputFeatures featureAttentionMask attentionMask

@@ -118,36 +118,29 @@ def init (hidden_size num_heads head_dim mlp_hidden : Nat)
     vec: [batch, hidden_size] - timestep embedding
     pe: RoPE embeddings
     Returns: (img_out, txt_out) -/
-def forward {batch img_seq txt_seq hidden_size num_heads head_dim mlp_hidden : Nat}
-    (block : DoubleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads head_dim mlp_hidden)
-    (heven : 2 ∣ head_dim)
+def forward {batch img_seq txt_seq hidden_size num_heads half mlp_hidden : Nat}
+    (block : DoubleStreamBlock (device := device) (dtype := dtype) hidden_size num_heads (2 * half) mlp_hidden)
     (img : Tensor { dtype := dtype, device := device, shape := #[batch, img_seq, hidden_size] })
     (txt : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq, hidden_size] })
-    (img_pe : Tensor { device := device, shape := #[batch, 1, img_seq, head_dim / 2, 2, 2], dtype := .Float32 })
-    (txt_pe : Tensor { device := device, shape := #[batch, 1, txt_seq, head_dim / 2, 2, 2], dtype := .Float32 })  -- RoPE for image and text
+    (img_pe : Tensor { device := device, shape := #[batch, 1, img_seq, half, 2, 2], dtype := .Float32 })
+    (txt_pe : Tensor { device := device, shape := #[batch, 1, txt_seq, half, 2, 2], dtype := .Float32 })  -- RoPE for image and text
     (mod_img : Tensor { dtype := dtype, device := device, shape := #[batch, 6, hidden_size] })
     (mod_txt : Tensor { dtype := dtype, device := device, shape := #[batch, 6, hidden_size] })
     : Tensor { dtype := dtype, device := device, shape := #[batch, img_seq, hidden_size] } × Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq, hidden_size] } :=
-  -- Split modulation into two triplets for attention and MLP
-  let img_mod1 := sliceTyped mod_img 1 0 3
-  let img_mod2 := sliceTyped mod_img 1 3 3
-  let txt_mod1 := sliceTyped mod_txt 1 0 3
-  let txt_mod2 := sliceTyped mod_txt 1 3 3
+  -- Modulation order: (shift, scale, gate) for attention, then for the MLP
+  let img_mod1_shift := modChunk mod_img 0
+  let img_mod1_scale := modChunk mod_img 1
+  let img_mod1_gate := modChunk mod_img 2
+  let img_mod2_shift := modChunk mod_img 3
+  let img_mod2_scale := modChunk mod_img 4
+  let img_mod2_gate := modChunk mod_img 5
 
-  -- Modulation order is (shift, scale, gate)
-  let img_mod1_shift := Tensor.reshape (sliceTyped img_mod1 1 0 1) #[batch, hidden_size] (by simp [Nat.mul_comm])
-  let img_mod1_scale := Tensor.reshape (sliceTyped img_mod1 1 1 1) #[batch, hidden_size]
-  let img_mod1_gate := Tensor.reshape (sliceTyped img_mod1 1 2 1) #[batch, hidden_size]
-  let img_mod2_shift := Tensor.reshape (sliceTyped img_mod2 1 0 1) #[batch, hidden_size]
-  let img_mod2_scale := Tensor.reshape (sliceTyped img_mod2 1 1 1) #[batch, hidden_size]
-  let img_mod2_gate := Tensor.reshape (sliceTyped img_mod2 1 2 1) #[batch, hidden_size]
-
-  let txt_mod1_shift := Tensor.reshape (sliceTyped txt_mod1 1 0 1) #[batch, hidden_size]
-  let txt_mod1_scale := Tensor.reshape (sliceTyped txt_mod1 1 1 1) #[batch, hidden_size]
-  let txt_mod1_gate := Tensor.reshape (sliceTyped txt_mod1 1 2 1) #[batch, hidden_size]
-  let txt_mod2_shift := Tensor.reshape (sliceTyped txt_mod2 1 0 1) #[batch, hidden_size]
-  let txt_mod2_scale := Tensor.reshape (sliceTyped txt_mod2 1 1 1) #[batch, hidden_size]
-  let txt_mod2_gate := Tensor.reshape (sliceTyped txt_mod2 1 2 1) #[batch, hidden_size] (by simp [Nat.mul_comm])
+  let txt_mod1_shift := modChunk mod_txt 0
+  let txt_mod1_scale := modChunk mod_txt 1
+  let txt_mod1_gate := modChunk mod_txt 2
+  let txt_mod2_shift := modChunk mod_txt 3
+  let txt_mod2_scale := modChunk mod_txt 4
+  let txt_mod2_gate := modChunk mod_txt 5
 
   -- Image path: norm1 + modulation
   let img_norm := block.img_norm1.forward3d img
@@ -162,32 +155,32 @@ def forward {batch img_seq txt_seq hidden_size num_heads head_dim mlp_hidden : N
   let txt_qkv := Tensor.linear3d txt_mod block.txt_attn.qkv
 
   -- Reshape QKV
-  let img_qkv := Tensor.reshape img_qkv #[batch, img_seq, 3, num_heads, head_dim] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
-  let txt_qkv := Tensor.reshape txt_qkv #[batch, txt_seq, 3, num_heads, head_dim] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
+  let img_qkv := Tensor.reshape img_qkv #[batch, img_seq, 3, num_heads, 2 * half] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
+  let txt_qkv := Tensor.reshape txt_qkv #[batch, txt_seq, 3, num_heads, 2 * half] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
 
-  let img_q := Tensor.reshape (sliceTyped img_qkv 2 0 1) #[batch, img_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
-  let img_k := Tensor.reshape (sliceTyped img_qkv 2 1 1) #[batch, img_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
-  let img_v := Tensor.reshape (sliceTyped img_qkv 2 2 1) #[batch, img_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
+  let img_q := Tensor.reshape (Tensor.slice img_qkv 2 0 1) #[batch, img_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
+  let img_k := Tensor.reshape (Tensor.slice img_qkv 2 1 1) #[batch, img_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
+  let img_v := Tensor.reshape (Tensor.slice img_qkv 2 2 1) #[batch, img_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
 
-  let txt_q := Tensor.reshape (sliceTyped txt_qkv 2 0 1) #[batch, txt_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
-  let txt_k := Tensor.reshape (sliceTyped txt_qkv 2 1 1) #[batch, txt_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
-  let txt_v := Tensor.reshape (sliceTyped txt_qkv 2 2 1) #[batch, txt_seq, num_heads, head_dim] (by simp [Nat.mul_comm])
+  let txt_q := Tensor.reshape (Tensor.slice txt_qkv 2 0 1) #[batch, txt_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
+  let txt_k := Tensor.reshape (Tensor.slice txt_qkv 2 1 1) #[batch, txt_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
+  let txt_v := Tensor.reshape (Tensor.slice txt_qkv 2 2 1) #[batch, txt_seq, num_heads, 2 * half] (by simp [Nat.mul_comm])
 
   -- QK normalization
   let (img_q, img_k) := block.img_attn.norm.forward img_q img_k
   let (txt_q, txt_k) := block.txt_attn.norm.forward txt_q txt_k
 
   -- Apply RoPE
-  let img_q := flux.applyRope img_q heven img_pe
-  let img_k := flux.applyRope img_k heven img_pe
-  let txt_q := flux.applyRope txt_q heven txt_pe
-  let txt_k := flux.applyRope txt_k heven txt_pe
+  let img_q := flux.applyRope img_q img_pe
+  let img_k := flux.applyRope img_k img_pe
+  let txt_q := flux.applyRope txt_q txt_pe
+  let txt_k := flux.applyRope txt_k txt_pe
 
   -- Concatenate for joint attention
   -- q: [batch, img_seq + txt_seq, num_heads, head_dim]
-  let q : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, head_dim] } := qwen35.typedCat txt_q img_q 1
-  let k : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, head_dim] } := qwen35.typedCat txt_k img_k 1
-  let v : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, head_dim] } := qwen35.typedCat txt_v img_v 1
+  let q : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, 2 * half] } := Tensor.cat txt_q img_q 1
+  let k : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, 2 * half] } := Tensor.cat txt_k img_k 1
+  let v : Tensor { dtype := dtype, device := device, shape := #[batch, txt_seq + img_seq, num_heads, 2 * half] } := Tensor.cat txt_v img_v 1
 
   -- Transpose for attention
   let q := transposeAttention q
@@ -200,20 +193,18 @@ def forward {batch img_seq txt_seq hidden_size num_heads head_dim mlp_hidden : N
   -- Transpose back
   let attn := fromAttention attn
   -- Split back to img and txt
-  let txt_attn := sliceTyped attn 1 0 txt_seq
-  let img_attn := sliceTyped attn 1 txt_seq img_seq
-  let img_attn := Tensor.reshape img_attn #[batch, img_seq, num_heads * head_dim] (by simp [Nat.mul_comm, Nat.mul_left_comm])
-  let txt_attn := Tensor.reshape txt_attn #[batch, txt_seq, num_heads * head_dim] (by simp [Nat.mul_comm, Nat.mul_left_comm])
+  let txt_attn := Tensor.slice attn 1 0 txt_seq
+  let img_attn := Tensor.slice attn 1 txt_seq img_seq
+  let img_attn := Tensor.reshape img_attn #[batch, img_seq, num_heads * (2 * half)] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
+  let txt_attn := Tensor.reshape txt_attn #[batch, txt_seq, num_heads * (2 * half)] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
 
   -- Output projections
   let img_attn := Tensor.linear3d img_attn block.img_attn.proj
   let txt_attn := Tensor.linear3d txt_attn block.txt_attn.proj
 
   -- Apply gates
-  let img_mod1_gate := Tensor.unsqueeze img_mod1_gate 1
-  let img_mod1_gate := Tensor.expand img_mod1_gate #[batch, img_seq, hidden_size]
-  let txt_mod1_gate := Tensor.unsqueeze txt_mod1_gate 1
-  let txt_mod1_gate := Tensor.expand txt_mod1_gate #[batch, txt_seq, hidden_size]
+  let img_mod1_gate := expandOverSeq img_seq img_mod1_gate
+  let txt_mod1_gate := expandOverSeq txt_seq txt_mod1_gate
 
   -- Residual + gated attention
   let img := Tensor.add img (Tensor.mul img_mod1_gate img_attn)
@@ -224,24 +215,22 @@ def forward {batch img_seq txt_seq hidden_size num_heads head_dim mlp_hidden : N
   let img_mlp_in := applyModulation img_mlp_in img_mod2_scale img_mod2_shift
   let img_mlp_proj := Tensor.linear3d img_mlp_in block.img_mlp.w1
   let img_mlp_proj := Tensor.reshape img_mlp_proj #[batch, img_seq, 2, mlp_hidden] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
-  let img_gate := Tensor.reshape (sliceTyped img_mlp_proj 2 0 1) #[batch, img_seq, mlp_hidden] (by simp [Nat.mul_comm])
-  let img_up := Tensor.reshape (sliceTyped img_mlp_proj 2 1 1) #[batch, img_seq, mlp_hidden] (by simp [Nat.mul_comm])
+  let img_gate := Tensor.reshape (Tensor.slice img_mlp_proj 2 0 1) #[batch, img_seq, mlp_hidden] (by simp [Nat.mul_comm])
+  let img_up := Tensor.reshape (Tensor.slice img_mlp_proj 2 1 1) #[batch, img_seq, mlp_hidden] (by simp [Nat.mul_comm])
   let img_mlp_out := Tensor.mul (Tensor.silu img_gate) img_up
   let img_mlp_out := Tensor.linear3d img_mlp_out block.img_mlp.w2
-  let img_mod2_gate := Tensor.unsqueeze img_mod2_gate 1
-  let img_mod2_gate := Tensor.expand img_mod2_gate #[batch, img_seq, hidden_size]
+  let img_mod2_gate := expandOverSeq img_seq img_mod2_gate
   let img := Tensor.add img (Tensor.mul img_mod2_gate img_mlp_out)
 
   let txt_mlp_in := block.txt_norm2.forward3d txt
   let txt_mlp_in := applyModulation txt_mlp_in txt_mod2_scale txt_mod2_shift
   let txt_mlp_proj := Tensor.linear3d txt_mlp_in block.txt_mlp.w1
   let txt_mlp_proj := Tensor.reshape txt_mlp_proj #[batch, txt_seq, 2, mlp_hidden] (by simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm])
-  let txt_gate := Tensor.reshape (sliceTyped txt_mlp_proj 2 0 1) #[batch, txt_seq, mlp_hidden] (by simp [Nat.mul_comm])
-  let txt_up := Tensor.reshape (sliceTyped txt_mlp_proj 2 1 1) #[batch, txt_seq, mlp_hidden] (by simp [Nat.mul_comm])
+  let txt_gate := Tensor.reshape (Tensor.slice txt_mlp_proj 2 0 1) #[batch, txt_seq, mlp_hidden] (by simp [Nat.mul_comm])
+  let txt_up := Tensor.reshape (Tensor.slice txt_mlp_proj 2 1 1) #[batch, txt_seq, mlp_hidden] (by simp [Nat.mul_comm])
   let txt_mlp_out := Tensor.mul (Tensor.silu txt_gate) txt_up
   let txt_mlp_out := Tensor.linear3d txt_mlp_out block.txt_mlp.w2
-  let txt_mod2_gate := Tensor.unsqueeze txt_mod2_gate 1
-  let txt_mod2_gate := Tensor.expand txt_mod2_gate #[batch, txt_seq, hidden_size]
+  let txt_mod2_gate := expandOverSeq txt_seq txt_mod2_gate
   let txt := Tensor.add txt (Tensor.mul txt_mod2_gate txt_mlp_out)
 
   (img, txt)

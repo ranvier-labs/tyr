@@ -50,7 +50,7 @@ structure Args where
   useChatMarkers : Bool := false
   maxNewTokens : Nat := 128
   temperature : Float := 1.0
-  topK : Nat := 50
+  topK : TopK := none
   eosToken : Option UInt64 := none
   seed : UInt64 := 42
   modelDepth : Nat := 20
@@ -90,8 +90,7 @@ private partial def parseArgsLoop : List String → Args → Args
       let t := (parseFloatLit? v).getD acc.temperature
       parseArgsLoop rest { acc with temperature := t }
   | "--top-k" :: v :: rest, acc =>
-      let k := v.toNat?.getD acc.topK
-      parseArgsLoop rest { acc with topK := k }
+      parseArgsLoop rest { acc with topK := (PosNat.parseOrNone? v).getD acc.topK }
   | "--eos-token" :: v :: rest, acc =>
       let eos? := (v.toNat?).map (·.toUInt64)
       parseArgsLoop rest { acc with eosToken := eos? }
@@ -136,7 +135,7 @@ private def printUsage : IO Unit := do
   IO.println "  --chat-markers          Wrap prompts using tokenizer chat markers"
   IO.println "  --max-new-tokens <n>    Decode length cap (default: 128)"
   IO.println "  --temperature <f>       Sampling temperature (default: 1.0)"
-  IO.println "  --top-k <n>             Top-k filter (default: 50, 0 disables)"
+  IO.println "  --top-k <n|none>        Top-k filter (default: none)"
   IO.println "  --eos-token <id>        End token ID (default: bos, or assistant_end with --chat-markers)"
   IO.println "  --model-depth <n>       Model depth used to load checkpoint (default: $MODEL_DEPTH or 20)"
   IO.println "  --vocab-size <n>        Vocab size used to load checkpoint (default: $VOCAB_SIZE or 65536)"
@@ -213,41 +212,44 @@ private def resolveChatMarkers (tok : BPETokenizer) : IO ChatMarkerIds := do
   let assistantEnd ← requireSpecialId tok "assistant_end" #["<|assistant_end|>", "<|eot|>"]
   pure { bos, userStart, userEnd, assistantStart, assistantEnd }
 
-private def buildModelConfig (args : Args) : Config := {
-  vocabSize := args.vocabSize
-  nLayer := args.modelDepth
-  nHead := 16
-  headDim := 64
-  modelDim := 1024
-  maxSeqLen := 2048
-  blockSize := 128
-  ropeBase := 10000.0
-}
+private def buildModelConfig (args : Args) : Except String Config := do
+  let ⟨hVocab⟩ ← if h : 0 < args.vocabSize then pure (PLift.up h) else
+    throw "--vocab-size must be positive"
+  pure {
+    vocabSize := args.vocabSize
+    vocabPos := hVocab
+    maxSeqLenPos := by decide
+    nLayer := args.modelDepth
+    nHead := 16
+    halfHeadDim := 32
+    maxSeqLen := 2048
+    blockSize := 128
+    ropeBase := 10000.0
+  }
 
+/-- Sample the next token from the last `maxSeqLen` tokens of the context. -/
 private def sampleNextToken {cfg : Config}
     (params : ModdedGPTParams (device := device) cfg)
-    (yarn : YarnRotary (device := device) cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary (device := device) cfg.halfHeadDim cfg.maxSeqLen)
     (temperature : Float)
-    (topK : Nat)
-    (context : Array UInt64)
+    (topK : TopK)
+    (context : Array UInt64) (hContext : 0 < context.size)
     : IO UInt64 := do
-  if context.isEmpty then
-    throw <| IO.userError "Cannot decode from an empty prompt."
-
-  let inputTensor := Tensor.fromInt64Array (context.map (·.toInt64))
-  let inputReshaped := (inputTensor.reshape #[1, context.size]).to device
-  let logits ← moddedGpt.forward params yarn inputReshaped false
+  let window := context.extract (context.size - cfg.maxSeqLen) context.size
+  have hWindow : window.size = min context.size cfg.maxSeqLen := by simp [window]; omega
+  have hseq : window.size ≤ cfg.maxSeqLen := by omega
+  have hWindowPos : 0 < window.size := by have := cfg.maxSeqLenPos; omega
+  let inputTensor := Tensor.fromInt64Array (window.map (·.toInt64))
+  let inputReshaped := (inputTensor.reshape #[1, window.size]).to device
+  let logits ← moddedGpt.forward params yarn inputReshaped hseq false
 
   -- Keep the final time step, then view its logits as one sampling row.
-  let lastLogits := Tensor.sliceChecked logits 1 (context.size - 1) 1
-    #[1, 1, cfg.vocabSize]
+  let lastLogits := Tensor.slice logits 1 (window.size - 1) 1
   let rowLogits := lastLogits.reshape #[1, cfg.vocabSize]
   let scaled :=
     if temperature == 1.0 then rowLogits
     else Tensor.mulScalar rowLogits (1.0 / temperature)
-  let filtered :=
-    if topK == 0 then scaled
-    else Tensor.topKFilter scaled topK
+  let filtered := topK.filter scaled
   let probs := Tensor.softmax filtered
   let sampled ← Tensor.multinomial probs 1
   pure (Tensor.itemInt (sampled.reshape #[])).toUInt64
@@ -258,17 +260,17 @@ private def promptWithMarkers (markers : ChatMarkerIds) (base : Array UInt64) (p
     #[markers.userStart] ++ prompt ++ #[markers.userEnd, markers.assistantStart]
 
 private def generateTokens
-    (promptTokens : Array UInt64)
-    (nextTokenFn : Array UInt64 → IO UInt64)
+    (promptTokens : Array UInt64) (hPrompt : 0 < promptTokens.size)
+    (nextTokenFn : (context : Array UInt64) → 0 < context.size → IO UInt64)
     (maxNewTokens : Nat)
     (eosToken : UInt64)
     : IO (Array UInt64) := do
-  let mut full := promptTokens
+  let mut full : { context : Array UInt64 // 0 < context.size } := ⟨promptTokens, hPrompt⟩
   let mut generated : Array UInt64 := #[]
   for _ in [:maxNewTokens] do
-    let tok ← nextTokenFn full
+    let tok ← nextTokenFn full.1 full.2
     generated := generated.push tok
-    full := full.push tok
+    full := ⟨full.1.push tok, by simp⟩
     if tok == eosToken then
       break
   pure generated
@@ -284,7 +286,7 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
 
   let checkpointPath ← resolveCheckpointPath args
   let tokenizerPath ← resolveTokenizerPath args
-  let cfg := buildModelConfig args
+  let cfg ← IO.ofExcept (buildModelConfig args)
   let device ← resolveDevice envState
   let tok ← tokenizer.load tokenizerPath
   let markers ← resolveChatMarkers tok
@@ -307,7 +309,7 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
 
   let paramsOnDevice ← TensorStruct.makeLeafParams ckpt.params
 
-  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase (device := device)
+  let yarn ← YarnRotary.init cfg.halfHeadDim cfg.maxSeqLen cfg.ropeBase (device := device)
 
   let encodeFn := fun (text : String) => (tokenizer.encodeWithSpecials tok text).map (·.toUInt64)
   let decodeFn := fun (tokens : Array UInt64) => tokenizer.decode tok (tokens.map (·.toUInt32))
@@ -320,9 +322,9 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
         promptWithMarkers markers baseCtx promptBody
       else
         promptBody
-    if promptTokens.isEmpty then
+    let ⟨hPrompt⟩ ← if h : 0 < promptTokens.size then pure (PLift.up h) else
       throw <| IO.userError "Prompt encoded to zero tokens."
-    let generated ← generateTokens promptTokens nextTokenFn args.maxNewTokens eosToken
+    let generated ← generateTokens promptTokens hPrompt nextTokenFn args.maxNewTokens eosToken
     let response := decodeFn generated
     if args.showTokens then
       IO.println s!"generated_tokens={generated}"

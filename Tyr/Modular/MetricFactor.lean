@@ -63,7 +63,7 @@ def ofMatrix {rank dim : Nat} {d : DType} {dev : Device}
   { matrix }
 
 /-- Pull a metric factor back along a local Jacobian. -/
-def pullback {rank outDim inDim : Nat} {d : DType} {dev : Device}
+def pullback {rank outDim inDim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     (L : MetricFactor rank outDim d dev)
     (A : Tensor ⟨#[outDim, inDim], d, dev⟩) : MetricFactor rank inDim d dev :=
   { matrix := Tensor.mm L.matrix A }
@@ -73,7 +73,7 @@ private def scaleColumns {rank dim : Nat} {d : DType} {dev : Device} [DType.Prom
     (scale : Tensor ⟨#[dim], d, dev⟩) : Tensor ⟨#[rank, dim], d, dev⟩ :=
   let scaleRow : Tensor ⟨#[1, dim], d, dev⟩ :=
     Tensor.reshape scale #[1, dim] (by simp [TensorSpec.numelOfShape])
-  let scaleFull : Tensor ⟨#[rank, dim], d, dev⟩ := Tensor.expand scaleRow #[rank, dim]
+  let scaleFull : Tensor ⟨#[rank, dim], d, dev⟩ := Tensor.broadcastTo scaleRow #[rank, dim]
   Tensor.mul matrix scaleFull
 
 private def vectorToColumn {n : Nat} {d : DType} {dev : Device}
@@ -85,28 +85,28 @@ private def columnToVector {n : Nat} {d : DType} {dev : Device}
   Tensor.reshape v #[n] (by simp [TensorSpec.numelOfShape])
 
 /-- Dense Gram form `K^T K`. -/
-def gram {rank dim : Nat} {d : DType} {dev : Device} (K : MetricFactor rank dim d dev) :
+def gram {rank dim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d] (K : MetricFactor rank dim d dev) :
     Tensor ⟨#[dim, dim], d, dev⟩ :=
   Tensor.mm (Tensor.transpose2d K.matrix) K.matrix
 
 /-- Dense regularized layer metric `D + K^T K`. -/
-def denseMetric {rank dim : Nat} {d : DType} {dev : Device} [DType.Promotes d d d]
+def denseMetric {rank dim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d] [DType.Promotes d d d]
     (D : DiagonalMass dim d dev)
     (K : MetricFactor rank dim d dev) : Tensor ⟨#[dim, dim], d, dev⟩ :=
   Tensor.add D.toMatrix K.gram
 
 /-- Apply `K` to a vector. -/
-def apply {rank dim : Nat} {d : DType} {dev : Device} (K : MetricFactor rank dim d dev)
+def apply {rank dim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d] (K : MetricFactor rank dim d dev)
     (x : Tensor ⟨#[dim], d, dev⟩) : Tensor ⟨#[rank], d, dev⟩ :=
   columnToVector (Tensor.mm K.matrix (vectorToColumn x))
 
 /-- Apply `K^T` to a vector. -/
-def applyTranspose {rank dim : Nat} {d : DType} {dev : Device}
+def applyTranspose {rank dim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     (K : MetricFactor rank dim d dev) (x : Tensor ⟨#[rank], d, dev⟩) : Tensor ⟨#[dim], d, dev⟩ :=
   columnToVector (Tensor.mm (Tensor.transpose2d K.matrix) (vectorToColumn x))
 
 /-- Apply the regularized metric `D + K^T K` to a vector. -/
-def applyRegularized {rank dim : Nat} {d : DType} {dev : Device} [DType.Promotes d d d]
+def applyRegularized {rank dim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d] [DType.Promotes d d d]
     (D : DiagonalMass dim d dev)
     (K : MetricFactor rank dim d dev)
     (x : Tensor ⟨#[dim], d, dev⟩) : Tensor ⟨#[dim], d, dev⟩ :=

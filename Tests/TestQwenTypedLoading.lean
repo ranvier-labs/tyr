@@ -8,7 +8,7 @@ open torch Lean
 private def cfg : qwen3.Config := {
   vocab_size := 8, hidden_size := 8, intermediate_size := 16,
   num_hidden_layers := 1, num_attention_heads := 2, num_key_value_heads := 1,
-  head_dim := 4, max_position_embeddings := 16
+  half_head_dim := 2
 }
 
 /-- Generate actual SafeTensors bytes, without Python or downloaded weights. -/
@@ -56,21 +56,15 @@ def testQwenTypedSingleAndShardedLoading : IO Unit := do
         IO.FS.withTempDir fun dir => do
           writeCheckpoint dir bf16 omni tied
           for sharded in [false, true] do
-            let model ← if omni then
-                if sharded then qwen25omni.Qwen25OmniForCausalLM.loadSharded dir.toString cfg
-                else qwen25omni.Qwen25OmniForCausalLM.load (dir / "model.safetensors").toString cfg
-              else
-                if sharded then qwen3.Qwen3ForCausalLM.loadSharded dir.toString cfg
-                else qwen3.Qwen3ForCausalLM.load (dir / "model.safetensors").toString cfg
+            let path := if sharded then dir.toString else (dir / "model.safetensors").toString
+            let model ← if omni then qwen25omni.Qwen25OmniForCausalLM.load path cfg
+              else qwen3.Qwen3ForCausalLM.load path cfg
             LeanTest.assertEqual model.tieWordEmbeddings tied
             LeanTest.assertEqual model.lmHead.actualSpec.dtype DType.Float32
             LeanTest.assertEqual model.model.embed_tokens.actualSpec.dtype DType.Float32
             LeanTest.assertEqual (← model.lmHead.toFloatArray) (Array.replicate 64 1.0)
             let ids := (Tensor.fromInt64Array #[1, 2]).reshape #[1, 2]
             let logits := model.forward ids
-            match logits.validate with
-            | .error message => LeanTest.fail message
-            | .ok () => pure ()
             LeanTest.assertTrue ((← logits.toFloatArray).all Float.isFinite)
               "Loaded checkpoint must execute with finite logits"
 

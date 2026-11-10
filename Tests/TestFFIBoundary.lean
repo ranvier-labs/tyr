@@ -63,26 +63,20 @@ def testExactLoadRejectsSameNumelWrongShape : IO Unit :=
     catch error =>
       LeanTest.assertTrue (error.toString.containsSubstr "Tensor shape mismatch")
 
-/-- Invalid STFT parameters must stay recoverable at the advertised IO boundary. -/
+example (_input : Tensor ⟨#[8], .Float32, .CPU⟩) (_window : Tensor ⟨#[4], .Float32, .CPU⟩) : True := by
+  have _ := Tensor.stft _input 4 2 _window (center := false)
+  fail_if_success have _ := Tensor.stft _input 4 0 _window (center := false)
+  fail_if_success have _ := Tensor.stft _input 2 1 _window (center := false)
+  fail_if_success have _ := Tensor.stft _input 16 1 _window (center := false)
+  trivial
+
 @[test]
-def testStftNativeFailuresAreRecoverable : IO Unit := do
-  let input := Tensor.ones #[8]
-  let window := Tensor.hannWindow 4
-  let invalid : Array (Nat × Nat) := #[(0, 1), (4, 0), (2, 1), (16, 1)]
-  for (nFft, hopLength) in invalid do
-    let caught ← try
-      let _ ← Tensor.stft input nFft hopLength window (center := false)
-      pure false
-    catch error =>
-      LeanTest.assertTrue (error.toString.containsSubstr "stft")
-      pure true
-    LeanTest.assertTrue caught
-  -- A failed call must leave borrowed inputs valid for a subsequent transform.
-  let result ← Tensor.stft input 4 2 window
-  LeanTest.assertEqual result.1 #[3, 5, 2]
-  LeanTest.assertEqual result.2.runtimeShape #[3, 5, 2]
-  LeanTest.assertTrue (result.2.actualSpec.dtype == .Float32)
-  LeanTest.assertTrue (result.2.raw.device == .CPU)
+def testStftShape : IO Unit := do
+  let result := Tensor.stft (Tensor.ones #[8]) 4 2 (Tensor.hannWindow 4)
+  LeanTest.assertEqual result.shape #[3, 5, 2]
+  LeanTest.assertEqual result.runtimeShape #[3, 5, 2]
+  LeanTest.assertTrue (result.actualSpec.dtype == .Float32)
+  LeanTest.assertTrue (result.raw.device == .CPU)
 
 /-- Media IO catches native size errors without allocating an enormous buffer. -/
 @[test]

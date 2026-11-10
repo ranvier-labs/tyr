@@ -1,4 +1,5 @@
 import Tyr.Basic.Types
+import Tyr.Basic.PosNat
 import Tyr.ConstantSupport.Types
 
 /-!
@@ -35,10 +36,6 @@ namespace RawTensor
 
 @[extern "lean_torch_cast_dtype"] opaque castDType (t : @& RawTensor)
     (dtype : DType) : RawTensor
-
-/-- Convert dtype with native validation/conversion failures carried explicitly. -/
-@[extern "lean_torch_cast_dtype_checked"] opaque castDTypeChecked (shape : Shape)
-    (t : @& RawTensor) (dtype : DType) : Except String RawTensor
 
 -- Preserve the existing C ABI's shape argument without exposing a shape-indexed
 -- raw type. Metadata queries inspect the native tensor, never this argument.
@@ -89,7 +86,7 @@ private opaque TensorCarrier (_σ : StaticSpec) : NonemptyType :=
   ⟨RawTensor, inferInstance⟩
 
 /-- Tensor indexed by a static specification. Safe code admits native handles
-through `Tensor.ofRaw`; the carrier has no constructor or structural recursor.
+through `Tensor.ofRaw!`; the carrier has no constructor or structural recursor.
 At runtime it is the native handle itself, with no additional allocation. -/
 def Tensor (σ : StaticSpec) : Type := (TensorCarrier σ).type
 
@@ -123,20 +120,22 @@ private def checkSpec (σ : StaticSpec) (raw : RawTensor) : Except String Unit :
   if raw.device != σ.device then
     throw s!"Expected device {renderDevice σ.device}, got {renderDevice raw.device}"
 
-/-- Check exact shape, dtype and actual placement against the native handle. -/
-def validate {σ : StaticSpec} (tensor : Tensor σ) : Except String Unit :=
-  checkSpec σ tensor.raw
+private unsafe def ofRawImpl {σ : StaticSpec} (raw : RawTensor) (operation : @& Lean.Name) :
+    Tensor σ :=
+  match checkSpec σ raw with
+  | .ok () => unsafeCast raw
+  | .error message => nativeInvariantFailure s!"{operation}: {message}"
 
-private unsafe def ofRawImpl {σ : StaticSpec} (raw : RawTensor) :
-    Except String (Tensor σ) := do
-  checkSpec σ raw
-  pure (unsafeCast raw)
-
-/-- The raw-to-indexed boundary. Construct a tensor only after validating every
-claim in the destination specification against native metadata. -/
 @[implemented_by ofRawImpl]
-opaque ofRaw {σ : StaticSpec} (raw : RawTensor) : Except String (Tensor σ) :=
-  .error "Tensor.ofRaw requires its checked runtime implementation"
+private opaque ofRawCore {σ : StaticSpec} (raw : RawTensor) (operation : @& Lean.Name) : Tensor σ :=
+  Classical.choice inferInstance
+
+/-- The raw-to-indexed boundary for native results. Shape, dtype and placement
+are compared with `σ`; a result that contradicts its type is a binding bug and
+aborts naming `operation`, by default the calling declaration. -/
+@[inline] def ofRaw! {σ : StaticSpec} (raw : RawTensor) (operation : Lean.Name := by exact decl_name%) :
+    Tensor σ :=
+  ofRawCore raw operation
 
 private unsafe def zerosForImpl (σ : StaticSpec)
     [DType.ConstantSupported σ.dtype σ.device] : Tensor σ :=

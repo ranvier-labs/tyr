@@ -1,4 +1,5 @@
 import Tyr.Model.KittenTTS.Model
+import Tyr.Model.KittenTTS.ConfigIO
 import Tyr.Checkpoint
 import LeanTest
 
@@ -11,7 +12,6 @@ private def tinyCfg : KittenTTSConfig :=
     maxConvDim := 8
     maxDur := 4
     nLayer := 1
-    nMels := 8
     nToken := 32
     styleDim := 4
     textEncoderKernelSize := 3

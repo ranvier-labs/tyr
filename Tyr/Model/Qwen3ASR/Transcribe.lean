@@ -213,7 +213,7 @@ private def preparePromptInputIds
       tok
       prompt
       #[audioLen]
-      cfg.thinkerConfig.audioTokenId.toUInt32 with
+      cfg.thinkerConfig.audioTokenId with
     | .ok ids => pure ids
     | .error e => throw <| IO.userError e
   let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
@@ -230,11 +230,11 @@ private def decodeGeneratedText
     (outSeq : Nat)
     (outIds : Tensor { device := device, shape := #[1, outSeq], dtype := .Int64 })
     : IO String := do
-  if outSeq <= seq then
+  if hOut : outSeq ≤ seq then
     pure ""
   else
     let newSeq := outSeq - seq
-    let newOnly : Tensor { device := device, shape := #[1, newSeq], dtype := .Int64 } := Tensor.sliceChecked outIds 1 seq newSeq #[1, newSeq]
+    let newOnly : Tensor { device := device, shape := #[1, newSeq], dtype := .Int64 } := Tensor.slice outIds 1 seq newSeq
     let flat : Tensor { device := device, shape := #[newSeq], dtype := .Int64 } := Tensor.reshape newOnly #[newSeq]
     let idsU64 ← Tensor.toUInt64Array flat
     let ids := idsU64.map (fun x => x.toUInt32)
@@ -248,11 +248,11 @@ private def decodeGeneratedTextsBatch
     : IO (Array String) := do
   if batch == 0 then
     pure #[]
-  else if outSeq <= seq then
+  else if hOut : outSeq ≤ seq then
     pure (Array.replicate batch "")
   else
     let newSeq := outSeq - seq
-    let newOnly : Tensor { device := device, shape := #[batch, newSeq], dtype := .Int64 } := Tensor.sliceChecked outIds 1 seq newSeq #[batch, newSeq]
+    let newOnly : Tensor { device := device, shape := #[batch, newSeq], dtype := .Int64 } := Tensor.slice outIds 1 seq newSeq
     let flat : Tensor { device := device, shape := #[batch * newSeq], dtype := .Int64 } := Tensor.reshape newOnly #[batch * newSeq]
     let idsU64 ← Tensor.toUInt64Array flat
     let rowWidth := newSeq
@@ -292,7 +292,7 @@ private def alignSingleWithModel
       alignTok
       alignRaw
       #[audioLen]
-      alignCfg.thinkerConfig.audioTokenId.toUInt32 with
+      alignCfg.thinkerConfig.audioTokenId with
     | .ok ids => pure ids
     | .error e => throw <| IO.userError e
   let seqAlign : Nat := alignIdsArr.size
@@ -382,7 +382,7 @@ private def transcribeWithFrontend
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription := do
   let model := TensorStruct.detach model
   let forceLanguage ← validateForcedLanguage model.supportLanguages language
@@ -425,7 +425,7 @@ def transcribeWaveform
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription := do
   let dev := modelDevice model
   let maxChunkSec := if returnTimeStamps then maxForceAlignInputSeconds else maxAsrInputSeconds
@@ -493,13 +493,12 @@ private def broadcastLanguages (n : Nat) (languages : Array (Option String))
   else
     throw <| IO.userError s!"Batch size mismatch: audio={n}, language={languages.size}"
 
-private def effectiveBatchStep (n : Nat) (maxInferenceBatchSize : Int) : Nat :=
-  if n == 0 then
-    1
-  else if maxInferenceBatchSize <= 0 then
-    n
-  else
-    Nat.max 1 maxInferenceBatchSize.toNat
+/-- Inputs decoded per batch; `none` decodes all `n` at once. -/
+private def effectiveBatchStep (n : Nat) (maxInferenceBatchSize : Option Nat)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k) : { step : Nat // 0 < step } :=
+  match maxInferenceBatchSize, hBatch with
+  | some k, hBatch => ⟨k, hBatch k rfl⟩
+  | none, _ => ⟨max 1 n, by omega⟩
 
 private structure BatchedDecodeRow where
   idx : Nat
@@ -555,7 +554,7 @@ private def tryTranscribeWaveformsBatchedChunk
     (contexts : Array String)
     (languages : Array (Option String))
     (maxNewTokens : Nat)
-    (eosTokenIds : Array UInt64)
+    (eosTokenIds : Array tokenizer.TokenId)
     : IO (Option (Array ASRTranscription)) := do
   let model := TensorStruct.detach model
   let dev := modelDevice model
@@ -619,11 +618,11 @@ private def tryTranscribeWaveformsBatchedChunk
       let inputRows := bucket.rows.map (fun r => r.inputIdsRow.packShape)
       let featRows := bucket.rows.map (fun r => r.inputFeaturesRow.packShape)
       let fmaskRows := bucket.rows.map (fun r => r.featureAttentionMaskRow.packShape)
-      let inputIdsCpu : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 } := Tensor.catManyChecked inputRows 0 #[batch, seq]
+      let inputIdsCpu : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 } := Tensor.catMany! inputRows 0 #[batch, seq]
       let inputFeaturesCpu : Tensor { device := device, shape := #[batch, preprocessor.featureSize, frames], dtype := .Float32 } :=
-        Tensor.catManyChecked featRows 0 #[batch, preprocessor.featureSize, frames]
+        Tensor.catMany! featRows 0 #[batch, preprocessor.featureSize, frames]
       let featureAttentionMaskCpu : Tensor { device := device, shape := #[batch, frames], dtype := .Int64 } :=
-        Tensor.catManyChecked fmaskRows 0 #[batch, frames]
+        Tensor.catMany! fmaskRows 0 #[batch, frames]
       let generated ←
         do
           model.generateGreedy
@@ -667,16 +666,17 @@ def transcribeWaveforms
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) := do
   let n := audios16k.size
   let ctxs ← broadcastContexts n contexts
   let langs ← broadcastLanguages n languages
   let mut out : Array ASRTranscription := Array.mkEmpty n
-  let step := effectiveBatchStep n maxInferenceBatchSize
+  let step := (effectiveBatchStep n maxInferenceBatchSize hBatch).val
   let mut off : Nat := 0
   while off < n do
     let hi := Nat.min n (off + step)
@@ -728,7 +728,7 @@ def transcribeWav
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription := do
   let wav16k ← normalizeAudioTo16kFromWav wavPath
   transcribeWaveform
@@ -748,7 +748,7 @@ def transcribeAudioInput
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription := do
   let wav16k ← normalizeAudioInputTo16k audio
   transcribeWaveform
@@ -768,7 +768,7 @@ def transcribeAudioSource
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription :=
   transcribeAudioInput
     model
@@ -793,10 +793,11 @@ def transcribeWavs
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) := do
   let mut audios16k : Array (Array Float) := Array.mkEmpty wavPaths.size
   for p in wavPaths do
@@ -810,6 +811,7 @@ def transcribeWavs
     contexts
     languages
     maxInferenceBatchSize
+    hBatch
     returnTimeStamps
     maxNewTokens
     eosTokenIds
@@ -826,10 +828,11 @@ def transcribeAudioInputs
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) := do
   let mut audios16k : Array (Array Float) := Array.mkEmpty audios.size
   for a in audios do
@@ -843,6 +846,7 @@ def transcribeAudioInputs
     contexts
     languages
     maxInferenceBatchSize
+    hBatch
     returnTimeStamps
     maxNewTokens
     eosTokenIds
@@ -858,10 +862,11 @@ def transcribeAudioSources
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) :=
   transcribeAudioInputs
     model
@@ -872,6 +877,7 @@ def transcribeAudioSources
     contexts
     languages
     maxInferenceBatchSize
+    hBatch
     returnTimeStamps
     maxNewTokens
     eosTokenIds
@@ -893,7 +899,7 @@ def loadFromPretrained
     throw <| IO.userError
       s!"Requested aligner source is not a forced-aligner checkpoint (model_type={cfg.thinkerConfig.modelType})"
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
-  let preprocessor ← PreprocessorConfig.loadFromPretrainedDir modelDir
+  let preprocessor ← PreprocessorConfig.loadFromPretrainedDir modelDir (requiredSamplingRate := some 16000)
   let ⟨melBinsMatch⟩ ← if h : preprocessor.featureSize = cfg.thinkerConfig.audioConfig.numMelBins then
       pure (PLift.up h)
     else throw (IO.userError s!"Qwen3 forced-aligner preprocessor feature_size {preprocessor.featureSize} does not match num_mel_bins {cfg.thinkerConfig.audioConfig.numMelBins}")
@@ -983,12 +989,13 @@ def alignWaveforms
     (audios16k : Array (Array Float))
     (texts : Array String)
     (languages : Array String)
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     : IO (Array ForcedAlignResult) := do
   let n := audios16k.size
   let ts ← broadcastTexts n texts
   let ls ← broadcastAlignLanguages n languages
-  let step := effectiveBatchStep n maxInferenceBatchSize
+  let step := (effectiveBatchStep n maxInferenceBatchSize hBatch).val
   let mut out : Array ForcedAlignResult := Array.mkEmpty n
   let mut off : Nat := 0
   while off < n do
@@ -1004,12 +1011,13 @@ def alignAudioInputs
     (audios : Array ASRAudioInput)
     (texts : Array String)
     (languages : Array String)
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     : IO (Array ForcedAlignResult) := do
   let n := audios.size
   let ts ← broadcastTexts n texts
   let ls ← broadcastAlignLanguages n languages
-  let step := effectiveBatchStep n maxInferenceBatchSize
+  let step := (effectiveBatchStep n maxInferenceBatchSize hBatch).val
   let mut out : Array ForcedAlignResult := Array.mkEmpty n
   let mut off : Nat := 0
   while off < n do
@@ -1025,9 +1033,10 @@ def alignBatch
     (audios : Array ASRAudioInput)
     (texts : Array String)
     (languages : Array String)
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     : IO (Array ForcedAlignResult) :=
-  alignAudioInputs aligner audios texts languages maxInferenceBatchSize
+  alignAudioInputs aligner audios texts languages maxInferenceBatchSize hBatch
 
 end Qwen3ForcedAligner
 
@@ -1045,7 +1054,7 @@ def transcribeWaveform
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription :=
   torch.qwen3asr.transcribeWaveform
     m tok preprocessor hMel audio16k forcedAligner context language returnTimeStamps maxNewTokens eosTokenIds
@@ -1060,13 +1069,14 @@ def transcribeWaveforms
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) :=
   torch.qwen3asr.transcribeWaveforms
-    m tok preprocessor hMel audios16k forcedAligner contexts languages maxInferenceBatchSize returnTimeStamps maxNewTokens eosTokenIds
+    m tok preprocessor hMel audios16k forcedAligner contexts languages maxInferenceBatchSize hBatch returnTimeStamps maxNewTokens eosTokenIds
 
 /-- Method-style offline ASR from one WAV path. -/
 def transcribeWav
@@ -1080,7 +1090,7 @@ def transcribeWav
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription :=
   torch.qwen3asr.transcribeWav
     m tok preprocessor hMel wavPath forcedAligner context language returnTimeStamps maxNewTokens eosTokenIds
@@ -1097,7 +1107,7 @@ def transcribeAudioInput
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription :=
   torch.qwen3asr.transcribeAudioInput
     m tok preprocessor hMel audio forcedAligner context language returnTimeStamps maxNewTokens eosTokenIds
@@ -1114,7 +1124,7 @@ def transcribeAudioSource
     (language : Option String := none)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO ASRTranscription :=
   torch.qwen3asr.transcribeAudioSource
     m tok preprocessor hMel source forcedAligner context language returnTimeStamps maxNewTokens eosTokenIds
@@ -1129,13 +1139,14 @@ def transcribeWavs
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) :=
   torch.qwen3asr.transcribeWavs
-    m tok preprocessor hMel wavPaths forcedAligner contexts languages maxInferenceBatchSize returnTimeStamps maxNewTokens eosTokenIds
+    m tok preprocessor hMel wavPaths forcedAligner contexts languages maxInferenceBatchSize hBatch returnTimeStamps maxNewTokens eosTokenIds
 
 /-- Method-style offline ASR from unified audio inputs. -/
 def transcribeAudioInputs
@@ -1147,13 +1158,14 @@ def transcribeAudioInputs
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) :=
   torch.qwen3asr.transcribeAudioInputs
-    m tok preprocessor hMel audios forcedAligner contexts languages maxInferenceBatchSize returnTimeStamps maxNewTokens eosTokenIds
+    m tok preprocessor hMel audios forcedAligner contexts languages maxInferenceBatchSize hBatch returnTimeStamps maxNewTokens eosTokenIds
 
 /-- Method-style offline ASR from string sources with auto-detection. -/
 def transcribeAudioSources
@@ -1165,13 +1177,14 @@ def transcribeAudioSources
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (contexts : Array String := #[])
     (languages : Array (Option String) := #[])
-    (maxInferenceBatchSize : Int := -1)
+    (maxInferenceBatchSize : Option Nat := none)
+    (hBatch : ∀ k ∈ maxInferenceBatchSize, 0 < k := by decide)
     (returnTimeStamps : Bool := false)
     (maxNewTokens : Nat := 512)
-    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    (eosTokenIds : Array tokenizer.TokenId := defaultEosTokenIds)
     : IO (Array ASRTranscription) :=
   torch.qwen3asr.transcribeAudioSources
-    m tok preprocessor hMel sources forcedAligner contexts languages maxInferenceBatchSize returnTimeStamps maxNewTokens eosTokenIds
+    m tok preprocessor hMel sources forcedAligner contexts languages maxInferenceBatchSize hBatch returnTimeStamps maxNewTokens eosTokenIds
 
 end Qwen3ASRForConditionalGeneration
 

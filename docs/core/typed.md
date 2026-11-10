@@ -64,10 +64,9 @@ def packageWeights (tensor : FloatWeights) : SomeDTypeTensor #[2, 3] .CPU :=
   tensor.packDType
 ```
 
-`packDType` packages a statically known index.
-`tensor.reifyDType` reads the native dtype and returns a checked exact package;
-`SomeDTypeTensor.ofRaw` validates the
-requested shape and device at a native boundary. These operations retain values
+`packDType` packages a tensor with its dtype index.
+`SomeDTypeTensor.ofRaw!` admits a native result whose dtype is chosen at
+runtime, checking the requested shape and device. These operations retain values
 and autograd identity without casting or cloning the tensor. The existential
 itself is an ordinary Lean wrapper.
 
@@ -238,7 +237,7 @@ a floating instance. Model loaders validate compute dtypes when loading and
 return `RealFloatingDType` indices. Unpacking the loaded package automatically
 supplies `DType.RealFloating dtype.val`; forward code does not repeat admission
 checks. Independent storage roles retain their own exact dtype indices.
-Use the promoting API when changing dtype is intended.
+Use an explicit cast when changing dtype is intended.
 
 The SafeTensors type provider emits concrete shape/dtype indices and derives
 structural and constrained traversals for its generated records. Loading checks
@@ -246,32 +245,11 @@ the actual tensors against that schema. A floating subtree can then be passed
 to typed arithmetic directly, while an integer leaf prevents the whole tree
 from acquiring a floating constraint.
 
-Use `Tensor.Promoting.add?`, `sub?`, `mul?`, and `div?` when input dtype indices
-are dynamic and the operation should follow native promotion. They inspect the
-actual operand dtypes, construct a promotion witness, and validate the result
-at its computed dtype. The returned `Promoted` package exposes `dtype`,
-`witness`, and `tensor`; division additionally applies its integer-to-floating
-result rule. Host-scalar variants such as `mulScalar?` return `ScalarPromoted`
-with a `ScalarPromotes` witness. No input cast is needed, and the result's dtype
-remains part of its tensor index. For example, BF16 activations multiplied by
-Float32 routing weights produce Float32, while BF16 activations multiplied by an
-Int64 mask remain BF16.
-The `?` arithmetic variants report unsupported promotion, placement mismatches,
-and native kernel failures. A valid promotion witness still does not guarantee
-that a kernel exists.
-
-Runtime broadcasting uses `Tensor.Promoting.addB?`, `subB?`, `mulB?`, and `divB?`.
-They take an explicit output shape and check it against the broadcast result
-before native execution. Their `PointwisePromoted` package carries
-`TensorSpec.Promotes` evidence tied to the operands' actual ranks and dtypes.
 `Tensor.whereSelect` promotes its two value operands and requires a Bool
-condition; `Tensor.Promoting.whereSelect?` provides the corresponding checked
-runtime witness. Selection does not cast the result back to the left dtype.
+condition. Selection does not cast the result back to the left dtype.
 
-Matrix multiplication requires operands with matching dtype and concrete device.
-The checked `matmul?`, `mm?`, `linear?`, `linear3d?`, `matmul3d?`, and `bmm4d?`
-adapters verify actual dtype and device equality before calling native code.
-Elementwise promotion never supplies an implicit matrix cast.
+Matrix multiplication requires operands with matching dtype and device in their
+types. Elementwise promotion never supplies an implicit matrix cast.
 
 `Tensor.matrixLog?` accepts standard real floating matrices, including supported
 nonsymmetric matrices and real rotations. Its eigendecomposition-based solver
@@ -279,7 +257,8 @@ rejects non-real or nonfinite outputs and checks that exponentiating the result
 reconstructs the input with a dtype-scaled relative tolerance. Defective or
 numerically unstable inputs can return an error even when a real logarithm
 exists; this is a solver limitation, not a restriction to positive definite
-matrices. Use the checked variant when those numerical failures must be handled.
+matrices. Because success depends on the values, there is no plain `matrixLog`;
+`matrixLog!` aborts on these failures.
 
 ## Device compatibility
 
@@ -325,9 +304,10 @@ do not allocate accelerator tensors or establish hardware qualification.
 ## Operator checks and failures
 
 Static promotion, domain, and shape evidence is separate from backend kernel
-availability. `relu?`, `maxAll?`, `sumDim?`, and `meanAll?` check their supported
-domains, including nonempty maximum inputs and valid reduction axes. `expand?`
-checks the requested broadcast, while `cat?` and `catMany?` validate placement
+availability. `relu?`, `sumDim?`, and `meanAll?` check their supported
+domains and valid reduction axes. `maxAll` requires an ordered dtype and a
+nonempty shape; `maxAll!` skips both checks, so libtorch rejects a violation and
+the process aborts through Tyr's fatal error report. `cat?` and `catMany?` validate placement
 and the returned shape. These APIs and the arithmetic/matrix `?` families return
 native operation failures through `Except String`. Their pure convenience
 wrappers call `nativeInvariantFailure` on error: the native boundary prints a
@@ -341,39 +321,39 @@ implementation correct.
 `argmax` also requires a valid, nonempty reduction axis; scalar input permits
 axis zero. `maxLast3d` requires a nonempty last axis, while `topKLast2d` requires
 `k ≤ cols` and permits `k = 0`. Concrete dimensions usually discharge these
-proofs automatically. For runtime dimensions or dynamic dtypes, the matching
-`?` variants return domain, range, and native errors through `Except String`.
-The `argmaxChecked`, `maxLast3dChecked`, and `topKLast2dChecked` conveniences
-perform the same runtime checks and abort with a diagnostic on failure.
+proofs automatically, as do positivity hypotheses in scope (`numel_pos`). For
+runtime dimensions or dynamic dtypes, the matching `!` variants skip these checks:
+libtorch rejects a violation and the process aborts through Tyr's fatal error report.
 Selected values retain the actual input dtype; indices have dtype Int64.
 
 `crossEntropy` and `crossEntropyNone` require `DType.RealFloating` for logits
 of shape `[N, C]` and Int64 targets of shape `[N]` on the same device.
 The first returns a scalar mean loss; the second returns one loss per row.
-Their checked native boundary validates labels before loss dispatch: each label
+The native call validates labels before loss dispatch: each label
 must be in `[0, C)` or equal the default ignored label `-100`.
-`crossEntropy?` and `crossEntropyNone?` recover dtype, label, and native failures.
-For dynamic dtype indices, `crossEntropyChecked` and `crossEntropyNoneChecked`
-provide pure runtime-checked conveniences that abort with a diagnostic on
-failure.
-`ChatSFT.maskedCrossEntropy?` retains errors through reshaping, mask arithmetic,
-reduction, and scalar extraction. Its mask must have a real numeric or Bool
+`crossEntropy!` and `crossEntropyNone!` skip the dtype requirement. The native
+call validates labels in every variant; an invalid label aborts the process with
+a diagnostic.
+`ChatSFT.maskedCrossEntropy?` returns mask and arithmetic errors through `Except`;
+invalid labels abort. Its mask must have a real numeric or Bool
 dtype; the pure wrapper requires that domain as type-level evidence.
 
-`indexSelect?` validates vector indices before native indexing, including on
-accelerators, and preserves the data dtype and device. `TokenBytes` uses it
-through IO so invalid token IDs return errors. `sumAll?` and `item?` retain
-reduction and host-scalar conversion failures for recoverable callers.
+`indexSelect` selects vector entries by Int64 indices and preserves the data
+dtype and device. Index values are runtime data: the native call validates them
+before accelerator dispatch, and an out-of-range index aborts the process.
+`indexSelect?` returns that failure as an error instead; `TokenBytes` uses it
+so invalid token IDs are recoverable. `sumAll?` and `item?` retain reduction
+and host-scalar conversion failures for recoverable callers.
 
-`conv1d?`, `conv2dBias?`, `conv1dGroups?`, and `convTranspose1d?` check actual
-dtype and device equality across input, weight, and any bias before invoking
-checked native kernels. Convolution does not implicitly promote its operands,
-including when their dtype indices are dynamic. Invalid convolution parameters
-and unavailable kernels return `Except.error`; successful outputs are checked
-against the computed spatial shape and input dtype/device. The corresponding
-names without `?` abort with a diagnostic on failure.
-The `conv2dBias` result shape broadcasts singleton stride, padding, and dilation
-arrays across both spatial axes, matching the native operation.
+`conv1d`, `conv2dBias`, `conv1dGroups`, and `convTranspose1d` require a floating
+or complex dtype shared by input, weight, and any bias on one device; convolution
+does not promote its operands. Stride, dilation, kernel, padding, groups, and
+output padding are checked by `ConvValid`, `ConvGroups`, and `ConvTransposeValid`
+proofs. Literal parameters discharge them by `decide`; `conv_valid` and
+`conv_groups` also use hypotheses in scope and `omega`. The `!` variants skip
+these requirements and abort on a native error. `conv2dBias` takes
+`(height, width)` pairs for stride, padding, and dilation.
+Outputs are checked against the computed spatial shape and the input dtype/device.
 
 After building the dtype modules, run `bash scripts/test_dtype_promotion.sh`
 to compare all 46² promotion pairs and all four scalar/vector rank combinations
@@ -384,8 +364,12 @@ checks arithmetic result dtypes separately from unavailable kernels.
 
 Attention separates pure inference from stochastic execution. `Tensor.attention`,
 the GQA/masked/window variants, and `Tensor.flashAttention` accept no dropout
-probability and use zero dropout. Their `?` forms retain validation and native
-kernel errors. To train with dropout, bind the corresponding IO operation:
+probability and use zero dropout. They require a real floating dtype, and the
+grouped variants take an `AttentionHeads` proof: the query heads equal the K/V
+heads or, with GQA enabled, are a whole multiple of them. Literal head counts
+discharge it, and a divisibility fact gives it through `AttentionHeads.ofDvd`.
+The `!` variants skip these requirements and abort on a native error. To train
+with dropout, bind the corresponding IO operation:
 
 ```lean
 let output ← Tensor.attentionIO query key value dropout training isCausal
@@ -406,27 +390,23 @@ reproducibility across devices or backend algorithms.
 import Tyr.Typed
 open torch
 
-def checkRaw (raw : RawTensor) : Except String (Tensor { shape := #[2, 3], dtype := .Float32, device := .CPU }) :=
-  Tensor.ofRaw raw
+def admitRaw (raw : RawTensor) : Tensor { shape := #[2, 3], dtype := .Float32, device := .CPU } :=
+  Tensor.ofRaw! "example" raw
 ```
 
-`Tensor.ofRaw` checks all claims in the destination index. `Tensor.ofTensor` and
-`ofTensor?` check a requested shape and dtype and index the result by
-`raw.device`; `ofTensorWithContract` also checks an optional expected placement. `Tensor.validate` audits an existing indexed
-value against its current native metadata.
-
-`TensorContract` contains a `TensorSpec`, an optional `expectedDevice`, and a descriptive
-`TensorRole`. The role does not itself enforce a runtime invariant.
+`Tensor.ofRaw!` admits a native result: it compares the handle's shape, dtype
+and device with the destination index and aborts with the operation name on a
+mismatch, which can only come from a wrong binding or shape formula. Data from
+outside the program is validated on its own metadata where it enters, with
+recoverable errors: SafeTensors header shapes and dtypes, configuration JSON,
+loaded files' dtype and device. `Tensor.ofTensor` and `ofTensor?` check a
+requested shape and dtype and index the result by `raw.device`.
 
 There is no public unchecked raw constructor or implicit coercion to
 `RawTensor`. The opaque carrier prevents anonymous construction, structural
 elimination, and record updates from replacing a checked handle. Native adapters use explicit
-`.raw` access and validate returned handles. `checkedReplacement?` additionally
-checks that actual dtype and device are unchanged, including when the exact
-indices were selected at runtime. Its pure `checkedReplacement` adapter retains
-the original tensor as Lean's panic fallback. The separate `checkedUpdate`
-adapter aborts with a diagnostic on failure and retains no original tensor or
-default allocation.
+`.raw` access and admit returned handles with `ofRaw!`, which retains no
+original tensor or default allocation.
 The native `zerosFor` factory bootstraps pure defaults from a requested spec
 with constant-support evidence; it accepts no foreign handle and trusts native
 allocation/casting. Native
@@ -435,8 +415,9 @@ and the generated FFI header.
 Pure factory calls may share allocations; distinct storage requires an effectful
 allocation boundary such as `data.cloneInferenceIO`.
 Model and example code should compose typed operations instead of rebuilding
-indexed tensors from their raw handles. Raw input adapters should use `ofRaw`;
-IO APIs can turn its error into a contextual `IO.userError`.
+indexed tensors from their raw handles. Input adapters check the input's
+metadata explicitly and report a mismatch as a contextual `IO.userError` before
+admitting the tensor.
 
 ## Runtime-dependent shapes
 
@@ -459,12 +440,10 @@ packages and validates a requested result shape. `Tensor.toSome` instead returns
 `Sigma Tensor`, retaining the complete specification as an existential witness.
 A scalar is `#[]`; it is never a substitute for an unknown shape.
 
-`reshape` requires equal element counts. `reshapeChecked?` checks runtime
-element counts and rejects wrapped negative extents before invoking the native
-reshape. `castDType?` and `castLike?` perform real dtype conversions and validate
+`reshape` requires a proof of equal element counts; native code rejects extents
+that do not fit a signed 64-bit integer. `castDType?` and `castLike?` perform real dtype conversions and validate
 the result, returning native conversion failures through `Except`. Their pure
-convenience wrappers, along with `sliceChecked`, abort with a diagnostic on
-failure; use the `Except` variants when an
+convenience wrappers abort with a diagnostic on failure; use the `Except` variants when an
 error must be handled. Exact file loading checks the stored layout
 before returning a tensor; it does not repair a mismatch by reshaping.
 

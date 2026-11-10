@@ -4,13 +4,6 @@ import Tyr.SafeTensors.File
 
 namespace torch.Tensor
 
-/-- Validate a native neural result before assigning its static specification. -/
-private def checkedNeuralResult {σ : StaticSpec} (operation : String)
-    (raw : RawTensor) : Tensor σ :=
-  match Tensor.ofRaw raw with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.{operation}: {message}"
-
 /-- Return a copy of the source in the destination's placement, reusing the
 destination storage only when it has no observable aliases.
 Dynamic specifications do not authorize implicit dtype conversion; copying
@@ -21,145 +14,93 @@ def copyInto {s : Shape} {d : DType} {dstDevice srcDevice : Device}
   match TensorSpec.checkCompatible dst.actualSpec src.actualSpec with
   | .error message => throw (IO.userError s!"Tensor.copyInto: {message}")
   | .ok () => pure ()
-  let dtype := dst.raw.dtype
-  let device := dst.raw.device
   let raw ← RawTensor.copyInto dst.raw src.raw
-  match Tensor.checkedUpdate? dtype device raw with
-  | .ok result => pure result
-  | .error message => throw (IO.userError s!"Tensor.copyInto: {message}")
+  pure (Tensor.ofRaw! raw)
 
-/-- Checked dtype conversion. Unsupported native conversions return errors;
-recognizing a dtype does not promise that a backend implements its conversion. -/
-def castDType? {σ : StaticSpec} (t : Tensor σ) (dtype : DType) :
-    Except String (Tensor (σ.withDType dtype)) := do
-  let raw ← RawTensor.castDTypeChecked σ.shape t.raw dtype
-  Device.check t.raw.device raw.device
-  Tensor.ofRaw (σ := σ.withDType dtype) raw
+def castDType! {σ : StaticSpec} (t : Tensor σ) (dtype : DType) : Tensor (σ.withDType dtype) :=
+  Tensor.ofRaw! (RawTensor.castDType t.raw dtype)
 
-/-- Cast to a concrete dtype; use `castDType?` to handle conversion failures. -/
+/-- Cast to `dtype`. A conversion the backend does not implement aborts; no value
+can make a supported conversion fail. -/
 def castDType {σ : StaticSpec} (t : Tensor σ) (dtype : DType) : Tensor (σ.withDType dtype) :=
-  match t.castDType? dtype with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.castDType: {message}"
+  castDType! t dtype
 
-/-- Match the reference's actual dtype and preserve input shape and placement. -/
-def castLike? {σ τ : StaticSpec} (reference : Tensor τ) (t : Tensor σ) :
-    Except String (Tensor (σ.withDType τ.dtype)) := do
-  let dtype := reference.raw.dtype
-  let raw ← if t.raw.dtype == dtype then pure t.raw else
-    RawTensor.castDTypeChecked σ.shape t.raw dtype
-  TensorSpec.checkDType dtype raw.dtype
-  Device.check t.raw.device raw.device
-  Tensor.ofRaw (σ := σ.withDType τ.dtype) raw
+def castLike! {σ τ : StaticSpec} (_reference : Tensor τ) (t : Tensor σ) :
+    Tensor (σ.withDType τ.dtype) :=
+  castDType! t τ.dtype
 
-/-- Match the reference's native dtype; use `castLike?` for recoverable errors. -/
+/-- Cast `t` to the reference's dtype, preserving its shape and placement. -/
 def castLike {σ τ : StaticSpec} (reference : Tensor τ) (t : Tensor σ) :
     Tensor (σ.withDType τ.dtype) :=
-  match castLike? reference t with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.castLike: {message}"
+  castLike! reference t
 
 /-- RMS normalization accumulated in Float32, with the output dtype indexed. -/
 def rmsNorm {σ : StaticSpec} (x : Tensor σ) (eps : Float := 1e-6) : Tensor (σ.withDType .Float32) :=
   let xf := RawTensor.toFloat32 x.raw
-  let variance := RawTensor.mean (RawTensor.mul xf xf)
+  let variance := RawTensor.mean! (RawTensor.mul! xf xf)
     (some #[(σ.shape.size - 1)]) true
-  match Tensor.ofRaw
-      (RawTensor.mul xf (RawTensor.rsqrt (RawTensor.addScalar variance eps))) with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.rmsNorm: {message}"
+  (Tensor.ofRaw! (RawTensor.mul! xf (RawTensor.rsqrt! (RawTensor.addScalar! variance eps))))
 
 /-- RMS normalization with Float32 accumulation and explicit restoration of the input dtype. -/
 def rmsNormPreserving {σ : StaticSpec} {w : Shape}
     (x : Tensor σ) (weight : Tensor (σ.withShape w)) (eps : Float := 1e-6) : Tensor σ :=
   -- HF checkpoints round the normalized activation before multiplying weights.
   let restored := Tensor.castLike x (rmsNorm x eps)
-  let result := do
-    Tensor.checkPointwise restored weight
-    x.checkedReplacement? (← RawTensor.mulChecked restored.raw weight.raw)
-  match result with
-  | .ok tensor => tensor
-  | .error message => nativeInvariantFailure s!"Tensor.rmsNormPreserving: {message}"
+  Tensor.ofRaw! (RawTensor.mul! restored.raw weight.raw)
 
 /-- Package a tensor's shape existentially; this does not erase its shape claim. -/
 def packShape {s : Shape} {d : DType} {dev : Device} (t : Tensor ⟨s, d, dev⟩) :
     Sigma (fun shape => Tensor ⟨shape, d, dev⟩) := ⟨s, t⟩
 
-/-- Concatenate tensors with runtime-varying shapes, checking the requested result.
-Inputs retain their individual shape indices rather than pretending to be scalars. -/
+/-- Concatenate tensors whose shapes are known only at runtime. An empty array,
+an axis out of range, or sizes that differ off the axis are returned as errors;
+the result is admitted at the requested `shape`. -/
 def catMany? {d : DType} {dev : Device}
     (tensors : Array (Sigma (fun shape => Tensor ⟨shape, d, dev⟩)))
     (dim : Nat) (shape : Shape) : Except String (Tensor ⟨shape, d, dev⟩) := do
-  let some first := tensors[0]? | throw "catMany requires at least one tensor"
-  for t in tensors do
-    Tensor.checkSameDevice first.2 t.2
-  Tensor.ofRaw (← RawTensor.catManyChecked (tensors.map fun t => t.2.raw) dim)
+  pure (Tensor.ofRaw! (← RawTensor.catMany? (tensors.map fun t => t.2.raw) dim))
 
-def catManyChecked {d : DType} {dev : Device}
+/-- `catMany?` without its checks; invalid inputs abort natively. -/
+def catMany! {d : DType} {dev : Device}
     (tensors : Array (Sigma (fun shape => Tensor ⟨shape, d, dev⟩)))
     (dim : Nat) (shape : Shape) : Tensor ⟨shape, d, dev⟩ :=
-  match catMany? tensors dim shape with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.catManyChecked: {message}"
+  Tensor.ofRaw! (RawTensor.catMany! (tensors.map fun t => t.2.raw) dim)
 
 def arange (stop : Nat) : Tensor { shape := #[stop], dtype := .Int64, device := .CPU } :=
-  checkedNeuralResult "arange" (RawTensor.arange 0 stop 1)
+  Tensor.ofRaw! (RawTensor.arange 0 stop 1)
 
-private def checkedNeuralUnary? {σ : StaticSpec} (operation domain : String)
-    (accepts : DType → Bool) (native : RawTensor → Except String RawTensor)
-    (t : Tensor σ) : Except String (Tensor σ) := do
-  if !accepts t.raw.dtype then
-    throw s!"{operation} requires {domain}, got {t.raw.dtype}"
-  t.checkedReplacement? (← native t.raw)
-
-private def neuralUnaryResult {σ : StaticSpec} (operation : String) (t : Tensor σ)
-    (result : Except String (Tensor σ)) : Tensor σ :=
-  match result with
-  | .ok result => result
-  | .error message =>
-    letI : Inhabited (Tensor σ) := ⟨t⟩
-    nativeInvariantFailure s!"Tensor.{operation}: {message}"
-
-def sin? {σ : StaticSpec} (t : Tensor σ) : Except String (Tensor σ) :=
-  checkedNeuralUnary? "sin" "a floating or complex dtype" DType.isInexact RawTensor.sinChecked t
+def sin! {σ : StaticSpec} (t : Tensor σ) : Tensor σ :=
+  Tensor.ofRaw! (RawTensor.sin! t.raw)
 
 def sin {σ : StaticSpec} (t : Tensor σ)
     (_domain : σ.dtype.isInexact = true := by first | rfl | exact DType.isInexact_of_realFloating | decide) : Tensor σ :=
-  neuralUnaryResult "sin" t (sin? t)
+  sin! t
 
-def cos? {σ : StaticSpec} (t : Tensor σ) : Except String (Tensor σ) :=
-  checkedNeuralUnary? "cos" "a floating or complex dtype" DType.isInexact RawTensor.cosChecked t
+def cos! {σ : StaticSpec} (t : Tensor σ) : Tensor σ :=
+  Tensor.ofRaw! (RawTensor.cos! t.raw)
 
 def cos {σ : StaticSpec} (t : Tensor σ)
     (_domain : σ.dtype.isInexact = true := by first | rfl | exact DType.isInexact_of_realFloating | decide) : Tensor σ :=
-  neuralUnaryResult "cos" t (cos? t)
+  cos! t
 
-def elu? {σ : StaticSpec} (t : Tensor σ) : Except String (Tensor σ) :=
-  checkedNeuralUnary? "elu" "a standard real floating dtype" DType.isRealFloating RawTensor.eluChecked t
+def elu! {σ : StaticSpec} (t : Tensor σ) : Tensor σ :=
+  Tensor.ofRaw! (RawTensor.elu! t.raw)
 
 def elu {σ : StaticSpec} (t : Tensor σ)
     (_domain : σ.dtype.isRealFloating = true := by first | rfl | exact DType.isRealFloating_of_realFloating | decide) : Tensor σ :=
-  neuralUnaryResult "elu" t (elu? t)
+  elu! t
 
 
 /-- Mean for floating or complex checkpoint tensors; invalid axes, integral
 inputs and missing kernels are recoverable errors. -/
-def meanDim? {σ : StaticSpec} (t : Tensor σ) (dim : Nat) (keepdim : Bool := false) :
-    Except String (Tensor (σ.withShape (reduceShape σ.shape dim keepdim))) := do
-  DType.checkMean t.raw.dtype
-  if dim >= max 1 σ.shape.size then
-    throw s!"Reduction axis {dim} is out of range for rank {σ.shape.size}"
-  let raw ← RawTensor.meanChecked t.raw (some #[dim]) keepdim
-  TensorSpec.checkDType t.raw.dtype raw.dtype
-  Device.check t.raw.device raw.device
-  Tensor.ofRaw raw
+def meanDim! {σ : StaticSpec} (t : Tensor σ) (dim : Nat) (keepdim : Bool := false) :
+    Tensor (σ.withShape (reduceShape σ.shape dim keepdim)) :=
+  Tensor.ofRaw! (RawTensor.mean! t.raw (some #[dim]) keepdim)
 
 def meanDim {σ : StaticSpec} [DType.Mean σ.dtype] (t : Tensor σ) (dim : Nat) (keepdim : Bool := false)
     (_axis : dim < max 1 σ.shape.size := by first | exact of_decide_eq_true rfl | (simp <;> fail "axis out of range")) :
     Tensor (σ.withShape (reduceShape σ.shape dim keepdim)) :=
-  match meanDim? t dim keepdim with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.meanDim: {message}"
+  meanDim! t dim keepdim
 
 /-- Spatial extent computed without fixed-width arithmetic wrapping. -/
 def convExtent (input kernel stride padding dilation : Nat) : Nat :=
@@ -171,73 +112,40 @@ theorem convExtent_same {n kernel padding : Nat} (hn : 0 < n) (hk : 2 * padding 
     convExtent n kernel 1 padding 1 = n := by
   unfold convExtent; omega
 
-/-- Project a spatial parameter, repeating singleton arrays as native conv2d does.
-Only lengths one and two are valid; the native operation still receives the
-original array and rejects invalid lengths. The zero for a missing entry only
-makes the result index total and is never supplied as a native default. -/
-@[simp] def conv2dParam (values : Array Nat) (axis : Nat) : Nat :=
-  values.getD (if values.size == 1 then 0 else axis) 0
-
-private def checkConvolutionOperands {σ τ υ : StaticSpec}
-    (input : Tensor σ) (weight : Tensor τ) (bias : Tensor υ) : Except String Unit := do
-  DType.expectedEq input.raw.dtype weight.raw.dtype
-  DType.expectedEq input.raw.dtype bias.raw.dtype
-  Tensor.checkSameDevice input weight
-  Tensor.checkSameDevice input bias
-
-/-- Checked convolution, including actual dtype equality for dynamic operands.
-Native stride, padding and dilation errors remain recoverable. -/
-def conv2dBias? {batch cin cout height width kh kw : Nat} {d : DType} {dev : Device}
+def conv2dBias! {batch cin cout height width kh kw : Nat} {d : DType} {dev : Device}
     (input : Tensor ⟨#[batch, cin, height, width], d, dev⟩)
     (weight : Tensor ⟨#[cout, cin, kh, kw], d, dev⟩)
     (bias : Tensor ⟨#[cout], d, dev⟩)
-    (stride : Array Nat := #[1, 1]) (padding : Array Nat := #[0, 0])
-    (dilation : Array Nat := #[1, 1]) :
-    Except String (Tensor ⟨#[batch, cout,
-      convExtent height kh (conv2dParam stride 0) (conv2dParam padding 0) (conv2dParam dilation 0),
-      convExtent width kw (conv2dParam stride 1) (conv2dParam padding 1) (conv2dParam dilation 1)], d, dev⟩) := do
-  checkConvolutionOperands input weight bias
-  let raw ← RawTensor.conv2dBiasChecked
-    input.raw weight.raw bias.raw stride padding dilation
-  DType.expectedEq input.raw.dtype raw.dtype
-  Tensor.ofRaw raw
-
-/-- Biased two-dimensional convolution; `conv2dBias?` returns argument errors. -/
-def conv2dBias {batch cin cout height width kh kw : Nat} {d : DType} {dev : Device}
-    (input : Tensor ⟨#[batch, cin, height, width], d, dev⟩)
-    (weight : Tensor ⟨#[cout, cin, kh, kw], d, dev⟩)
-    (bias : Tensor ⟨#[cout], d, dev⟩)
-    (stride : Array Nat := #[1, 1]) (padding : Array Nat := #[0, 0])
-    (dilation : Array Nat := #[1, 1]) :
+    (stride : Nat × Nat := (1, 1)) (padding : Nat × Nat := (0, 0))
+    (dilation : Nat × Nat := (1, 1)) :
     Tensor ⟨#[batch, cout,
-      convExtent height kh (conv2dParam stride 0) (conv2dParam padding 0) (conv2dParam dilation 0),
-      convExtent width kw (conv2dParam stride 1) (conv2dParam padding 1) (conv2dParam dilation 1)], d, dev⟩ :=
-  match conv2dBias? input weight bias stride padding dilation with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.conv2dBias: {message}"
+      convExtent height kh stride.1 padding.1 dilation.1,
+      convExtent width kw stride.2 padding.2 dilation.2], d, dev⟩ :=
+  Tensor.ofRaw! (RawTensor.conv2dBias! input.raw weight.raw bias.raw
+    #[stride.1, stride.2] #[padding.1, padding.2] #[dilation.1, dilation.2])
+
+/-- Biased two-dimensional convolution; parameters are (height, width) pairs. -/
+def conv2dBias {batch cin cout height width kh kw : Nat} {d : DType} {dev : Device}
+    [DType.FloatingOrComplex d]
+    (input : Tensor ⟨#[batch, cin, height, width], d, dev⟩)
+    (weight : Tensor ⟨#[cout, cin, kh, kw], d, dev⟩)
+    (bias : Tensor ⟨#[cout], d, dev⟩)
+    (stride : Nat × Nat := (1, 1)) (padding : Nat × Nat := (0, 0))
+    (dilation : Nat × Nat := (1, 1))
+    (_height : ConvValid height kh stride.1 padding.1 dilation.1 := by conv_valid)
+    (_width : ConvValid width kw stride.2 padding.2 dilation.2 := by conv_valid) :
+    Tensor ⟨#[batch, cout,
+      convExtent height kh stride.1 padding.1 dilation.1,
+      convExtent width kw stride.2 padding.2 dilation.2], d, dev⟩ :=
+  conv2dBias! input weight bias stride padding dilation
 
 def splitHeads {batch seq heads dim : Nat} {d : DType} {dev : Device}
     (t : Tensor ⟨#[batch, seq, heads, dim], d, dev⟩) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
-  checkedNeuralResult "splitHeads" (RawTensor.splitHeads t.raw)
+  Tensor.ofRaw! (RawTensor.splitHeads t.raw)
 
 def joinHeads {batch heads seq dim : Nat} {d : DType} {dev : Device}
     (t : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) : Tensor ⟨#[batch, seq, heads, dim], d, dev⟩ :=
-  checkedNeuralResult "joinHeads" (RawTensor.joinHeads t.raw)
-
-/-- Dynamic dtype indices still require the actual Q/K/V dtypes to agree. -/
-private def checkAttentionOperands {sq sk sv : StaticSpec}
-    (q : Tensor sq) (k : Tensor sk) (v : Tensor sv) : Except String Unit := do
-  DType.expectedEq q.raw.dtype k.raw.dtype
-  DType.expectedEq q.raw.dtype v.raw.dtype
-  Device.check q.raw.device k.raw.device
-  Device.check q.raw.device v.raw.device
-
-private def attentionResult {σ : StaticSpec} (operation : String) (q : Tensor σ)
-    (result : Except String (Tensor σ)) : Tensor σ :=
-  letI : Inhabited (Tensor σ) := ⟨q⟩
-  match result with
-  | .ok value => value
-  | .error message => nativeInvariantFailure s!"Tensor.{operation}: {message}"
+  Tensor.ofRaw! (RawTensor.joinHeads t.raw)
 
 private def attentionCheckIO {α : Type} (operation : String)
     (result : Except String α) : IO α :=
@@ -252,47 +160,57 @@ def attentionDropout? (dropout : Float) (training : Bool) : Except String Float 
     throw "attention dropout must be finite and in [0, 1]"
   pure (if training then dropout else 0.0)
 
-/-- Zero-dropout attention with recoverable native errors. -/
-def attention? {batch heads seq dim : Nat} {d : DType} {dev : Device}
-    (q k v : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
-    (causal : Bool := true) : Except String (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.attention
-    q.raw k.raw v.raw causal
-  q.checkedReplacement? raw
+/-- Query heads either equal the K/V heads, or form whole groups of them under GQA. -/
+def AttentionHeads (heads kvHeads : Nat) (gqa : Bool) : Prop :=
+  kvHeads = heads ∨ (gqa = true ∧ kvHeads ∣ heads)
 
-/-- Deterministic attention; `attention?` exposes validation and kernel errors. -/
-def attention {batch heads seq dim : Nat} {d : DType} {dev : Device}
+instance (heads kvHeads : Nat) (gqa : Bool) : Decidable (AttentionHeads heads kvHeads gqa) := by
+  unfold AttentionHeads; infer_instance
+
+theorem AttentionHeads.ofDvd {heads kvHeads : Nat} (h : kvHeads ∣ heads) :
+    AttentionHeads heads kvHeads true :=
+  Or.inr ⟨rfl, h⟩
+
+/-- Discharges `AttentionHeads` for equal heads, literal heads, or a divisibility fact in scope. -/
+macro "attention_heads" : tactic => `(tactic| first
+  | exact Or.inl rfl
+  | exact of_decide_eq_true rfl
+  | exact Or.inr ⟨rfl, by assumption⟩)
+
+def attention! {batch heads seq dim : Nat} {d : DType} {dev : Device}
     (q k v : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
     (causal : Bool := true) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
-  attentionResult "attention" q (attention? q k v causal)
+  Tensor.ofRaw! (RawTensor.attention! q.raw k.raw v.raw causal)
+
+/-- Zero-dropout attention. -/
+def attention {batch heads seq dim : Nat} {d : DType} {dev : Device} [DType.RealFloating d]
+    (q k v : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
+    (causal : Bool := true) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
+  attention! q k v causal
 
 /-- Attention with explicit training-mode dropout, sequenced through native IO. -/
 def attentionIO {batch heads seq dim : Nat} {d : DType} {dev : Device}
     (q k v : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
     (dropout : Float) (training : Bool) (causal : Bool := true) : IO (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "attentionIO" (attentionDropout? dropout training)
-  attentionCheckIO "attentionIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.attentionIO
     q.raw k.raw v.raw effective causal
-  attentionCheckIO "attentionIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
-/-- Zero-dropout attention with recoverable native errors. -/
-def attentionGQA? {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
-    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
-    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
-    (causal : Bool := true) (gqa : Bool := false) : Except String (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.attentionGQA
-    q.raw k.raw v.raw causal gqa
-  q.checkedReplacement? raw
-
-/-- Deterministic attention; `attentionGQA?` exposes validation and kernel errors. -/
-def attentionGQA {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
+def attentionGQA! {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
     (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
     (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
     (causal : Bool := true) (gqa : Bool := false) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
-  attentionResult "attentionGQA" q (attentionGQA? q k v causal gqa)
+  Tensor.ofRaw! (RawTensor.attentionGQA! q.raw k.raw v.raw causal gqa)
+
+/-- Zero-dropout grouped-query attention. -/
+def attentionGQA {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device} [DType.RealFloating d]
+    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
+    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
+    (causal : Bool := true) (gqa : Bool := false)
+    (_heads : AttentionHeads heads kvHeads gqa := by attention_heads) :
+    Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
+  attentionGQA! q k v causal gqa
 
 /-- Attention with explicit training-mode dropout, sequenced through native IO. -/
 def attentionGQAIO {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
@@ -300,29 +218,26 @@ def attentionGQAIO {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device
     (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
     (dropout : Float) (training : Bool) (causal : Bool := true) (gqa : Bool := false) : IO (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "attentionGQAIO" (attentionDropout? dropout training)
-  attentionCheckIO "attentionGQAIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.attentionGQAIO
     q.raw k.raw v.raw effective causal gqa
-  attentionCheckIO "attentionGQAIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
-/-- Zero-dropout attention with recoverable native errors. -/
-def attentionGQAMask? {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev : Device}
-    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
-    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
-    (mask : Tensor ⟨#[batch, seq], dm, dev⟩)
-    (causal : Bool := true) (gqa : Bool := false) : Except String (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.attentionGQAMask
-    q.raw k.raw v.raw mask.raw causal gqa
-  q.checkedReplacement? raw
-
-/-- Deterministic attention; `attentionGQAMask?` exposes validation and kernel errors. -/
-def attentionGQAMask {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev : Device}
+def attentionGQAMask! {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev : Device}
     (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
     (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
     (mask : Tensor ⟨#[batch, seq], dm, dev⟩)
     (causal : Bool := true) (gqa : Bool := false) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
-  attentionResult "attentionGQAMask" q (attentionGQAMask? q k v mask causal gqa)
+  Tensor.ofRaw! (RawTensor.attentionGQAMask! q.raw k.raw v.raw mask.raw causal gqa)
+
+/-- Zero-dropout grouped-query attention with a key padding mask. -/
+def attentionGQAMask {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev : Device} [DType.RealFloating d]
+    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
+    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
+    (mask : Tensor ⟨#[batch, seq], dm, dev⟩)
+    (causal : Bool := true) (gqa : Bool := false)
+    (_heads : AttentionHeads heads kvHeads gqa := by attention_heads) :
+    Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
+  attentionGQAMask! q k v mask causal gqa
 
 /-- Attention with explicit training-mode dropout, sequenced through native IO. -/
 def attentionGQAMaskIO {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev : Device}
@@ -331,10 +246,9 @@ def attentionGQAMaskIO {batch heads kvHeads seq dim : Nat} {d dm : DType} {dev :
     (mask : Tensor ⟨#[batch, seq], dm, dev⟩)
     (dropout : Float) (training : Bool) (causal : Bool := true) (gqa : Bool := false) : IO (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "attentionGQAMaskIO" (attentionDropout? dropout training)
-  attentionCheckIO "attentionGQAMaskIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.attentionGQAMaskIO
     q.raw k.raw v.raw mask.raw effective causal gqa
-  attentionCheckIO "attentionGQAMaskIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
 /-- Gather has the index tensor's shape, and the source tensor's dtype. -/
 def gather {s indicesShape : Shape} {d : DType} {dev : Device}
@@ -343,9 +257,7 @@ def gather {s indicesShape : Shape} {d : DType} {dev : Device}
     (_h : TensorSpec.gatherCompatible s indicesShape dim = true := by
       first | exact of_decide_eq_true rfl | (simp <;> fail "incompatible gather shapes")) :
     Tensor ⟨indicesShape, d, dev⟩ :=
-  match Tensor.ofRaw (RawTensor.gather input.raw dim indices.raw) with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.gather: {message}"
+  (Tensor.ofRaw! (RawTensor.gather input.raw dim indices.raw))
 
 /-- Masked selection returns an existential vector length, checked against the native result. -/
 def maskedSelect {s : Shape} {d : DType} {dev : Device}
@@ -353,31 +265,28 @@ def maskedSelect {s : Shape} {d : DType} {dev : Device}
     Sigma (fun n => Tensor ⟨#[n], d, dev⟩) :=
   let raw := RawTensor.maskedSelect input.raw mask.raw
   let n := raw.runtimeShape.getD 0 0
-  match Tensor.ofRaw (σ := ⟨#[n], d, dev⟩) raw with
-  | .ok result => ⟨n, result⟩
-  | .error message => ⟨n, nativeInvariantFailure s!"Tensor.maskedSelect: {message}"⟩
+  let result := Tensor.ofRaw! (σ := ⟨#[n], d, dev⟩) raw
+  ⟨n, result⟩
 
 def maskedScatter {s sourceShape : Shape} {d : DType} {dev : Device}
     (input : Tensor ⟨s, d, dev⟩) (mask : Tensor ⟨s, .Bool, dev⟩)
     (source : Tensor ⟨sourceShape, d, dev⟩) : Tensor ⟨s, d, dev⟩ :=
-  input.checkedReplacement (RawTensor.maskedScatter input.raw mask.raw source.raw)
+  Tensor.ofRaw! (RawTensor.maskedScatter input.raw mask.raw source.raw)
 
-/-- Zero-dropout attention with recoverable native errors. -/
-def attentionGQAQKV? {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
-    (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
-    (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩)
-    (causal : Bool := false) (gqa : Bool := false) : Except String (Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.attentionGQAQKV
-    q.raw k.raw v.raw causal gqa
-  q.checkedReplacement? raw
-
-/-- Deterministic attention; `attentionGQAQKV?` exposes validation and kernel errors. -/
-def attentionGQAQKV {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
+def attentionGQAQKV! {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
     (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
     (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩)
     (causal : Bool := false) (gqa : Bool := false) : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩ :=
-  attentionResult "attentionGQAQKV" q (attentionGQAQKV? q k v causal gqa)
+  Tensor.ofRaw! (RawTensor.attentionGQAQKV! q.raw k.raw v.raw causal gqa)
+
+/-- Zero-dropout grouped-query attention with separate query and key/value lengths. -/
+def attentionGQAQKV {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device} [DType.RealFloating d]
+    (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
+    (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩)
+    (causal : Bool := false) (gqa : Bool := false)
+    (_heads : AttentionHeads heads kvHeads gqa := by attention_heads) :
+    Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩ :=
+  attentionGQAQKV! q k v causal gqa
 
 /-- Attention with explicit training-mode dropout, sequenced through native IO. -/
 def attentionGQAQKVIO {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
@@ -385,31 +294,28 @@ def attentionGQAQKVIO {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {de
     (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩)
     (dropout : Float) (training : Bool) (causal : Bool := false) (gqa : Bool := false) : IO (Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "attentionGQAQKVIO" (attentionDropout? dropout training)
-  attentionCheckIO "attentionGQAQKVIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.attentionGQAQKVIO
     q.raw k.raw v.raw effective causal gqa
-  attentionCheckIO "attentionGQAQKVIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
-/-- Zero-dropout native FlashAttention dispatch with checked metadata and errors. -/
-def flashAttention? {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
-    (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
-    (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩) (gqa : Bool := false)
-    (mask : Option (SomeDTypeTensor #[batch, kvSeq] dev) := none)
-    (causal : Bool := false) (scale : Option Float := none) :
-    Except String (Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.flashAttention
-    q.raw k.raw v.raw (mask.map (fun packed => packed.2.raw)) causal scale gqa
-  q.checkedReplacement? raw
-
-/-- Zero-dropout FlashAttention. Use `flashAttention?` to handle native errors. -/
-def flashAttention {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
+def flashAttention! {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device}
     (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
     (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩) (gqa : Bool := false)
     (mask : Option (SomeDTypeTensor #[batch, kvSeq] dev) := none)
     (causal : Bool := false) (scale : Option Float := none) :
     Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩ :=
-  attentionResult "flashAttention" q (flashAttention? q k v gqa mask causal scale)
+  Tensor.ofRaw! (RawTensor.flashAttention!
+    q.raw k.raw v.raw (mask.map (fun packed => packed.2.raw)) causal scale gqa)
+
+/-- Zero-dropout FlashAttention. -/
+def flashAttention {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev : Device} [DType.RealFloating d]
+    (q : Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩)
+    (k v : Tensor ⟨#[batch, kvHeads, kvSeq, dim], d, dev⟩) (gqa : Bool := false)
+    (mask : Option (SomeDTypeTensor #[batch, kvSeq] dev) := none)
+    (causal : Bool := false) (scale : Option Float := none)
+    (_heads : AttentionHeads heads kvHeads gqa := by attention_heads) :
+    Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩ :=
+  flashAttention! q k v gqa mask causal scale
 
 /-- FlashAttention with explicit training-mode dropout through native IO.
 Evaluation uses zero dropout, independently of the configured probability. -/
@@ -421,155 +327,171 @@ def flashAttentionIO {batch heads kvHeads qSeq kvSeq dim : Nat} {d : DType} {dev
     (causal : Bool := false) (scale : Option Float := none) :
     IO (Tensor ⟨#[batch, heads, qSeq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "flashAttentionIO" (attentionDropout? dropout training)
-  attentionCheckIO "flashAttentionIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.flashAttentionIO
     q.raw k.raw v.raw (mask.map (fun packed => packed.2.raw)) effective causal scale gqa
-  attentionCheckIO "flashAttentionIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
 def sliceScatter {s sourceShape : Shape} {d : DType} {dev : Device}
     (input : Tensor ⟨s, d, dev⟩) (dim start : Nat)
     (source : Tensor ⟨sourceShape, d, dev⟩)
     (_h : TensorSpec.sliceScatterCompatible s sourceShape dim = true := by
-      first | exact of_decide_eq_true rfl | (simp <;> fail "incompatible slice scatter shapes")) :
+      first | exact of_decide_eq_true rfl | (simp <;> fail "incompatible slice scatter shapes"))
+    (_bound : start + sourceShape.getD dim 0 ≤ s.getD dim 0 := by
+      first | exact of_decide_eq_true rfl | omega | (simp <;> omega)) :
     Tensor ⟨s, d, dev⟩ :=
-  let dtype := input.raw.dtype
-  let device := input.raw.device
-  Tensor.checkedUpdate dtype device
-    (RawTensor.sliceScatter input.raw dim start source.raw)
+  Tensor.ofRaw! (RawTensor.sliceScatter input.raw dim start source.raw)
 
-def applyRotary {batch seq heads dim : Nat} {d dc : DType} {dev : Device}
-    (input : Tensor ⟨#[batch, seq, heads, dim], d, dev⟩)
-    (cos sin : Tensor ⟨#[seq, dim / 2], dc, dev⟩) :=
-  input.checkedReplacement (RawTensor.applyRotary input.raw cos.raw sin.raw)
+/-- Rotate-half RoPE: the two halves of the last axis are rotated by `cos`/`sin`. -/
+def applyRotary {batch seq heads half : Nat} {d dc : DType} {dev : Device}
+    (input : Tensor ⟨#[batch, seq, heads, 2 * half], d, dev⟩)
+    (cos sin : Tensor ⟨#[seq, half], dc, dev⟩) : Tensor ⟨#[batch, seq, heads, 2 * half], d, dev⟩ :=
+  Tensor.ofRaw! (RawTensor.applyRotary input.raw cos.raw sin.raw)
 
-def rotaryFreqs (seq dim : Nat) (base : Float := 10000.0) (device : Device := .CPU) :
-    Tensor { shape := #[seq, dim / 2], dtype := .Float32, device } × Tensor { shape := #[seq, dim / 2], dtype := .Float32, device } :=
-  let (cos, sin) := RawTensor.rotaryFreqs seq dim base device
-  match Tensor.ofRaw cos, Tensor.ofRaw sin with
-  | .ok c, .ok s => (c, s)
-  | .error message, _ | _, .error message => nativeInvariantFailure s!"Tensor.rotaryFreqs: {message}"
+/-- Rotary cos/sin tables `[seq, half]` for a rotated width of `2 * half`. -/
+def rotaryFreqs (seq half : Nat) (base : Float := 10000.0) (device : Device := .CPU) :
+    Tensor { shape := #[seq, half], dtype := .Float32, device } × Tensor { shape := #[seq, half], dtype := .Float32, device } :=
+  let (cos, sin) := RawTensor.rotaryFreqs seq (2 * half) base device
+  (Tensor.ofRaw! cos, Tensor.ofRaw! sin)
 
 def hannWindow (n : Nat) : Tensor { shape := #[n], dtype := .Float32, device := .CPU } :=
-  match Tensor.ofRaw (RawTensor.hannWindow n) with
-  | .ok t => t
-  | .error message => nativeInvariantFailure s!"Tensor.hannWindow: {message}"
+  (Tensor.ofRaw! (RawTensor.hannWindow n))
 
-/-- The native STFT frame count is returned as a checked existential shape. -/
-def stft {n winLength : Nat} {dev : Device} (input : Tensor { shape := #[n], dtype := .Float32, device := dev }) (nFft hopLength : Nat)
+/-- Frames of `stft` over `n` samples; `center` reflect-pads `nFft / 2` on each side. -/
+def stftFrames (n nFft hopLength : Nat) (center : Bool) : Nat :=
+  ((if center then n + 2 * (nFft / 2) else n) - nFft) / hopLength + 1
+
+/-- Parameters `torch.stft` accepts for `n` samples: a positive hop, a positive
+window no longer than the FFT, and enough samples for the reflect padding when
+`center` holds, or for one frame otherwise. -/
+def StftValid (n nFft hopLength winLength : Nat) (center : Bool) : Prop :=
+  0 < hopLength ∧ 0 < winLength ∧ winLength ≤ nFft ∧ (if center then nFft / 2 < n else nFft ≤ n)
+
+instance (n nFft hopLength winLength : Nat) (center : Bool) :
+    Decidable (StftValid n nFft hopLength winLength center) := by
+  unfold StftValid; infer_instance
+
+def stft! {n winLength : Nat} {dev : Device} (input : Tensor { shape := #[n], dtype := .Float32, device := dev }) (nFft hopLength : Nat)
     (window : Tensor { shape := #[winLength], dtype := .Float32, device := dev }) (center : Bool := true) (normalized : Bool := false) :
-    IO (Sigma fun shape : Shape => Tensor { shape := shape, dtype := .Float32, device := dev }) := do
-  let raw ← match RawTensor.stftChecked input.raw nFft hopLength winLength window.raw center normalized with
-    | .ok raw => pure raw
-    | .error message => throw <| IO.userError s!"Tensor.stft: {message}"
-  let shape := raw.runtimeShape
-  match Tensor.ofRaw (σ := ⟨shape, .Float32, dev⟩) raw with
-  | .ok t => pure ⟨shape, t⟩
-  | .error message => throw <| IO.userError s!"Tensor.stft: {message}"
+    Tensor { shape := #[nFft / 2 + 1, stftFrames n nFft hopLength center, 2], dtype := .Float32, device := dev } :=
+  Tensor.ofRaw! (RawTensor.stft input.raw nFft hopLength winLength window.raw center normalized)
 
-def log10? {σ : StaticSpec} (input : Tensor σ) : Except String (Tensor σ) :=
-  checkedNeuralUnary? "log10" "a floating or complex dtype" DType.isInexact RawTensor.log10Checked input
+/-- One-sided STFT with real and imaginary parts packed in the last axis. -/
+def stft {n winLength : Nat} {dev : Device} (input : Tensor { shape := #[n], dtype := .Float32, device := dev }) (nFft hopLength : Nat)
+    (window : Tensor { shape := #[winLength], dtype := .Float32, device := dev }) (center : Bool := true) (normalized : Bool := false)
+    (_valid : StftValid n nFft hopLength winLength center := by
+      first | exact of_decide_eq_true rfl | (simp only [StftValid] <;> omega)) :
+    Tensor { shape := #[nFft / 2 + 1, stftFrames n nFft hopLength center, 2], dtype := .Float32, device := dev } :=
+  stft! input nFft hopLength window center normalized
+
+def log10! {σ : StaticSpec} (input : Tensor σ) : Tensor σ :=
+  Tensor.ofRaw! (RawTensor.log10! input.raw)
 
 def log10 {σ : StaticSpec} (input : Tensor σ)
     (_inexact : σ.dtype.isInexact = true := by first | rfl | exact DType.isInexact_of_realFloating | decide) : Tensor σ :=
-  neuralUnaryResult "log10" input (log10? input)
+  log10! input
 
 
 def saveWav {σ : StaticSpec} (input : Tensor σ) (path : String) (sampleRate : Nat := 24000) : IO Unit :=
   RawTensor.saveWav input.raw path sampleRate
 
-def lt? {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
-    Except String (Tensor ⟨s, .Bool, dev⟩) := do
-  DType.checkOrdered a.raw.dtype
-  DType.checkOrdered b.raw.dtype
-  Tensor.checkPointwise a b
-  Tensor.ofRaw (← RawTensor.ltChecked a.raw b.raw)
-
-def lt {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
+def lt! {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
     Tensor ⟨s, .Bool, dev⟩ :=
-  match lt? a b with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.lt: {message}"
+  Tensor.ofRaw! (RawTensor.lt! a.raw b.raw)
 
-def ge? {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
-    Except String (Tensor ⟨s, .Bool, dev⟩) := do
-  DType.checkOrdered a.raw.dtype
-  DType.checkOrdered b.raw.dtype
-  Tensor.checkPointwise a b
-  Tensor.ofRaw (← RawTensor.geChecked a.raw b.raw)
-
-def ge {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
+def lt {s : Shape} {d : DType} {dev : Device} [DType.Ordered d] (a b : Tensor ⟨s, d, dev⟩) :
     Tensor ⟨s, .Bool, dev⟩ :=
-  match ge? a b with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.ge: {message}"
+  lt! a b
+
+def ge! {s : Shape} {d : DType} {dev : Device} (a b : Tensor ⟨s, d, dev⟩) :
+    Tensor ⟨s, .Bool, dev⟩ :=
+  Tensor.ofRaw! (RawTensor.ge! a.raw b.raw)
+
+def ge {s : Shape} {d : DType} {dev : Device} [DType.Ordered d] (a b : Tensor ⟨s, d, dev⟩) :
+    Tensor ⟨s, .Bool, dev⟩ :=
+  ge! a b
 def ltScalar {s : Shape} {d : DType} {dev : Device} (input : Tensor ⟨s, d, dev⟩) (value : Float) :
-    Tensor ⟨s, .Bool, dev⟩ := checkedNeuralResult "ltScalar" (RawTensor.ltScalar input.raw value)
+    Tensor ⟨s, .Bool, dev⟩ := Tensor.ofRaw! (RawTensor.ltScalar input.raw value)
 def maskedFill {s : Shape} {d : DType} {dev : Device}
     (input : Tensor ⟨s, d, dev⟩) (mask : Tensor ⟨s, .Bool, dev⟩) (value : Float) : Tensor ⟨s, d, dev⟩ :=
-  input.checkedReplacement (RawTensor.maskedFill input.raw mask.raw value)
+  Tensor.ofRaw! (RawTensor.maskedFill input.raw mask.raw value)
 
-/-- Grouped convolution checks channel grouping at the native boundary. -/
-def conv1dGroups? {batch cin cout cinPerGroup length kernel : Nat} {d : DType} {dev : Device}
-    (input : Tensor ⟨#[batch, cin, length], d, dev⟩)
-    (weight : Tensor ⟨#[cout, cinPerGroup, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
-    (stride : Nat := 1) (padding : Nat := 0) (dilation : Nat := 1) (groups : Nat := 1) :
-    Except String (Tensor ⟨#[batch, cout, convExtent length kernel stride padding dilation], d, dev⟩) := do
-  checkConvolutionOperands input weight bias
-  let raw ← RawTensor.conv1dGroupsChecked
-    input.raw weight.raw bias.raw stride padding dilation groups
-  DType.expectedEq input.raw.dtype raw.dtype
-  Tensor.ofRaw raw
+/-- Input channels split into `groups` equal groups, and output channels divide among them. -/
+def ConvGroups (cin cinPerGroup cout groups : Nat) : Prop :=
+  0 < groups ∧ cin = cinPerGroup * groups ∧ groups ∣ cout
 
-/-- Grouped convolution; use `conv1dGroups?` for recoverable argument errors. -/
-def conv1dGroups {batch cin cout cinPerGroup length kernel : Nat} {d : DType} {dev : Device}
+instance (cin cinPerGroup cout groups : Nat) : Decidable (ConvGroups cin cinPerGroup cout groups) := by
+  unfold ConvGroups; infer_instance
+
+/-- Discharges `ConvGroups` for literal parameters, or from facts in scope. -/
+macro "conv_groups" : tactic => `(tactic| first
+  | exact of_decide_eq_true rfl
+  | (refine ⟨?_, ?_, ?_⟩ <;> first | omega | assumption))
+
+def conv1dGroups! {batch cin cout cinPerGroup length kernel : Nat} {d : DType} {dev : Device}
     (input : Tensor ⟨#[batch, cin, length], d, dev⟩)
     (weight : Tensor ⟨#[cout, cinPerGroup, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
     (stride : Nat := 1) (padding : Nat := 0) (dilation : Nat := 1) (groups : Nat := 1) :
     Tensor ⟨#[batch, cout, convExtent length kernel stride padding dilation], d, dev⟩ :=
-  match conv1dGroups? input weight bias stride padding dilation groups with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.conv1dGroups: {message}"
+  Tensor.ofRaw! (RawTensor.conv1dGroups! input.raw weight.raw bias.raw
+    stride padding dilation groups)
 
-/-- Checked transposed convolution, including native output-padding validation. -/
-def convTranspose1d? {batch cin cout length kernel : Nat} {d : DType} {dev : Device}
+/-- Grouped biased one-dimensional convolution. -/
+def conv1dGroups {batch cin cout cinPerGroup length kernel : Nat} {d : DType} {dev : Device}
+    [DType.FloatingOrComplex d]
     (input : Tensor ⟨#[batch, cin, length], d, dev⟩)
-    (weight : Tensor ⟨#[cin, cout, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
-    (stride : Nat := 1) (padding : Nat := 0) (outputPadding : Nat := 0) (dilation : Nat := 1) :
-    Except String (Tensor ⟨#[batch, cout, ((length - 1) * stride + dilation * (kernel - 1)
-      + outputPadding + 1 - 2 * padding)], d, dev⟩) := do
-  checkConvolutionOperands input weight bias
-  let raw ← RawTensor.convTranspose1dChecked
-    input.raw weight.raw bias.raw stride padding outputPadding dilation
-  DType.expectedEq input.raw.dtype raw.dtype
-  Tensor.ofRaw raw
+    (weight : Tensor ⟨#[cout, cinPerGroup, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
+    (stride : Nat := 1) (padding : Nat := 0) (dilation : Nat := 1) (groups : Nat := 1)
+    (_valid : ConvValid length kernel stride padding dilation := by conv_valid)
+    (_groups : ConvGroups cin cinPerGroup cout groups := by conv_groups) :
+    Tensor ⟨#[batch, cout, convExtent length kernel stride padding dilation], d, dev⟩ :=
+  conv1dGroups! input weight bias stride padding dilation groups
 
-/-- Transposed convolution; `convTranspose1d?` returns argument errors. -/
-def convTranspose1d {batch cin cout length kernel : Nat} {d : DType} {dev : Device}
+/-- Positive stride, dilation, kernel and input length; output padding below the
+stride or dilation; and padding that leaves a nonempty output. -/
+def ConvTransposeValid (length kernel stride padding outputPadding dilation : Nat) : Prop :=
+  0 < stride ∧ 0 < dilation ∧ 0 < kernel ∧ 0 < length ∧
+  (outputPadding < stride ∨ outputPadding < dilation) ∧
+  2 * padding ≤ (length - 1) * stride + dilation * (kernel - 1) + outputPadding
+
+instance (length kernel stride padding outputPadding dilation : Nat) :
+    Decidable (ConvTransposeValid length kernel stride padding outputPadding dilation) := by
+  unfold ConvTransposeValid; infer_instance
+
+def convTranspose1d! {batch cin cout length kernel : Nat} {d : DType} {dev : Device}
     (input : Tensor ⟨#[batch, cin, length], d, dev⟩)
     (weight : Tensor ⟨#[cin, cout, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
     (stride : Nat := 1) (padding : Nat := 0) (outputPadding : Nat := 0) (dilation : Nat := 1) :
     Tensor ⟨#[batch, cout, ((length - 1) * stride + dilation * (kernel - 1)
       + outputPadding + 1 - 2 * padding)], d, dev⟩ :=
-  match convTranspose1d? input weight bias stride padding outputPadding dilation with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.convTranspose1d: {message}"
+  Tensor.ofRaw! (RawTensor.convTranspose1d! input.raw weight.raw bias.raw
+    stride padding outputPadding dilation)
 
-/-- Zero-dropout attention with recoverable native errors. -/
-def attentionWindow? {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
-    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
-    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
-    (causal : Bool := true) (gqa : Bool := false) (window : Nat := 0) : Except String (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
-  checkAttentionOperands q k v
-  let raw ← RawTensor.attentionWindow
-    q.raw k.raw v.raw causal gqa window
-  q.checkedReplacement? raw
+/-- Biased one-dimensional transposed convolution. -/
+def convTranspose1d {batch cin cout length kernel : Nat} {d : DType} {dev : Device}
+    [DType.FloatingOrComplex d]
+    (input : Tensor ⟨#[batch, cin, length], d, dev⟩)
+    (weight : Tensor ⟨#[cin, cout, kernel], d, dev⟩) (bias : Tensor ⟨#[cout], d, dev⟩)
+    (stride : Nat := 1) (padding : Nat := 0) (outputPadding : Nat := 0) (dilation : Nat := 1)
+    (_valid : ConvTransposeValid length kernel stride padding outputPadding dilation := by
+      exact of_decide_eq_true rfl) :
+    Tensor ⟨#[batch, cout, ((length - 1) * stride + dilation * (kernel - 1)
+      + outputPadding + 1 - 2 * padding)], d, dev⟩ :=
+  convTranspose1d! input weight bias stride padding outputPadding dilation
 
-/-- Deterministic attention; `attentionWindow?` exposes validation and kernel errors. -/
-def attentionWindow {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
+def attentionWindow! {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
     (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
     (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
     (causal : Bool := true) (gqa : Bool := false) (window : Nat := 0) : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
-  attentionResult "attentionWindow" q (attentionWindow? q k v causal gqa window)
+  Tensor.ofRaw! (RawTensor.attentionWindow! q.raw k.raw v.raw causal gqa window)
+
+/-- Zero-dropout sliding-window attention. -/
+def attentionWindow {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device} [DType.RealFloating d]
+    (q : Tensor ⟨#[batch, heads, seq, dim], d, dev⟩)
+    (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
+    (causal : Bool := true) (gqa : Bool := false) (window : Nat := 0)
+    (_heads : AttentionHeads heads kvHeads gqa := by attention_heads) :
+    Tensor ⟨#[batch, heads, seq, dim], d, dev⟩ :=
+  attentionWindow! q k v causal gqa window
 
 /-- Attention with explicit training-mode dropout, sequenced through native IO. -/
 def attentionWindowIO {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Device}
@@ -577,17 +499,16 @@ def attentionWindowIO {batch heads kvHeads seq dim : Nat} {d : DType} {dev : Dev
     (k v : Tensor ⟨#[batch, kvHeads, seq, dim], d, dev⟩)
     (dropout : Float) (training : Bool) (causal : Bool := true) (gqa : Bool := false) (window : Nat := 0) : IO (Tensor ⟨#[batch, heads, seq, dim], d, dev⟩) := do
   let effective ← attentionCheckIO "attentionWindowIO" (attentionDropout? dropout training)
-  attentionCheckIO "attentionWindowIO" (checkAttentionOperands q k v)
   let raw ← RawTensor.attentionWindowIO
     q.raw k.raw v.raw effective causal gqa window
-  attentionCheckIO "attentionWindowIO" (q.checkedReplacement? raw)
+  pure (Tensor.ofRaw! raw)
 
-def log? {σ : StaticSpec} (input : Tensor σ) : Except String (Tensor σ) :=
-  checkedNeuralUnary? "log" "a floating or complex dtype" DType.isInexact RawTensor.logChecked input
+def log! {σ : StaticSpec} (input : Tensor σ) : Tensor σ :=
+  Tensor.ofRaw! (RawTensor.log! input.raw)
 
 def log {σ : StaticSpec} (input : Tensor σ)
     (_inexact : σ.dtype.isInexact = true := by first | rfl | exact DType.isInexact_of_realFloating | decide) : Tensor σ :=
-  neuralUnaryResult "log" input (log? input)
+  log! input
 
 
 def saveSafeTensor {σ : StaticSpec} (input : Tensor σ) (path name : String) : IO Unit :=
@@ -603,21 +524,19 @@ def saveTensor {σ : StaticSpec} (input : Tensor σ) (path : String) : IO Unit :
 /-- Load a tensor with exact stored shape and validate its dtype and placement. -/
 def loadTensorExact (σ : StaticSpec) (path : String) : IO (Tensor σ) := do
   let raw ← RawTensor.loadTensorExact σ.shape path
-  match Tensor.ofRaw raw with
-  | .ok tensor => pure tensor
-  | .error message => throw (IO.userError s!"Tensor.loadTensorExact: {message}")
+  if raw.dtype != σ.dtype then
+    throw (IO.userError s!"Tensor.loadTensorExact {path}: stored dtype {raw.dtype}, expected {σ.dtype}")
+  if raw.device != σ.device then
+    throw (IO.userError s!"Tensor.loadTensorExact {path}: stored on another device than requested")
+  pure (Tensor.ofRaw! raw)
 
 /-- Load the exact stored shape and dtype, moving only its placement to `σ.device`.
 The stored dtype is checked before conversion; loading never silently casts it. -/
 def loadTensorOn (σ : StaticSpec) (path : String) : IO (Tensor σ) := do
   let raw ← RawTensor.loadTensorExact σ.shape path
-  let stored ← match Tensor.ofRaw (σ := { σ with device := raw.device }) raw with
-    | .ok tensor => pure tensor
-    | .error message => throw (IO.userError s!"Tensor.loadTensorOn: {message}")
-  let moved ← RawTensor.convertIO σ.shape stored.raw σ.device none
-  match Tensor.ofRaw moved with
-  | .ok tensor => pure tensor
-  | .error message => throw (IO.userError s!"Tensor.loadTensorOn: {message}")
+  if raw.dtype != σ.dtype then
+    throw (IO.userError s!"Tensor.loadTensorOn {path}: stored dtype {raw.dtype}, expected {σ.dtype}")
+  pure (Tensor.ofRaw! (← RawTensor.convertIO σ.shape raw σ.device none))
 
 /-- Start a mono streaming WAV file with a placeholder header. -/
 def wavBegin (path : String) (sampleRate : Nat := 24000) : IO Unit :=
@@ -633,62 +552,41 @@ def wavFinalize (path : String) : IO Unit := RawTensor.wavFinalize path
 /-- Load UInt16 token data as an indexed Int64 tensor, validating native metadata. -/
 def loadU16Bin (count : Nat) (path : String) : IO (Tensor { shape := #[count], dtype := .Int64, device := .CPU }) := do
   let raw ← RawTensor.loadU16Bin count path
-  match Tensor.ofRaw raw with
-  | .ok tensor => pure tensor
-  | .error message => throw <| IO.userError s!"Tensor.loadU16Bin: {message}"
+  pure (Tensor.ofRaw! raw)
 
 def linspace (start stop : Float) (count : Nat) : Tensor { shape := #[count], dtype := .Float32, device := .CPU } :=
-  checkedNeuralResult "linspace" (RawTensor.linspace start stop count false)
+  Tensor.ofRaw! (RawTensor.linspace start stop count false)
 
-/-- Reduce the last axis with recoverable ordered-domain, empty-axis and
-native kernel failures. Values preserve the actual input dtype. -/
-def maxLast3d? {batch seq vocab : Nat} {d : DType} {dev : Device}
-    (input : Tensor ⟨#[batch, seq, vocab], d, dev⟩) :
-    Except String (Tensor ⟨#[batch, seq], d, dev⟩ × Tensor ⟨#[batch, seq], .Int64, dev⟩) := do
-  DType.checkOrdered input.raw.dtype
-  if vocab == 0 then throw "maxLast3d requires a nonempty reduction axis"
-  let (values, indices) ← RawTensor.maxLast3dChecked input.raw 2
-  return (← Tensor.checkedUpdate? input.raw.dtype input.raw.device values, ← Tensor.ofRaw indices)
-
-/-- Runtime-checked pure convenience; use `maxLast3d?` to retain errors. -/
-def maxLast3dChecked {batch seq vocab : Nat} {d : DType} {dev : Device}
+/-- Reduce the last axis, preserving the actual input dtype, without precondition
+checks; libtorch rejects an unordered dtype or an empty axis and the process aborts. -/
+def maxLast3d! {batch seq vocab : Nat} {d : DType} {dev : Device}
     (input : Tensor ⟨#[batch, seq, vocab], d, dev⟩) :
     Tensor ⟨#[batch, seq], d, dev⟩ × Tensor ⟨#[batch, seq], .Int64, dev⟩ :=
-  match maxLast3d? input with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.maxLast3d: {message}"
+  let (values, indices) := RawTensor.maxLast3d! input.raw 2
+  (Tensor.ofRaw! values, Tensor.ofRaw! indices)
 
 /-- Reduce a nonempty last axis of an ordered tensor. -/
 def maxLast3d {batch seq vocab : Nat} {d : DType} {dev : Device} [DType.Ordered d]
     (input : Tensor ⟨#[batch, seq, vocab], d, dev⟩)
     (_nonempty : 0 < vocab := by first | exact of_decide_eq_true rfl | omega | (simp <;> omega)) :
     Tensor ⟨#[batch, seq], d, dev⟩ × Tensor ⟨#[batch, seq], .Int64, dev⟩ :=
-  maxLast3dChecked input
+  maxLast3d! input
 
-/-- Select the largest `k` entries per row, preserving the actual input dtype.
-Runtime dtype/range and native kernel failures are recoverable. -/
-def topKLast2d? {rows cols : Nat} {d : DType} {dev : Device}
-    (input : Tensor ⟨#[rows, cols], d, dev⟩) (k : Nat) :
-    Except String (Tensor ⟨#[rows, k], d, dev⟩ × Tensor ⟨#[rows, k], .Int64, dev⟩) := do
-  DType.checkOrdered input.raw.dtype
-  if k > cols then throw s!"topKLast2d k={k} exceeds the row width {cols}"
-  let (values, indices) ← RawTensor.topKLast2dChecked input.raw k 1
-  return (← Tensor.checkedUpdate? input.raw.dtype input.raw.device values, ← Tensor.ofRaw indices)
-
-/-- Runtime-checked pure convenience; use `topKLast2d?` to retain errors. -/
-def topKLast2dChecked {rows cols : Nat} {d : DType} {dev : Device}
+/-- Select the largest `k` entries per row, preserving the actual input dtype,
+without precondition checks; libtorch rejects an unordered dtype or `k` above the
+row width and the process aborts. -/
+def topKLast2d! {rows cols : Nat} {d : DType} {dev : Device}
     (input : Tensor ⟨#[rows, cols], d, dev⟩) (k : Nat) :
     Tensor ⟨#[rows, k], d, dev⟩ × Tensor ⟨#[rows, k], .Int64, dev⟩ :=
-  match topKLast2d? input k with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.topKLast2d: {message}"
+  let (values, indices) := RawTensor.topKLast2d! input.raw k 1
+  (Tensor.ofRaw! values, Tensor.ofRaw! indices)
 
 /-- Select the largest `k` entries of ordered rows with sufficient width. -/
 def topKLast2d {rows cols : Nat} {d : DType} {dev : Device} [DType.Ordered d]
     (input : Tensor ⟨#[rows, cols], d, dev⟩) (k : Nat)
     (_range : k ≤ cols := by first | exact of_decide_eq_true rfl | omega | (simp <;> omega)) :
     Tensor ⟨#[rows, k], d, dev⟩ × Tensor ⟨#[rows, k], .Int64, dev⟩ :=
-  topKLast2dChecked input k
+  topKLast2d! input k
 
 /-- End-exclusive integer range, with overflow-safe length computation. -/
 def rangeLength (start stop step : Nat) : Nat :=
@@ -697,32 +595,24 @@ def rangeLength (start stop step : Nat) : Nat :=
 
 def arangeFrom (start stop : Nat) (step : Nat := 1) :
     Tensor { shape := #[rangeLength start stop step], dtype := .Int64, device := .CPU } :=
-  match Tensor.ofRaw (RawTensor.arange start stop step) with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.arangeFrom: {message}"
+  (Tensor.ofRaw! (RawTensor.arange start stop step))
 
 /-- Select entry `idx` of the leading axis; a scalar has no leading axis. -/
 def getOp {σ : StaticSpec} (input : Tensor σ) (idx : Nat)
     (_bound : idx < σ.shape[0]?.getD 0 := by
       first | exact of_decide_eq_true rfl | (simp <;> fail "index out of range")) :
     Tensor (σ.withShape (σ.shape.extract 1 σ.shape.size)) :=
-  match Tensor.ofRaw (RawTensor.getOp input.raw idx) with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.getOp: {message}"
+  (Tensor.ofRaw! (RawTensor.getOp input.raw idx))
 
 def unbind {σ : StaticSpec} (input : Tensor σ) (dim : Nat := 0)
     (h : dim < σ.shape.size := by first | exact of_decide_eq_true rfl | (simp <;> fail "axis out of range")) :
     Array (Tensor (σ.withShape (unbindShape σ.shape dim h))) :=
   (RawTensor.unbind input.raw dim).map fun raw =>
-    match Tensor.ofRaw raw with
-    | .ok result => result
-    | .error message => nativeInvariantFailure s!"Tensor.unbind: {message}"
+    (Tensor.ofRaw! raw)
 
 def logspace (start stop : Float) (steps : Nat) (base : Float := 10.0) :
     Tensor { shape := #[steps], dtype := .Float32, device := .CPU } :=
-  match Tensor.ofRaw (RawTensor.logspace start stop steps base false) with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.logspace: {message}"
+  (Tensor.ofRaw! (RawTensor.logspace start stop steps base false))
 
 /-- Backpropagate an explicit cotangent. Saved intermediates are released by
 default; omitted retention follows `createGraph`, as in PyTorch. -/
@@ -739,59 +629,8 @@ def findTokenPositions {n : Nat} {dev : Device}
     IO (Sigma fun count => Tensor ⟨#[count], .Int64, dev⟩) := do
   let raw ← RawTensor.findTokenPositions tokens.raw token
   let count := raw.runtimeShape.getD 0 0
-  match Tensor.ofRaw (σ := ⟨#[count], .Int64, dev⟩) raw with
-  | .ok result => pure ⟨count, result⟩
-  | .error message => throw (IO.userError s!"Tensor.findTokenPositions: {message}")
-
-namespace Promoting
-
-private def unaryNeural? {σ : StaticSpec}
-    (native : RawTensor → Except String RawTensor) (input : Tensor σ) :
-    Except String (Tensor (σ.withDType σ.dtype.atLeastFloat)) := do
-  Tensor.checkedUpdate? σ.dtype.atLeastFloat input.raw.device
-    (← native input.raw)
-
-def log? {σ : StaticSpec} (input : Tensor σ) :
-    Except String (Tensor (σ.withDType σ.dtype.atLeastFloat)) :=
-  unaryNeural? RawTensor.logChecked input
-
-def log {σ : StaticSpec} (input : Tensor σ) :
-    Tensor (σ.withDType σ.dtype.atLeastFloat) :=
-  match log? input with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.Promoting.log: {message}"
-
-def log10? {σ : StaticSpec} (input : Tensor σ) :
-    Except String (Tensor (σ.withDType σ.dtype.atLeastFloat)) :=
-  unaryNeural? RawTensor.log10Checked input
-
-def log10 {σ : StaticSpec} (input : Tensor σ) :
-    Tensor (σ.withDType σ.dtype.atLeastFloat) :=
-  match log10? input with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.Promoting.log10: {message}"
-
-def sin? {σ : StaticSpec} (input : Tensor σ) :
-    Except String (Tensor (σ.withDType σ.dtype.atLeastFloat)) :=
-  unaryNeural? RawTensor.sinChecked input
-
-def sin {σ : StaticSpec} (input : Tensor σ) :
-    Tensor (σ.withDType σ.dtype.atLeastFloat) :=
-  match sin? input with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.Promoting.sin: {message}"
-
-def cos? {σ : StaticSpec} (input : Tensor σ) :
-    Except String (Tensor (σ.withDType σ.dtype.atLeastFloat)) :=
-  unaryNeural? RawTensor.cosChecked input
-
-def cos {σ : StaticSpec} (input : Tensor σ) :
-    Tensor (σ.withDType σ.dtype.atLeastFloat) :=
-  match cos? input with
-  | .ok result => result
-  | .error message => nativeInvariantFailure s!"Tensor.Promoting.cos: {message}"
-
-end Promoting
+  let result := Tensor.ofRaw! (σ := ⟨#[count], .Int64, dev⟩) raw
+  pure ⟨count, result⟩
 
 end torch.Tensor
 
@@ -802,8 +641,8 @@ as an existential index. Loading does not cast or reshape the tensor. -/
 def loadTensorExact (shape : Shape) (device : Device) (path : String) :
     IO (SomeDTypeTensor shape device) := do
   let raw ← RawTensor.loadTensorExact shape path
-  match SomeDTypeTensor.ofRaw raw with
-  | .ok tensor => pure tensor
-  | .error message => throw (IO.userError s!"SomeDTypeTensor.loadTensorExact: {message}")
+  if raw.device != device then
+    throw (IO.userError s!"SomeDTypeTensor.loadTensorExact {path}: stored on another device than requested")
+  pure (SomeDTypeTensor.ofRaw! raw)
 
 end torch.SomeDTypeTensor

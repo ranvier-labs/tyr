@@ -246,10 +246,10 @@ def referenceTraining {rows : Nat}
   let inv2d : Tensor { shape := #[rows, 1], dtype := .Float32, device := device } :=
     Tensor.rsqrt (Tensor.meanDim (residF * residF) 1 true + rmsNormEps)
   let expectedInv : Tensor { shape := #[rows], dtype := .Float32, device := device } := Tensor.reshape inv2d #[rows]
-  let invFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := Tensor.expand inv2d #[rows, hiddenDim]
+  let invFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := Tensor.broadcastTo inv2d #[rows, hiddenDim]
   let weight2d : Tensor { shape := #[1, hiddenDim], dtype := .Float32, device := device } := Tensor.reshape weightF #[1, hiddenDim]
   let weightFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } :=
-    Tensor.expand weight2d #[rows, hiddenDim]
+    Tensor.broadcastTo weight2d #[rows, hiddenDim]
   let normalized : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } := residF * invFull
   let expectedOut : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device } :=
     (normalized * weightFull).toBFloat16
@@ -259,7 +259,7 @@ def referenceTraining {rows : Nat}
   let correction : Tensor { shape := #[rows, 1], dtype := .Float32, device := device } :=
     Tensor.mulScalar (dot * inv2d * inv2d * inv2d) 0.0009765625
   let correctionFull : Tensor { shape := #[rows, hiddenDim], dtype := .Float32, device := device } :=
-    Tensor.expand correction #[rows, hiddenDim]
+    Tensor.broadcastTo correction #[rows, hiddenDim]
   let expectedGradInput : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device } :=
     (weightedGrad * invFull - residF * correctionFull + gradOutResidF).toBFloat16
   let expectedGradWeight : Tensor { shape := #[hiddenDim], dtype := .Float32, device := device } :=
@@ -268,7 +268,8 @@ def referenceTraining {rows : Nat}
   return (expectedOut, expectedResid, expectedInv, expectedGradInput, expectedGradWeight)
 
 private def benchmarkTrainingShape (cfg : Benchmark.Config) (stream : UInt64)
-    (caseLabel : String) (rows : Nat) : IO (Array String × Bool) := do
+    (caseLabel : String) (rows : Nat) (_hRows : 0 < rows) : IO (Array String × Bool) := do
+  have : 0 < hiddenDim := by decide
   let device ← Device.cuda 0
   let x : Tensor { shape := #[rows, hiddenDim], dtype := .BFloat16, device := device } :=
     (← Tensor.randn #[rows, hiddenDim] false device).toBFloat16
@@ -373,7 +374,9 @@ private def runBenchmark (args : List String) : IO UInt32 := do
       lines := lines.push f32Line |>.push bf16Line
       allOk := allOk && f32Ok && bf16Ok
     | .training rows => do
-      let (caseLines, ok) ← benchmarkTrainingShape cfg stream matrixCase.id rows
+      let ⟨hRows⟩ ← if h : 0 < rows then pure (PLift.up h) else
+        throw <| IO.userError s!"rmsnorm case {matrixCase.id} needs a positive row count"
+      let (caseLines, ok) ← benchmarkTrainingShape cfg stream matrixCase.id rows hRows
       for line in caseLines do lines := lines.push line
       allOk := allOk && ok
   for line in lines do IO.println line

@@ -53,8 +53,7 @@ structure GRPOConfig where
   maxNewTokens : Nat := 256
   /-- Temperature for sampling (1.0 = no scaling) -/
   temperature : Float := 1.0
-  /-- Top-k sampling (0 = disabled) -/
-  topK : Nat := 50
+  topK : TopK := none
   /-- Examples per training step (across all ranks) -/
   examplesPerStep : Nat := 16
   /-- Max batch size per forward pass -/
@@ -71,11 +70,12 @@ structure GRPOConfig where
   evalEvery : Nat := 100
   /-- Logging frequency (steps) -/
   logEvery : Nat := 10
+  logEveryPos : 0 < logEvery := by decide
   /-- Padding token ID -/
   padToken : Nat := 0
   /-- EOS token ID -/
   eosToken : Nat := 2
-  deriving Repr, Inhabited
+  deriving Repr
 
 /-! ## Learning Rate Schedule -/
 
@@ -101,7 +101,7 @@ def computeAdvantages (rewards : Array Float) : Array Float :=
 /-- Compute advantages from a tensor of rewards -/
 def computeAdvantagesTensor (rewards : Tensor { shape := #[b], dtype := .Float32, device := device }) : Tensor { shape := #[b], dtype := .Float32, device := device } :=
   let mu := Tensor.meanAll rewards
-  let muExpanded := Tensor.expand mu #[b]
+  let muExpanded := Tensor.broadcastTo mu #[b]
   rewards - muExpanded
 
 /-! ## Reward Functions -/
@@ -191,7 +191,7 @@ def computePGLoss
 
   -- Expand advantages to [B, T] for broadcasting
   let advExpanded := Tensor.unsqueeze advantages 1  -- [B, 1]
-  let advExpanded := Tensor.expand advExpanded #[b, t]  -- [B, T]
+  let advExpanded := Tensor.broadcastTo advExpanded #[b, t]  -- [B, T]
 
   -- Compute per-token policy gradient: logp * A
   let perTokenPG := logProbs * advExpanded  -- [B, T]
@@ -589,8 +589,7 @@ structure GenerationConfig where
   maxNewTokens : Nat := 256
   /-- Temperature for sampling -/
   temperature : Float := 1.0
-  /-- Top-k sampling (0 = disabled) -/
-  topK : Nat := 50
+  topK : TopK := none
   /-- Top-p (nucleus) sampling (1.0 = disabled) -/
   topP : Float := 1.0
   /-- End-of-sequence token -/
@@ -722,7 +721,7 @@ def trainLoop (b t : Nat)
 
   let mut state := initialState
   let mut bestPass1 : Float := 0.0
-  let logEvery := max 1 config.logEvery
+  let logEvery := config.logEvery
 
   for step in [:numSteps] do
     -- Generate rollouts for this step
@@ -903,7 +902,7 @@ def trainLoopWithUpdates (b t : Nat) [TensorStruct P] [FloatingTensorStruct P]
   let mut bestPass1 : Float := 0.0
   let mut currentParams := params
   let mut currentOptState := optState
-  let logEvery := max 1 config.logEvery
+  let logEvery := config.logEvery
 
   for step in [:numSteps] do
     let mut rollouts : Array RolloutBatch := #[]

@@ -43,8 +43,8 @@ be used where an acquired device is required.
 `Tensor σ` uses a private opaque carrier indexed by `StaticSpec`. It has no
 public constructor or structural recursor, and different indices are not
 definitionally interchangeable. `Tensor.raw` exposes the unindexed handle;
-`Tensor.ofRaw` admits it only after checking native shape, dtype, and concrete
-device. Every index is required and exact. Runtime-selected dtypes and devices remain in dependent
+`Tensor.ofRaw!` admits it only after checking native shape, dtype, and concrete
+device, and aborts on a mismatch. Every index is required and exact. Runtime-selected dtypes and devices remain in dependent
 packages rather than weakening the tensor contract. `zerosFor` accepts a
 specification with `DType.ConstantSupported` evidence and supplies the native
 zero factory used by the equally constrained `Inhabited` instance.
@@ -157,9 +157,8 @@ The reuse path also checks storage and version ownership and excludes views,
 autograd metadata, weak observers, foreign storage, and accelerator storage.
 Only ordinary CPU allocations satisfying these checks are reused. Other inputs
 are copied before writing. Every value update returns its resulting tensor;
-callers must retain that result. The typed adapter captures dtype and device
-before the call and validates the result with `Tensor.checkedUpdate?`, without
-keeping the original tensor as a fallback.
+callers must retain that result. The typed adapter admits the result with
+`Tensor.ofRaw!`, without keeping the original tensor as a fallback.
 
 Gradient accumulation remains explicit mutable state: backward, clipping, and
 `zeroGrad` are IO operations, and `gradOf` returns an independent snapshot in IO.
@@ -185,9 +184,9 @@ tree traversal does not require a retaining backward for each leaf.
 cover default release, explicit retention, higher derivatives, and tree gradients.
 
 Pure attention exports always pass literal zero dropout to native SDPA and do
-not accept a dropout probability. Their `?` adapters return validation and
-kernel errors through `Except String`; convenience wrappers print a diagnostic
-and abort on failure. Configurable attention dropout uses separate native IO exports
+not accept a dropout probability. The typed adapters carry dtype and head
+requirements as types and proofs; a native error aborts through Tyr's fatal
+error report. Configurable attention dropout uses separate native IO exports
 and typed `attentionIO`, `attentionGQAIO`, `attentionGQAMaskIO`,
 `attentionGQAQKVIO`, `attentionWindowIO`, and `flashAttentionIO` adapters.
 These take required dropout and training arguments after the tensor operands.
@@ -242,11 +241,10 @@ regressions; reviewed fixed platform-unavailable stubs are checked separately.
 Both Arrow-enabled and Arrow-disabled Parquet implementations use the guard,
 including error-message construction. Other native subsystems remain outside
 this source gate's reviewed scope.
-`RawTensor.flashAttention` and `RawTensor.transpose` return
-`Except String RawTensor`. The typed `Tensor.flashAttention?` adapter preserves
-recoverable failures and checks successful results; `Tensor.transpose` takes
-axis proofs instead. The convenience variants call `nativeInvariantFailure` on errors;
-it prints a diagnostic and aborts without allocating or returning a default tensor.
+`RawTensor.transpose` returns `Except String RawTensor`; `Tensor.transpose`
+takes axis proofs instead. `RawTensor.flashAttention!` is unguarded; the typed
+`Tensor.flashAttention` requires a real floating dtype and an `AttentionHeads`
+proof and checks the result against the query specification.
 `Tensor.randint` reports invalid bounds and device failures through `IO.Error`.
 The native `randn`/`rand` factories and dropout also catch failures at their IO boundary;
 those random factories enable requested gradients after device transfer so their
@@ -254,35 +252,23 @@ results remain leaf parameters.
 `scripts/test_native_tensor_errors.sh` exercises success and failure carriers,
 including borrowed-reference preservation and cleanup on invalid input.
 
-Core arithmetic and matrix adapters use checked native exports returning
-`Except String RawTensor`. Ordinary typed arithmetic and `Tensor.Promoting`
-`?` APIs preserve those errors, including missing kernels for otherwise
-valid promotion pairs. Fused `affine3d?` checks the actual dtype and device of
-both its weight and bias before calling the checked native kernel. Scalar
-spectral and nuclear norms also expose checked `?` variants for dtype, backend,
-and factorization failures. The checked expansion, concatenation, and reduction
-families follow the same result-carrier contract. Tensor-result conveniences
-using `checkedResult` or `checkedUpdate` abort with a diagnostic after receiving
-an error. Scalar norm conveniences retain Lean's panic mechanism. Use the corresponding `?` APIs for recoverable errors.
+Typed operations take their preconditions in their types and call unguarded
+native exports through `!` variants; a libtorch error aborts through Tyr's fatal
+error report. Each typed result is still admitted against its full
+specification. `svdReduced?` and `matrixLog?` return only data failures (a factorization that
+does not converge, a matrix with no real logarithm) as errors; a contract
+violation or a missing kernel aborts. `crossEntropy` and `crossEntropyNone` validate
+target labels in the native call against the class range, allowing the default
+ignored label `-100`, before dispatching the loss kernel. The convolution
+adapters `conv1d`, `conv2dBias`, `conv1dGroups`, and `convTranspose1d` take their
+parameter requirements as `ConvValid`, `ConvGroups`, and `ConvTransposeValid`
+proofs; their `!` variants abort on a native error.
 
-Selection has separate static and runtime entry points. `argmax`, `maxLast3d`,
-and `topKLast2d` require ordered dtypes and the appropriate axis, nonempty-axis,
-or top-k bound proofs. Their `?` variants check actual metadata and retain native
-errors; the `*Checked` conveniences perform those checks and abort with a
-diagnostic on failure.
-`crossEntropy` and `crossEntropyNone` require real floating logits and Int64
-targets. Their `?` variants use checked native exports that validate target
-labels against the class range, allowing the default ignored label `-100`,
-before dispatching the loss kernel. Dynamic logits can use the corresponding
-`*Checked` conveniences. The four convolution adapters `conv1d?`, `conv2dBias?`,
-`conv1dGroups?`, and `convTranspose1d?` validate actual dtype/device equality,
-retain native argument and kernel errors, and check successful result metadata.
-These contracts do not extend to every raw selection, loss, or convolution export.
-
-Checked vector indexing validates index bounds before accelerator dispatch,
-so invalid token IDs do not reach a device-side indexing assertion. Token-byte
-totals use this boundary together with checked transfer, arithmetic, reduction,
-and scalar extraction. Equal-rate audio resampling retains the borrowed input
+Vector indexing validates index bounds natively before accelerator dispatch, so
+an invalid index never reaches a device-side indexing assertion; the plain
+export aborts and the checked export returns the error. Token-byte totals use
+the checked export together with checked transfer, reduction, and scalar
+extraction. Equal-rate audio resampling retains the borrowed input
 array before returning it, preserving ownership of its boxed Float values.
 The resampler computes its output length with checked integer arithmetic before
 narrowing it or allocating output storage, and its native body returns C++ failures through
@@ -343,8 +329,9 @@ cleanup does not run during C++ stack unwinding. Two sites carry workarounds
 for a libc++abi/libstdc++ exception-ABI mismatch (Lean's toolchain vs.
 libtorch's): `lean_torch_manual_seed` seeds only the CPU generator, and CUDA
 synchronization calls `cudaDeviceSynchronize` via cudart directly
-(`cc/src/tyr.cpp:311-352`). `Tests/FfiCrashProbe.lean` is a manual probe for
-this failure mode (own `ffi_crash_probe` exe, not part of the test suite).
+(`cc/src/tyr.cpp:311-352`). `Tests/FfiCrashProbe.lean` probes this failure mode and the abort of
+`Tensor.ofRaw!` on a handle that contradicts its spec (own `ffi_crash_probe`
+exe, not part of the test suite).
 
 `TensorStruct.functionalGrad` invokes a pure Lean callback with fresh detached
 autograd leaves and returns detached first derivatives. It releases saved
@@ -597,8 +584,8 @@ def nativeExample : IO Unit := do
   IO.println s!"live tensors: {← torch.get_live_tensors}"
 
 def loadCheckedWeight (path : String) : IO (Tensor { shape := #[768, 768], dtype := .Float32, device := .CPU }) := do
-  let handle ← safetensors.openHandle path
-  safetensors.loadFromHandleWithSpec handle "layer.weight" ⟨#[768, 768], .Float32⟩
+  let src ← safetensors.Source.open path
+  src.loadAs "layer.weight" ⟨#[768, 768], .Float32⟩
 ```
 
 `Tests.FfiCrashProbe` is a separate intentional device-error probe. It is not a
@@ -612,8 +599,8 @@ lake build                                  # target libtyr → codegen → make
 lake exe TrainGPT                           # build if needed, then run
 # GPU build for a specific kernel module and target:
 lake -R -Kcuda=/usr/local/cuda -Kgpu=H100 -Kkernels=Tyr.GPU.Kernels.MhaH100 build RunMhaH100
-# Manual probe of the FFI failure mode:
-lake exe ffi_crash_probe
+# Probes of the fatal failure paths (libtorch | admission | admission-ok):
+lake exe ffi_crash_probe admission
 ```
 
 ## Related guides

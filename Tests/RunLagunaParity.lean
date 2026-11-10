@@ -35,7 +35,7 @@
   Build: lake build Tests.RunLagunaParity
   Run:   lake exe LagunaParityTest
 -/
-import Tyr.SafeTensors.Load
+import Tyr.SafeTensors.Source
 import Tyr.Model.Laguna.Config
 import Tyr.Model.Laguna.ConfigIO
 import Tyr.Model.Laguna.Rope
@@ -61,6 +61,16 @@ private def deviceLabel (device : Device) : String :=
   | .CUDA i => s!"cuda:{i}"
   | .MPS => "mps"
 
+private def moeBlock? {cfg : Config} :
+    {b : Bool} → LagunaFfn (device := device) cfg dtype b → Option (LagunaSparseMoeBlock (device := device) (dtype := dtype) cfg)
+  | true, .moe block => some block
+  | false, .dense _ => none
+
+private def layerAt {cfg : Config} (m : LagunaModel (device := device) cfg dtype) (i : Nat) :
+    IO (LagunaLayer (device := device) cfg dtype i) :=
+  if h : i < cfg.num_hidden_layers then pure (Nat.zero_add i ▸ m.layers.get i h)
+  else throw (IO.userError s!"missing layer {i}")
+
 /-- Deterministic int64 token-id tensor `[1, seq]` on `device`. -/
 private def mkIds (vals : Array Int64) (device : Device) : Tensor { shape := #[1, vals.size], dtype := .Int64, device := device } :=
   Tensor.reshape ((Tensor.fromInt64Array vals).to device) #[1, vals.size]
@@ -79,21 +89,15 @@ private def maxErrors {σ τ : StaticSpec} (got : Tensor σ) (expected : Tensor 
     maxRel := max maxRel (diff / (b[i]!.abs + 1e-3))
   pure (maxAbs, maxRel)
 
-/-- Sorted top-k id set per row of a shape-indexed logits tensor (`[n, vocab]`, or
-    `[vocab]` which is treated as one row). -/
-private def topkIdSets {s : Shape} (logits : Tensor { shape := s, device := device, dtype := dtype }) (k : Nat) : IO (Array (Array UInt64)) := do
-  let sh := Tensor.runtimeShape logits
-  let (n, v) :=
-    if sh.size == 1 then (1, sh.getD 0 0)
-    else (sh.getD 0 0, sh.getD 1 0)
-  let l2 : Tensor { shape := #[n, v], device := device, dtype := dtype }  ← IO.ofExcept (logits.reshapeChecked? #[n, v])
-  let (_, idx) := qwen35.topK2d l2 k 1
+/-- Sorted top-k id set per row of `[n, vocab]` logits. -/
+private def topkIdSets {n v : Nat} (logits : Tensor { shape := #[n, v], device := device, dtype := dtype }) (k : Nat) : IO (Array (Array UInt64)) := do
+  let (_, idx) := Tensor.topKLast2d! logits k
   let flat ← Tensor.toUInt64Array (idx)
   pure (Array.ofFn (n := n) fun r =>
     (flat.extract (r.val * k) (r.val * k + k)).qsort (fun a b => a < b))
 
 /-- Abs-diff gate + top-5-set gate for one logits tensor. -/
-private def checkLogits {s t : Shape} {refDType : DType} (lbl name : String) (got : Tensor { shape := s, device := device, dtype := dtype }) (ref : Tensor { shape := t, device := device, dtype := refDType }) (tol : Float) : IO Unit := do
+private def checkLogits {n v m w : Nat} {refDType : DType} (lbl name : String) (got : Tensor { shape := #[n, v], device := device, dtype := dtype }) (ref : Tensor { shape := #[m, w], device := device, dtype := refDType }) (tol : Float) : IO Unit := do
   let (maxAbs, maxRel) ← maxErrors got ref
   IO.println s!"  [{lbl}] {name}: maxAbs={maxAbs} maxRel={maxRel} (tol={tol})"
   check (maxAbs ≤ tol) s!"[{lbl}] {name} maxAbs={maxAbs} ≤ {tol}"
@@ -138,17 +142,10 @@ private def runFixture (device : Device) : IO Unit := do
   let log : torch.Log.Handlers := { onInfo := fun m => IO.println s!"  {m}" }
   let modelB16 ← LagunaForCausalLM.load s!"{fixtureDir}/model.safetensors" cfg device log
   let modelB16 := modelB16.2
-  let layer0b ←
-    match modelB16.model.layers[0]? with
-    | some l => pure l
-    | none => throw (IO.userError s!"[{lbl}] missing layer 0")
-  let layer1b ←
-    match modelB16.model.layers[1]? with
-    | some l => pure l
-    | none => throw (IO.userError s!"[{lbl}] missing layer 1")
-  check layer0b.denseMlp.isSome s!"[{lbl}] layer 0 loaded as dense MLP"
+  let layer1b ← layerAt modelB16.model 1
+  check (!cfg.isMoELayer 0) s!"[{lbl}] layer 0 is a dense MLP layer"
   let moe1b ←
-    match layer1b.sparseMoe with
+    match moeBlock? layer1b.ffn with
     | some m => pure m
     | none => throw (IO.userError s!"[{lbl}] layer 1 missing sparse MoE block")
   check moe1b.denseExperts.isSome s!"[{lbl}] layer 1 uses dense BF16 expert banks"
@@ -163,22 +160,20 @@ private def runFixture (device : Device) : IO Unit := do
   -- FP32 compute tests the math itself (which is what parity means here);
   -- the BF16 pass below is informational.
   let model : LagunaForCausalLM (device := device) cfg ← TensorStruct.castTo (LagunaForCausalLM (device := device) cfg .Float32) modelB16
-  let layer0 ←
-    match model.model.layers[0]? with
-    | some l => pure l
-    | none => throw (IO.userError s!"[{lbl}] missing layer 0 (fp32)")
+  let layer0 ← layerAt model.model 0
 
   -- References (fp32, CPU) moved to the comparison device.
   let refPath := s!"{fixtureDir}/reference.safetensors"
-  let logitsARef ← torch.safetensors.loadTensorCandidates refPath #["logits_a"] #[7, 1024]
+  let src ← torch.safetensors.Source.open refPath
+  let logitsARef ← src.load "logits_a" #[7, 1024]
   let logitsARef := logitsARef.2
-  let logitsBRef ← torch.safetensors.loadTensorCandidates refPath #["logits_b"] #[20, 1024]
+  let logitsBRef ← src.load "logits_b" #[20, 1024]
   let logitsBRef := logitsBRef.2
-  let genLastRef ← torch.safetensors.loadTensorCandidates refPath #["gen_logits_last"] #[1024]
+  let genLastRef ← src.load "gen_logits_last" #[1024]
   let genLastRef := genLastRef.2
-  let hiddenL0Ref ← torch.safetensors.loadTensorCandidates refPath #["hidden_a_l0"] #[7, 256]
+  let hiddenL0Ref ← src.load "hidden_a_l0" #[7, 256]
   let hiddenL0Ref := hiddenL0Ref.2
-  let hiddenFinRef ← torch.safetensors.loadTensorCandidates refPath #["hidden_a_final"] #[7, 256]
+  let hiddenFinRef ← src.load "hidden_a_final" #[7, 256]
   let hiddenFinRef := hiddenFinRef.2
 
   let idsA : Tensor { shape := #[1, 7], dtype := .Int64, device := device } := mkIds promptA device
@@ -206,7 +201,7 @@ private def runFixture (device : Device) : IO Unit := do
   --    budget termination; the HF reference used its KV-cache path).
   let r ← model.generate cfg idsA 16 .greedy #[]
   check (r.1 == 23) s!"[{lbl}] generate produced 7 + 16 tokens (outSeq={r.1})"
-  let genGot ← Tensor.toUInt64Array ((sliceTyped r.2 1 7 16))
+  let genGot ← Tensor.toUInt64Array ((Tensor.slice! r.2 1 7 16))
   check (genGot == genRef) s!"[{lbl}] greedy gen ids EXACTLY match reference gen_ids"
 
   -- 5. Final-step logits: the logits that produced gen_ids[15] come from the
@@ -214,9 +209,10 @@ private def runFixture (device : Device) : IO Unit := do
   --    A ++ gen_ids[0..15)).
   let idsFull := mkIds (promptA ++ (genRef.extract 0 15).map (fun t => Int64.ofNat t.toNat)) device
   let logitsFull ← model.forward cfg idsFull
-  let lastLogits : Tensor { shape := #[1024], device := device, dtype := .Float32 }  ← IO.ofExcept ((sliceTyped logitsFull 1 21 1).reshapeChecked? #[1024])
+  let lastLogits : Tensor { shape := #[1, cfg.vocab_size], device := device, dtype := .Float32 } :=
+    (Tensor.slice! logitsFull 1 21 1).reshape #[1, cfg.vocab_size]
   checkLogits lbl "gen_logits_last" (lastLogits)
-    ((genLastRef.to device)) 0.05
+    ((genLastRef.reshape #[1, 1024]).to device) 0.05
 
   -- Informational BF16 pass (the checkpoint's storage dtype): report diffs
   -- only. Bf16 rounding alone (HF bf16 vs HF fp32: logits_b maxAbs ≈ 0.102)
@@ -232,7 +228,7 @@ private def runFixture (device : Device) : IO Unit := do
     ((logitsBRef.to device))
   IO.println s!"  [{lbl}] bf16 logits_b: maxAbs={bbAbs} maxRel={bbRel}"
   let rb ← modelB16.generate cfg idsA 16 .greedy #[]
-  let genB ← Tensor.toUInt64Array ((sliceTyped rb.2 1 7 16))
+  let genB ← Tensor.toUInt64Array ((Tensor.slice! rb.2 1 7 16))
   IO.println s!"  [{lbl}] bf16 greedy ids: {genB} (exact match vs fp32 ref: {genB == genRef})"
 
 /-- Real NVFP4-checkpoint smoke load: config + first `numLayers` layers via
@@ -243,32 +239,30 @@ private def runRealSmoke (modelDir : String) (numLayers : Nat) (device : Device)
   let cfg0 ← Config.loadFromPretrainedDir modelDir
   IO.println (s!"  full config: {cfg0.num_hidden_layers} layers, hidden {cfg0.hidden_size}, " ++
     s!"{cfg0.num_experts} experts top-{cfg0.num_experts_per_tok}")
-  if numLayers > cfg0.num_hidden_layers then
+  let ⟨hLayers⟩ ← if h : numLayers ≤ cfg0.num_hidden_layers then pure (PLift.up h) else
     throw (IO.userError s!"numLayers={numLayers} > num_hidden_layers={cfg0.num_hidden_layers}")
   -- Truncate the layer schedule so only the first `numLayers` layers load.
   let cfg : Config := { cfg0 with
     num_hidden_layers := numLayers
-    layer_types := (Config.normalizedLayerTypes cfg0).extract 0 numLayers }
+    layer_types := cfg0.layer_types.extract 0 numLayers
+    mlp_only_layers := cfg0.mlp_only_layers.filter (· < numLayers)
+    layerTypesSize := by simp [cfg0.layerTypesSize]; omega
+    mlpOnlyLayersValid := by
+      intro i hi
+      simpa using (Array.mem_filter.mp hi).2 }
   let log : torch.Log.Handlers := { onInfo := fun m => IO.println s!"  {m}" }
   let t0 ← IO.monoMsNow
-  let model ← LagunaForCausalLM.loadSharded modelDir cfg device log
+  let model ← LagunaForCausalLM.load modelDir cfg device log
   let model := model.2
   let t1 ← IO.monoMsNow
   IO.println s!"  loaded {numLayers}/{cfg0.num_hidden_layers} layers in {t1 - t0} ms"
 
-  let layer0 ←
-    match model.model.layers[0]? with
-    | some l => pure l
-    | none => throw (IO.userError "missing layer 0")
-  check layer0.denseMlp.isSome "layer 0 loaded as dense MLP"
-  check layer0.attnFull.isSome "layer 0 loaded as full attention"
+  check (!cfg.isMoELayer 0) "layer 0 is a dense MLP layer"
+  check (cfg.isFullAttentionLayer 0) "layer 0 is a full-attention layer"
   if numLayers ≥ 2 then
-    let layer1 ←
-      match model.model.layers[1]? with
-      | some l => pure l
-      | none => throw (IO.userError "missing layer 1")
-    check layer1.attnSliding.isSome "layer 1 loaded as sliding attention"
-    match layer1.sparseMoe with
+    let layer1 ← layerAt model.model 1
+    check (!cfg.isFullAttentionLayer 1) "layer 1 is a sliding-attention layer"
+    match moeBlock? layer1.ffn with
     | some moe =>
       check moe.denseExperts.isNone "layer 1 uses NVFP4-packed expert banks"
       check (moe.router.eScoreCorrectionBias.isSome)

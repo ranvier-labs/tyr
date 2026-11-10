@@ -37,8 +37,8 @@ result types, or be packaged as `Sigma fun device => Tensor { shape := shape,
 dtype := dtype, device := device }` when the caller does not select placement.
 
 `RawTensor` is the native handle used by adapters in `Tyr.RawTensor` and its
-submodules. It is not the model-facing tensor type. `Tensor.ofRaw` validates
-shape, dtype, and placement and returns `Except String (Tensor σ)`.
+submodules. It is not the model-facing tensor type. `Tensor.ofRaw!` checks a
+native result's shape, dtype, and placement against `σ` and aborts on a mismatch.
 There is no public unchecked raw constructor or implicit raw coercion. Native
 adapters use explicit `.raw` access and validate returned handles. Static
 indices alone do not prove a native implementation correct: metadata extraction
@@ -91,14 +91,14 @@ Selection has its own scalar relocation rule; see
 [device compatibility](typed.md#device-compatibility).
 
 `reshape` takes a proof that the element counts are equal; its default tactic
-finds it for most shapes. When a shape is only known at runtime, `reshapeChecked?`
-validates it and returns an error instead. In both cases `#[]` means a scalar. `sliceChecked` validates the
-claimed result of a runtime slice. Other transforms include `transpose`,
+finds it for most shapes. When the counts only agree under a runtime condition,
+check it with `if h : … then t.reshape s h else throw …`. `#[]` means a scalar. `slice` computes
+its result shape and requires axis and bound proofs; `slice!` skips the proofs. Other transforms include `transpose`,
 `permute`, `unsqueeze`, `squeeze`, and `unbind`.
 
 Use `Tensor.packShape` to package a runtime-dependent shape existentially.
-`catMany?` accepts indexed existential tensors and checks the requested output
-specification; `catManyChecked` prints a diagnostic and aborts on mismatch.
+`catMany?` accepts indexed existential tensors and returns invalid inputs as
+errors; `catMany!` aborts on them.
 A dynamic shape does not require pretending that a tensor is a scalar.
 
 Reduction indices follow native accumulation rules. For example, integer sums
@@ -111,13 +111,7 @@ parameter tree. Model loaders validate compute dtypes and retain the evidence
 in `RealFloatingDType`; generated SafeTensors records retain concrete indices
 and derived tree constraints. There are no same-dtype adapters that reject promotion and
 return an input as a fallback.
-Deliberate mixed-precision computation needs explicit input conversions or a
-witnessed promoting operation.
-`Tensor.Promoting` provides the latter when dtypes are known only at runtime:
-its checked binary and host-scalar variants return the computed dtype with a
-promotion witness. Its unary convenience wrappers express their computed dtype
-directly in the result index. These operations preserve the promoted native
-dtype without coercing it to an input's dtype.
+Deliberate mixed-precision computation uses explicit input conversions.
 The arithmetic `?` variants also return native kernel failures through `Except`.
 The checked matrix, expansion, concatenation, and reduction APIs provide
 recoverable errors for their respective checks and native calls; this does not

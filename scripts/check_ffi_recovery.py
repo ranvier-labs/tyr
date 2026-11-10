@@ -5,13 +5,14 @@ Inventory is derived from IO/Except result types in Tyr/RawTensor.lean, its
 submodules except OwnedKV, Tyr/Basic.lean, and Tyr/ConstantSupport.lean.
 Other native subsystems are outside this explicitly reviewed scope.
 Every source definition, including inactive
-platform branches, must contain only a checkedCall/checkedIoCall return with a
-literal context and reference-capture lambda. This forbids throwable work in
-argument evaluation before the guard as well as statements before/after it.
+platform branches, must contain only a tryCall (Except) or ioCall (IO) return
+with a literal context and reference-capture lambda. tryCall converts only data
+failures and lets the rest abort. This forbids throwable work in argument
+evaluation before the guard as well as statements before/after it.
 
 This is a conservative source convention check, complementary to the generated FFI header
 and native runtime tests. It does not prove C++ exception interoperability or
-the implementation of tyr_checked_result.h. Macro-generated exports and result
+the implementation of tyr_try_result.h. Macro-generated exports and result
 type aliases require explicit scanner support rather than silently passing.
 No compiler, LibTorch installation, or generated build output is required.
 """
@@ -203,7 +204,7 @@ def lean_exports(source: str, path: str) -> list[Export]:
                     error_type += 2
                 if (error_type >= len(ts) or ts[error_type].text != "String"
                         or error_type + 1 < len(ts) and ts[error_type + 1].text == "."):
-                    raise ValueError(f"{path}:{ts[i].line}: checkedCall constructs Except String; "
+                    raise ValueError(f"{path}:{ts[i].line}: tryCall constructs Except String; "
                                      "other error types require a separate recovery adapter")
             exports.append(Export(symbol[1:-1], carrier, path, ts[i].line))
         elif carrier not in PURE_RESULT_HEADS:
@@ -255,12 +256,13 @@ def native_definitions(source: str, path: str, symbols: set[str]) -> list[Defini
 
 
 def guarded_body(body: tuple[Token, ...], carrier: str) -> bool:
-    wrapper = "checkedIoCall" if carrier == "IO" else "checkedCall"
-    prefix = ["return", "tyr", "::", wrapper, "(", "<string>", ",", "[", "&", "]", "{"]
-    if [t.text for t in body[:len(prefix)]] != prefix:
-        return False
-    end = group_end(body, len(prefix) - 1)
-    return [t.text for t in body[end + 1:]] == [")", ";"]
+    wrappers = ["ioCall"] if carrier == "IO" else ["tryCall"]
+    for wrapper in wrappers:
+        prefix = ["return", "tyr", "::", wrapper, "(", "<string>", ",", "[", "&", "]", "{"]
+        if [t.text for t in body[:len(prefix)]] == prefix:
+            end = group_end(body, len(prefix) - 1)
+            return [t.text for t in body[end + 1:]] == [")", ";"]
+    return False
 
 
 def audit(root: Path) -> tuple[list[str], Counter]:
@@ -313,7 +315,7 @@ def audit(root: Path) -> tuple[list[str], Counter]:
                     and [t.text for t in definition.body] == FIXED_IO_ERROR):
                 counts["fixed-error stubs"] += 1
                 continue
-            wrapper = "checkedIoCall" if export.carrier == "IO" else "checkedCall"
+            wrapper = "ioCall" if export.carrier == "IO" else "tryCall"
             errors.append(
                 f"{definition.path}:{definition.line}: {symbol} from {source} must contain only "
                 f'return tyr::{wrapper}("literal context", [&] {{ ... }}); '

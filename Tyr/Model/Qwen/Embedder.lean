@@ -31,7 +31,7 @@ structure QwenFluxEmbedder (cfg : QwenConfig) (max_seq : Nat) where
   /-- The Qwen3 model -/
   model : Qwen3Model (device := device) cfg
   /-- RoPE cache for position embeddings -/
-  ropeCache : RoPECache (device := device) max_seq cfg.head_dim
+  ropeCache : RoPECache (device := device) max_seq cfg.half_head_dim
   /-- Which layers to extract -/
   outputLayers : Array Nat
 
@@ -45,7 +45,7 @@ def outputDim (cfg : QwenConfig) (numLayers : Nat) : Nat :=
 def fromModel (cfg : QwenConfig) (max_seq : Nat) (model : Qwen3Model (device := device) cfg)
     (outputLayers : Array Nat := #[8, 17, 26])
     : IO (QwenFluxEmbedder (device := device) cfg max_seq) := do
-  let ropeCache ← RoPECache.init (device := device) max_seq cfg.head_dim cfg.rope_theta
+  let ropeCache ← RoPECache.init (device := device) max_seq cfg.half_head_dim cfg.rope_theta
   pure { model, ropeCache, outputLayers }
 
 /-- Concatenate equal-spec tensors along `dim`, validating the runtime
@@ -56,7 +56,7 @@ private def catAlong {s : Shape} {d : DType} {dev : Device}
     : Tensor ⟨out, d, dev⟩ :=
   match Tensor.catMany? (tensors.map Tensor.packShape) dim out with
   | .ok t => t
-  | .error message => nativeInvariantFailure s!"QwenFluxEmbedder cat: {message}"
+  | .error message => nativeInvariantFailure s!"{decl_name%}: {message}"
 
 /-- Encode text tokens to Flux-compatible embeddings.
     Input: [batch, seq] token IDs
@@ -71,10 +71,11 @@ private def catAlong {s : Shape} {d : DType} {dev : Device}
 def encode {batch seq : Nat} (cfg : QwenConfig) (max_seq : Nat)
     (embedder : QwenFluxEmbedder (device := device) cfg max_seq)
     (input_ids : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
+    (hseq : seq ≤ max_seq := by omega)
     : Tensor { device := device, shape := #[batch, seq, embedder.outputLayers.size * cfg.hidden_size], dtype := .Float32 } :=
   -- Slice RoPE cache to current sequence length
-  let cos := embedder.ropeCache.cos.sliceChecked 0 0 seq #[seq, cfg.head_dim / 2]
-  let sin := embedder.ropeCache.sin.sliceChecked 0 0 seq #[seq, cfg.head_dim / 2]
+  let cos := embedder.ropeCache.cos.slice 0 0 seq
+  let sin := embedder.ropeCache.sin.slice 0 0 seq
 
   -- Get hidden states from all layers
   let allHiddenStates := embedder.model.forwardWithHiddenStates cfg input_ids cos sin
@@ -99,10 +100,11 @@ def encodeMasked {batch seq : Nat} (cfg : QwenConfig) (max_seq : Nat)
     (embedder : QwenFluxEmbedder (device := device) cfg max_seq)
     (input_ids : Tensor { device := device, shape := #[batch, seq], dtype := .Int64 })
     (attn_mask : Tensor ⟨#[batch, seq], maskDtype, device⟩)
+    (hseq : seq ≤ max_seq := by omega)
     : Tensor { device := device, shape := #[batch, seq, embedder.outputLayers.size * cfg.hidden_size], dtype := .Float32 } :=
   -- Slice RoPE cache to current sequence length
-  let cos := embedder.ropeCache.cos.sliceChecked 0 0 seq #[seq, cfg.head_dim / 2]
-  let sin := embedder.ropeCache.sin.sliceChecked 0 0 seq #[seq, cfg.head_dim / 2]
+  let cos := embedder.ropeCache.cos.slice 0 0 seq
+  let sin := embedder.ropeCache.sin.slice 0 0 seq
 
   -- Get hidden states from all layers
   let allHiddenStates := embedder.model.forwardWithHiddenStatesMasked cfg input_ids cos sin attn_mask

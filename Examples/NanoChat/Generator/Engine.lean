@@ -32,8 +32,7 @@ structure SamplingConfig where
   temperature : Float := 1.0
   /-- Top-p (nucleus) sampling threshold -/
   topP : Float := 0.9
-  /-- Top-k sampling (0 = disabled) -/
-  topK : Nat := 0
+  topK : TopK := none
   /-- Maximum number of tokens to generate -/
   maxTokens : Nat := 256
   /-- Stop generation on these token IDs -/
@@ -55,21 +54,6 @@ def applyTemperature {s : Shape} (logits : Tensor { shape := s, dtype := .Float3
   if temp == 1.0 then logits
   else Tensor.mulScalar logits (1.0 / temp)
 
-/-- Sample from logits using argmax (greedy).
-    Returns array of token IDs, one per batch element. -/
-def sampleGreedy {batch vocabSize : Nat} (logits : Tensor { shape := #[batch, vocabSize], dtype := .Float32, device := device })
-    : IO (Array TokenId) := do
-  -- Get argmax along vocab dimension - returns [batch] tensor of indices
-  let indices ← IO.ofExcept (Tensor.argmax? logits (1 : Nat))
-  -- Convert tensor to array of token IDs (use dynamic version since shape is computed)
-  indices.toUInt64Array
-
-/-- Apply top-k filtering to logits.
-    Sets all logits outside the top k to -infinity. -/
-def applyTopK {s : Shape} (logits : Tensor { shape := s, dtype := .Float32, device := device }) (k : Nat) : Tensor { shape := s, dtype := .Float32, device := device } :=
-  if k == 0 then logits
-  else Tensor.topKFilter logits k
-
 /-- Apply top-p (nucleus) filtering to logits.
     Sets logits outside the nucleus (cumulative prob > p) to -infinity. -/
 def applyTopP {s : Shape} (logits : Tensor { shape := s, dtype := .Float32, device := device }) (p : Float) : Tensor { shape := s, dtype := .Float32, device := device } :=
@@ -84,7 +68,7 @@ def sampleWithConfig {batch vocabSize : Nat}
   -- Apply temperature
   let scaled := applyTemperature logits cfg.temperature
   -- Apply top-k filtering
-  let filtered := applyTopK scaled cfg.topK
+  let filtered := cfg.topK.filter scaled
   -- Apply top-p filtering
   let filtered := applyTopP filtered cfg.topP
   -- Convert to probabilities

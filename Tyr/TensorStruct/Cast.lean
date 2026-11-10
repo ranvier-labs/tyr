@@ -40,7 +40,6 @@ private def checked {α : Type} (result : Except String α) : IO α :=
 private def castTensorAt {σ τ : StaticSpec} (path : String)
     (tensor : Tensor σ) : IO (Tensor τ) := do
   try
-    checked tensor.validate
     -- A type-directed cast never reshapes data, even for equal element counts.
     checked (TensorSpec.checkShape τ.shape σ.shape)
     let sourceDType := tensor.raw.dtype
@@ -52,10 +51,7 @@ private def castTensorAt {σ τ : StaticSpec} (path : String)
     let raw ← if requestedDType.isNone && targetDevice == tensor.raw.device then
         pure tensor.raw
       else RawTensor.convertIO σ.shape tensor.raw targetDevice requestedDType
-    -- Check retained metadata as well as requested conversions.
-    checked (TensorSpec.checkDType targetDType raw.dtype)
-    checked (Device.check targetDevice raw.device)
-    checked (Tensor.ofRaw raw)
+    pure (Tensor.ofRaw! raw)
   catch error =>
     throw <| IO.userError s!"TensorStruct.castTo at {renderPath path}: {error}"
 
@@ -78,7 +74,7 @@ instance {shape : Shape} {device : Device} {τ : StaticSpec} :
 instance {σ : StaticSpec} {shape : Shape} {device : Device} :
     TensorTreeCast (Tensor σ) (SomeDTypeTensor shape device) where
   castAt path source := do
-    let packed ← checked source.reifyDType
+    let packed := source.packDType
     let tensor : Tensor ⟨shape, packed.1, device⟩ ← castTensorAt path packed.2
     pure ⟨packed.1, tensor⟩
 

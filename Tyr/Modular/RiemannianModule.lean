@@ -54,15 +54,15 @@ private def splitLinearUpdate {inDim outDim : Nat} {d : DType} {dev : Device}
     (update : Tensor ⟨#[outDim * inDim + outDim], d, dev⟩) :
     Tensor ⟨#[outDim, inDim], d, dev⟩ × Tensor ⟨#[outDim], d, dev⟩ :=
   let weightSize := outDim * inDim
-  let dwVec : Tensor ⟨#[weightSize], d, dev⟩ := Tensor.sliceChecked update 0 0 weightSize #[weightSize]
-  let dbVec : Tensor ⟨#[outDim], d, dev⟩ := Tensor.sliceChecked update 0 weightSize outDim #[outDim]
+  let dwVec : Tensor ⟨#[weightSize], d, dev⟩ := Tensor.slice update 0 0 weightSize
+  let dbVec : Tensor ⟨#[outDim], d, dev⟩ := Tensor.slice update 0 weightSize outDim
   (Tensor.reshape dwVec #[outDim, inDim], dbVec)
 
 namespace LocalLinearization
 
 private def rowAt {rows cols : Nat} {d : DType} {dev : Device}
-    (matrix : Tensor ⟨#[rows, cols], d, dev⟩) (idx : Nat) : Tensor ⟨#[cols], d, dev⟩ :=
-  Tensor.reshape (Tensor.sliceChecked matrix 0 idx 1 #[1, cols]) #[cols]
+    (matrix : Tensor ⟨#[rows, cols], d, dev⟩) (idx : Fin rows) : Tensor ⟨#[cols], d, dev⟩ :=
+  Tensor.reshape (Tensor.slice matrix 0 idx 1) #[cols]
 
 private def mapRows {rows inDim outDim : Nat} {d : DType} {dev : Device}
     (matrix : Tensor ⟨#[rows, inDim], d, dev⟩)
@@ -70,8 +70,8 @@ private def mapRows {rows inDim outDim : Nat} {d : DType} {dev : Device}
     Tensor ⟨#[rows, outDim], d, dev⟩ :=
   let mapped : Array (Tensor ⟨#[outDim], d, dev⟩) := Id.run do
     let mut acc : Array (Tensor ⟨#[outDim], d, dev⟩) := #[]
-    for i in [:rows] do
-      acc := acc.push (f (rowAt matrix i))
+    for h : i in [:rows] do
+      acc := acc.push (f (rowAt matrix ⟨i, h.upper⟩))
     pure acc
   let stacked := Tensor.stack1d mapped
   Tensor.reshape stacked #[rows, outDim]
@@ -102,17 +102,17 @@ def pullbackParamFactor {rank inDim paramDim outDim : Nat}
 
 end LocalLinearization
 
-private def linearApplyInput {inDim outDim : Nat} {d : DType} {dev : Device}
+private def linearApplyInput {inDim outDim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     (weight : Tensor ⟨#[outDim, inDim], d, dev⟩) (x : Tensor ⟨#[inDim], d, dev⟩) :
     Tensor ⟨#[outDim], d, dev⟩ :=
   columnToVector (Tensor.mm weight (vectorToColumn x))
 
-private def linearApplyInputAdjoint {inDim outDim : Nat} {d : DType} {dev : Device}
+private def linearApplyInputAdjoint {inDim outDim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     (weight : Tensor ⟨#[outDim, inDim], d, dev⟩) (y : Tensor ⟨#[outDim], d, dev⟩) :
     Tensor ⟨#[inDim], d, dev⟩ :=
   columnToVector (Tensor.mm (Tensor.transpose2d weight) (vectorToColumn y))
 
-private def linearApplyParam {inDim outDim : Nat} {d : DType} {dev : Device}
+private def linearApplyParam {inDim outDim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     [DType.Promotes d d d]
     (x : Tensor ⟨#[inDim], d, dev⟩)
     (useBias : Bool)
@@ -124,7 +124,7 @@ private def linearApplyParam {inDim outDim : Nat} {d : DType} {dev : Device}
   else
     weightPart
 
-private def linearApplyParamAdjoint {inDim outDim : Nat} {d : DType} {dev : Device}
+private def linearApplyParamAdjoint {inDim outDim : Nat} {d : DType} {dev : Device} [DType.FloatingOrComplex d]
     (x : Tensor ⟨#[inDim], d, dev⟩)
     (useBias : Bool)
     (y : Tensor ⟨#[outDim], d, dev⟩) : Tensor ⟨#[outDim * inDim + outDim], d, dev⟩ :=
@@ -163,7 +163,7 @@ def backwardLeafStep {M : Type} {inDim outDim : Nat} [RiemannianModule M inDim o
   let stats : LayerStepDiagnostics := {
     gradientNorm := Tensor.l2Norm g
     factorRank := rank
-    innerConditionEstimate := Tensor.spectralNorm inner * Tensor.spectralNorm innerInv
+    innerConditionEstimate := Tensor.spectralNorm! inner * Tensor.spectralNorm! innerInv
     residualNorm := Tensor.l2Norm residual
     updateNorm := Tensor.l2Norm update
   }
@@ -178,7 +178,7 @@ instance linearRiemannianModule (inDim outDim : Nat) :
       Tensor.reshape x #[1, inDim] (by simp [TensorSpec.numelOfShape])
     let y2 : AmbientMatrix (device := device) 1 outDim :=
       match lin.bias with
-      | some b => Add.add (Tensor.linear x2 lin.weight) (Tensor.expand b #[1, outDim])
+      | some b => Add.add (Tensor.linear x2 lin.weight) (Tensor.broadcastTo b #[1, outDim])
       | none => Tensor.linear x2 lin.weight
     (Tensor.reshape y2 #[outDim] (by simp [TensorSpec.numelOfShape]), x)
   localLinearization lin x := {
@@ -212,7 +212,7 @@ instance manifoldLinearRiemannianModule
       Tensor.reshape x #[1, inDim] (by simp [TensorSpec.numelOfShape])
     let y2 : AmbientMatrix (device := device) 1 outDim :=
       match lin.bias with
-      | some b => Add.add (Tensor.linear x2 weight) (Tensor.expand b #[1, outDim])
+      | some b => Add.add (Tensor.linear x2 weight) (Tensor.broadcastTo b #[1, outDim])
       | none => Tensor.linear x2 weight
     (Tensor.reshape y2 #[outDim] (by simp [TensorSpec.numelOfShape]), x)
   localLinearization lin x := {

@@ -1,4 +1,4 @@
-import Tyr.SafeTensors.Exact
+import Tyr.SafeTensors.Source
 /-
   Tyr/Model/Flux/Weights.lean
 
@@ -18,10 +18,7 @@ open torch.Log
 private def loadWeight (path : String) (names : Array String) (shape : Shape)
     (device : Device := .CPU) : IO (Tensor ⟨shape, dtype, device⟩) := do
   let some name := names[0]? | throw (IO.userError "Empty weight name")
-  let packed ← safetensors.loadTensorExact path name shape device
-  match Tensor.ofRaw (σ := ⟨shape, dtype, device⟩) packed.2.raw with
-  | .ok tensor => pure tensor
-  | .error message => throw <| IO.userError s!"Flux tensor '{name}': {message}"
+  (← safetensors.Source.open path).loadAs name { shape, dtype } device
 
 /-- Load RMSNorm weights from Flux2 format (uses .scale suffix) -/
 def loadRMSNormFlux2 (path : String) (name : String) (dim : Nat)
@@ -132,7 +129,7 @@ def loadFluxModel (path : String) (cfg : FluxConfig := FluxConfig.klein4B)
   log.onInfo s!"Loading Flux model from {path}..."
 
   -- Input projections
-  let anchor ← safetensors.loadTensorExact path "img_in.weight" #[cfg.hidden_size, cfg.in_channels] device
+  let anchor ← (← safetensors.Source.open path).load "img_in.weight" #[cfg.hidden_size, cfg.in_channels] device
   let dtype := anchor.1
   let floating ← IO.ofExcept (DType.realFloating? dtype)
   let _ := floating.down

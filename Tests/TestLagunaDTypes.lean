@@ -15,7 +15,12 @@ example {device : Device} {cfg : Config} {batch seq : Nat}
 private def cfg : Config := { LagunaConfig.laguna_s_2_1 with
   vocab_size := 8, hidden_size := 4, intermediate_size := 8
   num_hidden_layers := 0, num_attention_heads := 1, num_attention_heads_sliding := 1
-  num_key_value_heads := 1, head_dim := 4, num_experts := 0 }
+  num_key_value_heads := 1, head_dim := 4, num_experts := 0
+  half_rotary_dim_full := 1, half_rotary_dim_sliding := 2, layer_types := #[], mlp_only_layers := #[]
+  eos_token_ids := #[2]
+  kvHeadsDivideFull := by decide, kvHeadsDivideSliding := by decide, headsPos := by decide
+  rotaryValid := by decide, layerTypesSize := by decide, mlpOnlyLayersValid := by decide
+  expertsValid := by decide, eosInVocab := by native_decide }
 
 /-- One checkpoint per case: native checkpoint metadata is cached by path. -/
 private def writeFixture (directory : System.FilePath) (mode : Nat)
@@ -48,8 +53,7 @@ private def writeFixture (directory : System.FilePath) (mode : Nat)
     for mode in #[0, 3] do
       IO.FS.withTempDir fun directory => do
         writeFixture directory mode
-        let ⟨selected, model⟩ ← if sharded then LagunaForCausalLM.loadSharded directory.toString cfg
-          else LagunaForCausalLM.load (directory / "model.safetensors").toString cfg
+        let ⟨selected, model⟩ ← LagunaForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) cfg
         LeanTest.assertEqual selected.val .BFloat16
         LeanTest.assertEqual model.model.norm.1 .Float32
         LeanTest.assertEqual (← model.model.norm.2.toFloatArray) #[0.125, 0.125, 0.125, 0.125]
@@ -64,8 +68,7 @@ private def writeFixture (directory : System.FilePath) (mode : Nat)
     IO.FS.withTempDir fun directory => do
       writeFixture directory 0 "I32"
       Tests.assertThrows (do
-        if sharded then discard <| LagunaForCausalLM.loadSharded directory.toString cfg
-        else discard <| LagunaForCausalLM.load (directory / "model.safetensors").toString cfg)
+        discard <| LagunaForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) cfg)
         (some "Expected a standard real floating dtype")
 
 @[test] def testLagunaLoaderRejectsIncompatibleHead : IO Unit := do
@@ -74,8 +77,7 @@ private def writeFixture (directory : System.FilePath) (mode : Nat)
       IO.FS.withTempDir fun directory => do
         writeFixture directory mode
         Tests.assertThrows (do
-          if sharded then discard <| LagunaForCausalLM.loadSharded directory.toString cfg
-          else discard <| LagunaForCausalLM.load (directory / "model.safetensors").toString cfg)
+          discard <| LagunaForCausalLM.load (if sharded then directory.toString else (directory / "model.safetensors").toString) cfg)
           (if mode == 1 then some "Expected dtype" else some "shape")
 
 end Tests.LagunaDTypes

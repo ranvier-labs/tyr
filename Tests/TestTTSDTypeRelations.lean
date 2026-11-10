@@ -27,25 +27,27 @@ example (cfg : TalkerConfig)
     have _ : TalkerForConditionalGeneration (device := .CPU) cfg float32DType := _model
   trivial
 
-example (_cache : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 .Float32)
+example (_cache : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 3 .Float32)
     (_dtype : DType) : True := by
   fail_if_success
-    have _ : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 .BFloat16 := _cache
+    have _ : qwen.QwenAttention.KVCache (device := .CPU) 1 1 4 3 .BFloat16 := _cache
   trivial
 
 private def tinyConfig : Qwen3TTSConfig := {
   talkerConfig := {
     codePredictorConfig := {
       vocabSize := 16, hiddenSize := 8, intermediateSize := 16,
-      numHiddenLayers := 1, numAttentionHeads := 2, numKeyValueHeads := 1, headDim := 4 }
+      numHiddenLayers := 1, numAttentionHeads := 2, numKeyValueHeads := 1, halfHeadDim := 2 }
     vocabSize := 32, hiddenSize := 8, intermediateSize := 16,
-    numHiddenLayers := 1, numAttentionHeads := 2, numKeyValueHeads := 1, headDim := 4,
+    numHiddenLayers := 1, numAttentionHeads := 2, numKeyValueHeads := 1, halfHeadDim := 2,
     numCodeGroups := 3, textHiddenSize := 8, textVocabSize := 32,
-    codecPadId := 0, codecBosId := 3, codecEosTokenId := 7 }
+    codecPadId := 0, codecBosId := 3, codecEosTokenId := 7,
+    codecThinkId := 8, codecNoThinkId := 9, codecThinkBosId := 10, codecThinkEosId := 11 }
   speakerEncoderConfig := {
     melDim := 4, encDim := 8, encChannels := #[4, 4, 4, 4, 12],
     encAttentionChannels := 2, encRes2NetScale := 2, encSeChannels := 2 }
-  ttsModelType := "base" }
+  ttsModelType := "base"
+  imStartTokenId := 20, imEndTokenId := 21, ttsPadTokenId := 22, ttsBosTokenId := 23, ttsEosTokenId := 24 }
 
 @[test] def testMixedSpeakerAndTalkerDTypeRelationships : IO Unit := do
   let cfg := tinyConfig
@@ -73,12 +75,12 @@ private def tinyConfig : Qwen3TTSConfig := {
     "Loading/initialization must not homogenize the Float32 speaker into the BF16 talker"
   let features ← Tensor.randn #[1, 8, cfg.speakerEncoderConfig.melDim]
   for inputDType in #[DType.Float32, .BFloat16] do
-    let mel ← IO.ofExcept (features.castDType? inputDType)
+    let mel := features.castDType inputDType
     let embedding : Tensor ⟨#[1, cfg.speakerEncoderConfig.encDim], .Float32, .CPU⟩ ←
       model.extractSpeakerEmbedding mel
     LeanTest.assertEqual embedding.raw.dtype .Float32
     LeanTest.assertEqual mel.raw.dtype inputDType "Feature conversion preserves the caller tensor"
-    let aligned ← IO.ofExcept (mel.castDType? .Float32)
+    let aligned := mel.castDType .Float32
     let expected := encoder.forward (by decide) aligned
     LeanTest.assertEqual (← embedding.toFloatArray) (← expected.toFloatArray)
       "The explicit preprocessing cast is the only cross-role dtype conversion"
@@ -88,16 +90,14 @@ private def tinyConfig : Qwen3TTSConfig := {
   let model ← TalkerModel.init cfg (dtype := bf16)
   let model := TensorStruct.detach model
   let input := TalkerModel.embedCodec model (Tensor.fullInt #[1, 1] 1)
-  let (cos, sin) := Tensor.rotaryFreqs 1 cfg.headDim cfg.ropeTheta
-  let cache : qwen.QwenAttention.KVCache (device := .CPU) 1 cfg.numKeyValueHeads cfg.headDim .BFloat16 :=
+  let (cos, sin) := Tensor.rotaryFreqs 1 cfg.halfHeadDim cfg.ropeTheta
+  let cache : qwen.QwenAttention.KVCache (device := .CPU) 1 cfg.numKeyValueHeads cfg.headDim 3 .BFloat16 :=
     qwen.QwenAttention.initKVCache 3 (dtype := .BFloat16)
   let some layer := model.layers[0]? | throw (IO.userError "Expected one test layer")
-  let (output, updated) := layer.forwardStep input cos sin cache
+  let (output, updated) := layer.forwardStep (by decide) input cos sin cache 0 (by decide)
   LeanTest.assertEqual output.raw.dtype .BFloat16
   LeanTest.assertEqual updated.kStore.raw.dtype .BFloat16
   LeanTest.assertEqual updated.vStore.raw.dtype .BFloat16
-  LeanTest.assertEqual updated.seq 1
-  LeanTest.assertEqual cache.seq 0 "The original cache value remains unchanged"
   LeanTest.assertEqual (← cache.kStore.toFloatArray) (Array.replicate (3 * cfg.numKeyValueHeads * cfg.headDim) 0.0)
 
 end Tests.TTSDTypeRelations

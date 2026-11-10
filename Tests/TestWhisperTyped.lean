@@ -10,7 +10,7 @@ private def cfg : WhisperConfig := {
   encoderLayers := 1, encoderAttentionHeads := 2, encoderFfnDim := 12,
   decoderLayers := 2, decoderAttentionHeads := 2, decoderFfnDim := 12,
   maxSourcePositions := 4, maxTargetPositions := 8,
-  padTokenId := 0, bosTokenId := 1, eosTokenId := 2, decoderStartTokenId := 1 }
+  eosTokenId := 2, decoderStartTokenId := 1 }
 
 private def features : Tensor { shape := #[1, 4, 5], dtype := .Float32, device := .CPU } :=
   (Tensor.fromFloatArray (Array.ofFn (n := 20) fun i => Float.sin (i.val.toFloat * 0.3))).reshape #[1, 4, 5]
@@ -40,42 +40,79 @@ private def close {σ τ : StaticSpec} (x : Tensor σ) (y : Tensor τ) (tol : Fl
     let cross ← model.precomputeCrossCaches encoded
     let initial := model.initLayerKVCaches (batch := 1) 4 .CPU
     let mut caches := initial
-    for pos in [:4] do
-      let tok := tokens.sliceChecked 1 pos 1 #[1, 1]
-      let (actual, next) ← model.decodeStepWithCache (encSeq := 3) tok pos cross caches
-      close actual ((expected.sliceChecked 1 pos 1 #[1, 1, 16]).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
+    for h : pos in [:4] do
+      let tok := tokens.slice! 1 pos 1
+      let (actual, next) ← model.decodeStepWithCache (encSeq := 3) tok pos h.upper (by decide) cross caches
+      close actual ((expected.slice! 1 pos 1).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
       LeanTest.assertEqual actual.actualSpec.dtype expected.actualSpec.dtype
       caches := next
-    let some untouched := initial[0]? | throw (IO.userError "missing initial cache")
-    LeanTest.assertEqual untouched.seq 0
+    LeanTest.assertEqual caches.position 4 "every decoded token advances the cache position"
+    LeanTest.assertEqual initial.position 0
+    let some untouched := initial.layers[0]? | throw (IO.userError "missing initial cache")
     let stored ← untouched.kStore.toFloatArray
     LeanTest.assertTrue (stored.all (· == 0)) "incremental updates must preserve the input cache snapshot"
-    let (again, _) ← model.decodeStepWithCache (encSeq := 3) (tokens.sliceChecked 1 0 1 #[1, 1]) 0 cross initial
-    close again ((expected.sliceChecked 1 0 1 #[1, 1, 16]).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
+    let (again, _) ← model.decodeStepWithCache (encSeq := 3) (tokens.slice 1 0 1) 0 (by decide) (by decide) cross initial
+    close again ((expected.slice 1 0 1).reshape #[1, 16]) (if bf16 then 0.08 else 1e-4)
 
-@[test] def testWhisperCacheCapacityAndPositionErrors : IO Unit := do
+@[test] def testWhisperCachePositionErrors : IO Unit := do
   let model ← WhisperForConditionalGeneration.init cfg
   let encoded ← model.encode features (by decide)
   let cross ← model.precomputeCrossCaches encoded
-  let caches := model.initLayerKVCaches (batch := 1) 1 .CPU
-  let tok := tokens.sliceChecked 1 0 1 #[1, 1]
-  let (_, filled) ← model.decodeStepWithCache (encSeq := 3) tok 0 cross caches
-  let fullRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 cross filled
-    pure false
-  catch e => pure ((toString e).contains "capacity")
-  LeanTest.assertTrue fullRejected
+  let caches := model.initLayerKVCaches (batch := 1) 2 .CPU
+  let tok := tokens.slice 1 0 1
   let positionRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 cross caches
+    let _ ← model.decodeStepWithCache (encSeq := 3) tok 1 (by decide) (by decide) cross caches
     pure false
   catch e => pure ((toString e).contains "position")
   LeanTest.assertTrue positionRejected
-  let empty := model.initLayerKVCaches (batch := 1) 0 .CPU
-  let emptyRejected ← try
-    let _ ← model.decodeStepWithCache (encSeq := 3) tok 0 cross empty
-    pure false
-  catch e => pure ((toString e).contains "capacity")
-  LeanTest.assertTrue emptyRejected
+
+set_option linter.unusedVariables false in
+example (model : WhisperForConditionalGeneration (device := .CPU) cfg)
+    (tok : Tensor { shape := #[1, 1], dtype := .Int64, device := .CPU })
+    (cross : Array (WhisperForConditionalGeneration.LayerCrossCache (device := .CPU) cfg 1 3))
+    (caches : WhisperForConditionalGeneration.SelfKVCaches (device := .CPU) cfg 1 1) : True := by
+  have := model.decodeStepWithCache tok 0 (by omega) (by decide) cross caches
+  fail_if_success
+    have := model.decodeStepWithCache tok 1 (by omega) (by decide) cross caches
+  trivial
+
+@[test] def testWhisperConfigRejectsZeroTargetPositions : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := (dir / "config.json").toString
+  IO.FS.writeFile path "{\"max_target_positions\": 0}"
+  let rejected ←
+    try
+      let _ ← WhisperConfig.loadFromFile path
+      pure false
+    catch e => pure ((toString e).contains "max_target_positions")
+  LeanTest.assertTrue rejected "a zero decoder cache capacity is rejected where the config is loaded"
+
+@[test] def testWhisperConfigRejectsZeroVocab : IO Unit := IO.FS.withTempDir fun dir => do
+  let path := (dir / "config.json").toString
+  IO.FS.writeFile path "{\"vocab_size\": 0}"
+  let rejected ←
+    try
+      let _ ← WhisperConfig.loadFromFile path
+      pure false
+    catch e => pure ((toString e).contains "vocab_size")
+  LeanTest.assertTrue rejected "an empty vocabulary is rejected where the config is loaded"
+
+example : True := by
+  have : WhisperDecodeOptions := { beamSize := 1, bestOf := 1, topK := 1, maxNewTokens := some 1 }
+  fail_if_success
+    have : WhisperDecodeOptions := { beamSize := 0 }
+  fail_if_success
+    have : WhisperDecodeOptions := { bestOf := 0 }
+  fail_if_success
+    have : WhisperDecodeOptions := { topK := 0 }
+  fail_if_success
+    have : WhisperDecodeOptions := { maxNewTokens := some 0 }
+  trivial
+
+set_option linter.unusedVariables false in
+example : True := by
+  fail_if_success
+    have := WhisperAttention.initKVCache (batch := 1) (nHeads := 1) (headDim := 4) 0
+  trivial
 
 @[test] def testWhisperLengthAndHeadValidation : IO Unit := do
   let model ← WhisperForConditionalGeneration.init cfg
@@ -105,7 +142,7 @@ private def roundTrip {α : Type} [TensorStruct α] (value : α) (dir : String) 
   close (← model.decode tokens encoded) (← restored.decode tokens other) 0
 
 @[test] def testWhisperWaveformGreedyBeamAndSampling : IO Unit := do
-  let audioCfg := { cfg with maxSourcePositions := 16, maxTargetPositions := 16, eosTokenId := 15 }
+  let audioCfg := { cfg with maxSourcePositions := 16, maxTargetPositions := 16, eosTokenId := 15, maxTargetPositionsPos := by decide, eosInVocab := by decide }
   let model ← WhisperForConditionalGeneration.init audioCfg
   let model := TensorStruct.detach model
   let norm : LayerNorm 8 .Float32 := {
@@ -115,17 +152,19 @@ private def roundTrip {α : Type} [TensorStruct α] (value : α) (dir : String) 
   let tok : tokenizer.qwen3.QwenTokenizer := { (default : tokenizer.qwen3.QwenTokenizer) with
     vocabSize := 16, idToToken := Array.replicate 16 "a" }
   let pre : qwen3asr.PreprocessorConfig := {
-    featureSize := 4, samplingRate := 16000, hopLength := 64, nFft := 64,
+    featureSize := 4, hopLength := 64, nFft := 64,
     nSamples := 2048, nbMaxFrames := 32, chunkLength := 0 }
   let waveform := Array.ofFn (n := 1024) fun i => 0.1 * Float.sin (i.val.toFloat * 0.2)
-  for (beam, temperature) in #[(1, 0.0), (2, 0.0), (1, 0.7)] do
-    let result ← transcribeWaveform16k model tok pre rfl waveform "english" 2 true {
-      beamSize := beam, temperature, noFallback := true, conditionOnPreviousText := false,
-      chunkOverlapSeconds := 0, noSpeechThreshold := 1.0 }
+  let greedy : WhisperDecodeOptions := {
+    maxNewTokens := some 2, noFallback := true, conditionOnPreviousText := false,
+    chunkOverlapSeconds := 0, noSpeechThreshold := 1.0 }
+  for opts in #[greedy, { greedy with beamSize := 2, beamSizePos := by decide },
+      { greedy with temperature := 0.7 }] do
+    let result ← transcribeWaveform16k model tok pre rfl waveform "english" true opts
     LeanTest.assertEqual result.language "en"
     LeanTest.assertTrue (result.tokenIds.size <= 2)
     LeanTest.assertTrue (result.tokenIds.all (· < 16))
-    if beam == 1 && temperature == 0 then
+    if opts.beamSize == 1 && opts.temperature == 0 then
       LeanTest.assertEqual result.tokenIds #[0, 0]
       LeanTest.assertEqual result.text "aa"
 
