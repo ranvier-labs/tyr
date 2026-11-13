@@ -1,0 +1,41 @@
+/*
+ * Tyr overrides for the doc-gen4 theme.
+ * Appended to style.css by .github/workflows/docs.yml after `lake build Tyr:docs`.
+ * Selectors match the markup of the cpehle/doc-gen4 fork pinned in docs.yml.
+ */
+
+/* Right-hand "on this page" list: one line per declaration, ellipsis instead of mid-word wraps. */
+.internal_nav_decls .nav_link a {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+/* Give structures and classes more weight than instances. */
+.decl > .structure,
+.decl > .class,
+.decl > .inductive,
+.decl > .class_inductive {
+  background: color-mix(in srgb, var(--text-color) 4%, transparent);
+  padding: 0.75rem 1rem;
+  border-radius: 0.375rem;
+}
+.decl > .structure .decl_name,
+.decl > .class .decl_name {
+  font-weight: 700;
+}
+
+/* Instances are lower-emphasis. */
+.decl > .instance {
+  opacity: 0.85;
+}
+.decl > .instance .decl_header {
+  font-size: 0.85rem;
+}
+
+/* Instances: hide the collapsed Equations block (usually "did not get rendered due to their size"). */
+.decl > .instance > details {
+  display: none;
+}
