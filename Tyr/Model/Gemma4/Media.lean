@@ -7,6 +7,12 @@ import Tyr.Typed.Neural
 import Tyr.RawTensor.Gemma4
 import Tyr.Model.Gemma4.VLConfig
 
+/-! # Gemma 4 media loading
+
+`torch.gemma4.media.loadImagePatchGrid` loads one image and returns its patch
+grid `[patchRows, patchCols, patchDim]` for the vision tower.
+-/
+
 namespace torch.gemma4.media
 
 open torch

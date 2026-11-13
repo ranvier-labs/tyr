@@ -13,6 +13,12 @@
 import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.SpecialTokens
 
+/-! # Tokenizer file format
+
+Binary save/load for `tokenizer.BPETokenizer` with a magic number and version
+header and little-endian integers.
+-/
+
 namespace tokenizer
 
 /-- Magic number for the file format -/

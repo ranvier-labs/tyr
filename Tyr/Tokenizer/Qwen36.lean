@@ -1,5 +1,10 @@
 import Tyr.Tokenizer.Qwen35
 
+/-! # Qwen3.6 tokenizer
+
+Qwen3.6 names for the Qwen3.5 tokenizer entry points and chat templates.
+-/
+
 namespace tokenizer.qwen36
 
 /--

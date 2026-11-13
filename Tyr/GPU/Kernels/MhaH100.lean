@@ -3,6 +3,12 @@ import Tyr.GPU.Codegen.Macros
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # H100 multi-head attention
+
+`mha_h100`-style FlashAttention for H100 using async tile loads and an online
+softmax in base 2, with forward (optional LSE) and backward kernels.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

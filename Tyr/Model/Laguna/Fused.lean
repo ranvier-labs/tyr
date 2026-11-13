@@ -41,6 +41,13 @@
 import Tyr.Typed.Neural
 import Tyr.RawTensor.Laguna
 
+/-! # Laguna fused NVFP4 MoE
+
+`torch.laguna.lagunaMoeFp4Forward` computes the routed-expert sum over
+NVFP4-packed experts on CUDA, validating shapes before calling the raw FFI
+binding `torch.laguna.lagunaMoeFp4ForwardImpl`.
+-/
+
 namespace torch.laguna
 
 variable {device : Device}

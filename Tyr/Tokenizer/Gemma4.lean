@@ -9,6 +9,11 @@ import Tyr.Tokenizer.Types
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Gemma 4 tokenizer
+
+`tokenizer.gemma4.GemmaTokenizer` loaded from the Hugging Face `tokenizer.json`.
+-/
+
 namespace tokenizer.gemma4
 
 open Lean

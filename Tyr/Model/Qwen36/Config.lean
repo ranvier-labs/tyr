@@ -6,6 +6,12 @@
 -/
 import Tyr.Model.Qwen35.VLConfig
 
+/-! # Qwen3.6 configuration
+
+Qwen3.6 aliases of the Qwen3.5 config types with defaults from the public
+Qwen3.6-35B-A3B checkpoint (`torch.qwen36.Config.qwen36_35B_A3B`).
+-/
+
 namespace torch.qwen36
 
 abbrev LayerType := qwen35.LayerType

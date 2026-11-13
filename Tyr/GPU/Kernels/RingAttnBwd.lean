@@ -10,6 +10,12 @@
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Kernels.Support
 
+/-! # Ring attention backward
+
+Speculative backward shell for ring attention: partial and communication steps
+and finalization (`Tyr.GPU.Kernels.RingAttn.ringAttnBwd`).
+-/
+
 namespace Tyr.GPU.Kernels.RingAttn
 
 open Tyr.GPU

@@ -8,6 +8,12 @@ import Tyr.Basic
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-! # Qwen3-ASR preprocessor config
+
+`torch.qwen3asr.PreprocessorConfig` describes the Whisper feature extractor
+(sample rate, frames, mel bins) and loads from `preprocessor_config.json`.
+-/
+
 namespace torch.qwen3asr
 
 open Lean

@@ -15,3 +15,10 @@ import Tyr.Model.Qwen3TTS.SpeechTokenizer
 import Tyr.Model.Qwen3TTS.SpeechTokenizerEncoder
 import Tyr.Model.Qwen3TTS.SpeechTokenizer25HzEncoder
 import Tyr.Model.Qwen3TTS.Streaming
+
+/-! # Qwen3-TTS
+
+Umbrella import for Qwen3-TTS in `torch.qwen3tts`: config, speaker encoder,
+talker and code predictor, top-level model, weights, speech-tokenizer bridge and
+encoders, and streaming generation.
+-/

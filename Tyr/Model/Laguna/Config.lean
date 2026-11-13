@@ -8,6 +8,13 @@
 import Tyr.Basic
 import Tyr.TensorStruct
 
+/-! # Laguna configuration
+
+`torch.laguna.LagunaConfig` with per-layer attention kinds
+`torch.laguna.LayerType` (parsed from Hugging Face `layer_types`) and the preset
+`torch.laguna.LagunaConfig.laguna_s_2_1`.
+-/
+
 namespace torch.laguna
 
 /-- Per-layer attention kind used by Laguna hybrid blocks. -/

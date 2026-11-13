@@ -5,6 +5,13 @@
 -/
 import Tyr.Model.Qwen35.Config
 
+/-! # Qwen3.5 multimodal configuration
+
+`torch.qwen35.Qwen35VisionConfig` and the composite
+`torch.qwen35.Qwen35VLConfig` (`text_config` + `vision_config`), with derived
+sizes such as `torch.qwen35.Qwen35VisionConfig.mergedTokenCount`.
+-/
+
 namespace torch.qwen35
 
 /-- Vision backbone config used by Qwen3.5 multimodal checkpoints. -/

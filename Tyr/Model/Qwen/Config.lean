@@ -6,6 +6,13 @@
 -/
 import Tyr.Basic
 
+/-! # Qwen configuration
+
+`torch.qwen.QwenConfig` with presets `torch.qwen.QwenConfig.qwen3_4B` and
+`torch.qwen.QwenConfig.fluxKleinTextEncoder`, and derived sizes such as
+`torch.qwen.QwenConfig.kvDim`.
+-/
+
 namespace torch.qwen
 
 /-- Qwen3 model configuration.

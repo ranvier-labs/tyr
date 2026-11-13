@@ -9,6 +9,11 @@
 import Tyr.Model.Qwen35.Media
 import Tyr.Model.Qwen36.Config
 
+/-! # Qwen3.6 media loading
+
+Image and video patch loaders for Qwen3.6, delegating to the Qwen3.5 media path.
+-/
+
 namespace torch.qwen36.media
 
 open torch

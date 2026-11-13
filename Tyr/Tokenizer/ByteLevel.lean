@@ -6,6 +6,13 @@
 -/
 import Tyr.Tokenizer.Types
 
+/-! # Byte-level encoding
+
+GPT-2/GPT-4 byte-to-unicode mapping (`tokenizer.byteToChar`,
+`tokenizer.charToByte`) and conversions between raw bytes and byte-level
+strings.
+-/
+
 namespace tokenizer
 
 /-- GPT-2/GPT-4 byte-to-unicode mapping.

@@ -10,6 +10,12 @@
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Kernels.Support
 
+/-! # Ulysses attention
+
+All-to-all transport for Ulysses sequence parallelism: redistributing Q/K/V
+between head-parallel and sequence-parallel shards and returning outputs.
+-/
+
 namespace Tyr.GPU.Kernels.UlyssesAttn
 
 open Tyr.GPU

@@ -17,6 +17,12 @@ import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Kernels.Support
 
+/-! # Ring attention
+
+Three-phase ring attention: partial attention on the local K/V shard, shard
+rotation, and merging the running $(O, L)$ state.
+-/
+
 namespace Tyr.GPU.Kernels.RingAttn
 
 open Tyr.GPU

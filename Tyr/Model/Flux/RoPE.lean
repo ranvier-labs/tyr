@@ -1,5 +1,12 @@
 import Tyr.Model.Flux.TypedOps
 
+/-! # Flux rotary embeddings
+
+4-axis rotary position embeddings for Flux. `torch.flux.ropeEmbed` builds the
+per-axis cos/sin tables from position ids, and `torch.flux.applyRope` /
+`torch.flux.applyRopeAttn` rotate the Q/K tensors.
+-/
+
 namespace torch.flux
 
 variable {device : Device} {dtype : DType}

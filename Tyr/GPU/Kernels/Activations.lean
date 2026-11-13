@@ -6,6 +6,13 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Activation kernels
+
+GPU DSL kernels for GELU with bias fusion (`Tyr.GPU.Kernels.geluFwd`), SwiGLU
+$x \cdot \sigma(g)$ (`Tyr.GPU.Kernels.swiGluFwd`) and GeGLU
+(`Tyr.GPU.Kernels.geGluFwd`).
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

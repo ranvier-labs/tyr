@@ -10,6 +10,12 @@ import Tyr.SafeTensors.Exact
 import Tyr.Model.Utils
 import Tyr.Model.Whisper.Model
 
+/-! # Whisper weights
+
+Loads `torch.whisper.WhisperForConditionalGeneration` from a sharded SafeTensors
+directory and picks the runtime device.
+-/
+
 namespace torch.whisper
 
 variable {device : Device}

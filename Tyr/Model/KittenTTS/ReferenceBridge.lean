@@ -8,6 +8,14 @@
 import Tyr.Model.KittenTTS.Pretrained
 import Lean.Data.Json
 
+/-! # KittenTTS reference bridge
+
+Runs the Python reference implementation
+(`torch.kittentts.ReferenceBridgeConfig`) and parses its summary into
+`torch.kittentts.ReferenceSynthesisResult`, for comparing Tyr's output against
+upstream.
+-/
+
 namespace torch.kittentts
 
 open Lean

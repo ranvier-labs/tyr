@@ -8,6 +8,12 @@
 import Tyr.Model.Qwen35.VLConfigIO
 import Tyr.Model.Qwen36.Config
 
+/-! # Qwen3.6 config loading
+
+Thin wrappers that load Qwen3.6 text and multimodal configs from a file or
+pretrained directory.
+-/
+
 namespace torch.qwen36
 
 namespace Config

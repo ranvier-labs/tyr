@@ -18,3 +18,10 @@ import Tyr.Model.Qwen.Layer
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.Embedder
 import Tyr.Model.Qwen.Weights
+
+/-! # Qwen core
+
+Umbrella import for the shared Qwen3 transformer core in `torch.qwen`:
+configuration, RoPE, grouped-query attention, SwiGLU MLP, layers, the decoder
+model, the Flux text embedder and weight loading.
+-/

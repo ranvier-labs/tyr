@@ -6,6 +6,13 @@
 import Tyr.Basic
 import Tyr.Model.Qwen.Config
 
+/-! # Qwen3-ASR configuration
+
+`torch.qwen3asr.AudioEncoderConfig` and the text decoder config, mirroring the
+reference classes, plus the frame-length arithmetic after each convolution
+(`torch.qwen3asr.AudioEncoderConfig.framesAfterConv3`).
+-/
+
 namespace torch.qwen3asr
 
 /-- Qwen3-ASR audio encoder config. Mirrors `Qwen3ASRAudioEncoderConfig`. -/

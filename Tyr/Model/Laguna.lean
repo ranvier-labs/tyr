@@ -13,3 +13,10 @@ import Tyr.Model.Laguna.MoE
 import Tyr.Model.Laguna.Model
 import Tyr.Model.Laguna.Weights
 import Tyr.Model.Laguna.Pretrained
+
+/-! # Laguna
+
+Umbrella import for the poolside Laguna hybrid-attention MoE model in
+`torch.laguna`: configuration, dual RoPE tables, NVFP4 dequantization, the MoE
+block, model, weights and pretrained loading.
+-/

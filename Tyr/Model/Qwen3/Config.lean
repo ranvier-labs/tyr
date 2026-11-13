@@ -6,6 +6,12 @@
 -/
 import Tyr.Model.Qwen.Config
 
+/-! # Qwen3 configuration
+
+`torch.qwen3.Config` shares the core schema with `torch.qwen`;
+`torch.qwen3.Config.qwen3_4B` is the default preset.
+-/
+
 namespace torch.qwen3
 
 /-- Qwen3 causal-LM config (shared core schema with `torch.qwen`). -/

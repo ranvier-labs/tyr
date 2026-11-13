@@ -19,6 +19,12 @@
 import Tyr.GPU.Kernels.Prelude
 import Tyr.GPU.Kernels.Support
 
+/-! # Mixture-of-experts kernels
+
+ThunderKittens MoE pipeline: token dispatch, grouped expert GEMM, and the fused
+dispatch + GEMM surface `Tyr.GPU.Kernels.MOE.tkMoeDispatchGemm`.
+-/
+
 namespace Tyr.GPU.Kernels.MOE
 
 open Tyr.GPU

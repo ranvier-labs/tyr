@@ -7,6 +7,13 @@
 
 import Tyr.GPU.Kernels.Prelude
 
+/-! # Copy kernels
+
+Reference 64×64 FP32 tile copies: tile-based, direct coalesced and
+`float4`-vectorized variants (`Tyr.GPU.Kernels.copy64x64Direct`,
+`Tyr.GPU.Kernels.copy64x64Float4`).
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU
